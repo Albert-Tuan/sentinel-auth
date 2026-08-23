@@ -1,0 +1,187 @@
+@startuml class-diagram
+
+skinparam classAttributeIconSize 0
+skinparam stereotypeCBackgroundColor #EEE
+
+package "core-app (Sony)" {
+  class User {
+    +id : UUID
+    +username : String
+    +email : String
+    +passwordHash : String
+    +status : Enum {ACTIVE, LOCKED, DISABLED}
+    +createdAt : DateTime
+    +lockedUntil : DateTime?
+  }
+  class Role {
+    +id : UUID
+    +name : Enum {USER, SOC_ANALYST, SECURITY_ADMIN, SECURITY_MANAGER}
+  }
+  class UserRole {
+    +userId : UUID
+    +roleId : UUID
+  }
+  class TrustedDevice {
+    +id : UUID
+    +userId : UUID
+    +deviceFingerprint : String
+    +trustLevel : Enum
+    +addedAt : DateTime
+  }
+  class Session {
+    +id : UUID
+    +userId : UUID
+    +token : String
+    +sourceIp : String
+    +deviceId : String?
+    +createdAt : DateTime
+    +expiresAt : DateTime
+    +revokedAt : DateTime?
+  }
+  class MfaChallenge {
+    +id : UUID
+    +userId : UUID
+    +sessionId : UUID
+    +method : Enum {TOTP, SMS, PUSH}
+    +codeHash : String
+    +expiresAt : DateTime
+    +status : Enum {PENDING, PASS, FAIL}
+  }
+  class AuthPolicy {
+    +id : UUID
+    +name : String
+    +passwordMinLen : Int
+    +mfaRequired : Bool
+    +lockoutThreshold : Int
+    +sessionTtl : Int
+  }
+}
+
+package "detection-engine (Tuấn Anh)" {
+  class LoginEvent {
+    +id : UUID
+    +userId : UUID
+    +timestamp : DateTime
+    +success : Bool
+    +sourceIp : String
+    +deviceId : String?
+    +userAgent : String
+    +region : String?
+    +mfaUsed : Bool
+    +failureReason : String?
+  }
+  class Rule {
+    +id : UUID
+    +code : String {RULE-001..006}
+    +name : String
+    +description : String
+    +weight : Decimal
+    +threshold : Decimal
+    +enabled : Bool
+  }
+  class RuleHit {
+    +id : UUID
+    +loginEventId : UUID
+    +ruleId : UUID
+    +ruleScore : Decimal
+    +hitAt : DateTime
+  }
+  class RiskScore {
+    +id : UUID
+    +loginEventId : UUID
+    +ruleScore : Decimal
+    +anomalyScore : Decimal
+    +totalRiskScore : Decimal
+    +riskLevel : Enum {LOW, MEDIUM, HIGH, CRITICAL}
+    +computedAt : DateTime
+  }
+  class Alert {
+    +id : UUID
+    +loginEventId : UUID
+    +riskScoreId : UUID
+    +level : Enum
+    +status : Enum {NEW, ACK, INVESTIGATING, RESOLVED, CLOSED}
+    +assignedTo : UUID?
+    +createdAt : DateTime
+  }
+  class Incident {
+    +id : UUID
+    +alertId : UUID
+    +status : Enum {OPEN, IN_PROGRESS, RESOLVED, CLOSED}
+    +classification : Enum {TRUE_POSITIVE, FALSE_POSITIVE, NEEDS_WATCH}
+    +notes : String
+    +closedAt : DateTime?
+  }
+  class AuditLog {
+    +id : UUID
+    +actorId : UUID
+    +action : String
+    +resource : String
+    +beforeState : JSON
+    +afterState : JSON
+    +timestamp : DateTime
+  }
+  class TrustedList {
+    +id : UUID
+    +type : Enum {IP, DEVICE, USER}
+    +value : String
+    +mode : Enum {TRUST, BLOCK}
+    +note : String
+  }
+}
+
+package "ml-service (Khang)" {
+  class FeatureVector {
+    +id : UUID
+    +userId : UUID
+    +hourOfDay : Int
+    +failCountWindow : Int
+    +ipChangeRate : Decimal
+    +newDeviceFlag : Bool
+    +avgTimeBetweenLogins : Decimal
+    +deviationScore : Decimal
+  }
+  class AnomalyScore {
+    +id : UUID
+    +loginEventId : UUID
+    +rawScore : Decimal
+    +normalizedScore : Decimal
+    +isAnomaly : Bool
+    +modelVersion : String
+    +modelType : String
+    +reasonCodes : List<String>
+  }
+  class ModelVersion {
+    +id : UUID
+    +version : String
+    +trainedAt : DateTime
+    +metricsJson : JSON
+    +status : Enum {ACTIVE, RETIRED, CANDIDATE}
+  }
+}
+
+UserRole }o--|| User
+UserRole }o--|| Role
+
+User ||--o{ TrustedDevice : has
+User ||--o{ Session : has
+User ||--o{ MfaChallenge : receives
+
+User ||--o{ LoginEvent : "performs"
+
+LoginEvent ||--o{ RuleHit : triggers
+Rule ||--o{ RuleHit : "matched by"
+
+LoginEvent ||--|| RiskScore : scored by
+LoginEvent ||--|| AnomalyScore : scored by
+FeatureVector }o--|| AnomalyScore : feeds
+ModelVersion ||--o{ AnomalyScore : produced by
+
+RiskScore ||--|| Alert : generates
+Alert ||--|| Incident : escalated to
+
+User ||--o{ AuditLog : performs
+
+TrustedList .. User : "applies to"
+
+@enduml

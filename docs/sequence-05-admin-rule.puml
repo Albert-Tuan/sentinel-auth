@@ -1,0 +1,13 @@
+@startuml st05-admin-config-rule
+actor "Security Admin" as ADM
+participant "Admin UI" as UI
+participant "RuleService" as RS
+participant "AuditLog" as AUD
+
+ADM -> UI : Chỉnh sửa Rule-001 threshold
+UI -> RS : PUT /rules/{id} {newThreshold}
+RS -> RS : validate (weight in [0,1])
+RS -> AUD : write(action="rule.update", before, after)
+RS --> UI : 200 OK
+UI --> ADM : Cau hinh da luu, ap dung cho event moi
+@enduml

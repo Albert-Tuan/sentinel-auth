@@ -1,0 +1,22 @@
+@startuml st03-login-critical-alert
+actor User
+participant "AuthController" as AC
+participant "RuleEngine" as RE
+participant "MLService" as ML
+participant "RiskEngine" as RK
+participant "AlertEngine" as AE
+participant "Notification\nChannel" as NC
+actor "SOC Analyst" as SOC
+
+User -> AC : POST /login
+AC -> RE : evaluate
+RE --> AC : ruleScore = 0.9
+AC -> ML : evaluate
+ML --> AC : anomalyScore = 0.85
+AC -> RK : compute
+RK --> AC : riskLevel = CRITICAL
+AC -> AE : createAlert(event, riskScore)
+AE -> NC : sendNotification
+NC --> SOC : Email / Telegram
+AC --> User : 401 Đăng nhập bị từ chối
+@enduml
