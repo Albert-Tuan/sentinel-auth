@@ -1,0 +1,60 @@
+@startuml use-case-manager
+hide stereotype
+skinparam actorStyle awesome
+left to right direction
+
+title **Sơ đồ Use-case — Quản lý an toàn thông tin\n(Security Manager)**
+
+' ====== ACTOR ======
+actor "Security Manager" as SM
+
+' ====== AUTO ACTORS ======
+actor "Alert Engine" as AL
+actor "SOC Dashboard" as DASH
+
+' ====== USE CASES ======
+
+note right of SM
+  Security Manager có quyền CHỈ ĐỌC
+  và xuất báo cáo, không thao tác
+  trực tiếp lên rule, model,
+  hay xử lý chi tiết từng sự cố.
+end note
+
+' UC-20 Dashboard Manager
+:UC-20 Dashboard tổng hợp Manager: as UC20
+note right of UC20
+  Mã: UC-20
+  Mô tả: Xem số liệu tổng hợp:
+  • Tổng login event / ngày
+  • Alert theo mức rủi ro
+  • Xu hướng (line chart ngày)
+  • Tỉ lệ TP/FP (pie chart)
+  Không drill-down vào chi tiết
+  user; dùng UC-21 để xuất.
+end note
+
+' UC-21 Xuất báo cáo
+:UC-21 Xem / xuất báo cáo: as UC21
+note right of UC21
+  Mã: UC-21
+  Mô tả: Xuất báo cáo theo
+  khoảng thời gian (ngày/tuần/
+  tháng/quý), định dạng
+  PDF / Excel / CSV.
+  Header chuẩn: tên tổ chức,
+  ngày xuất, người xuất.
+  Dữ liệu chỉ aggregate,
+  không chứa PII cá nhân.
+  Link tải hết hạn sau 24h.
+end note
+
+' ====== QUAN HỆ ======
+SM --> UC20
+SM --> UC21
+
+' Dashboard Manager phụ thuộc vào dữ liệu từ Alert Engine
+UC20 ..> AL : <<include>>
+UC20 ..> DASH : <<include>>
+
+@enduml

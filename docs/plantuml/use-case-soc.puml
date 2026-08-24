@@ -1,0 +1,120 @@
+@startuml use-case-soc
+hide stereotype
+skinparam actorStyle awesome
+left to right direction
+
+title **Sơ đồ Use-case — Chuyên viên giám sát an toàn thông tin\n(SOC Analyst / Security Analyst)**
+
+' ====== ACTOR ======
+actor "SOC Analyst" as SOC
+
+' ====== AUTO ACTORS ======
+actor "Alert Engine" as AL
+actor "Rule Engine" as RE
+actor "ML Engine" as ML
+
+' ====== USE CASES ======
+
+' UC-06 Dashboard real-time
+:UC-06 Dashboard real-time: as UC06
+note right of UC06
+  Mã: UC-06
+  Mô tả: Xem dashboard tổng quan
+  login event (24h gần nhất),
+  tỉ lệ success/fail, top user
+  rủi ro cao, top IP đáng ngờ.
+  Refresh mỗi 30s / WebSocket.
+end note
+
+' UC-07 Tìm kiếm / lọc
+:UC-07 Tìm kiếm & lọc event: as UC07
+note right of UC07
+  Mã: UC-07
+  Mô tả: Tìm kiếm đa chiều
+  (user, IP, thời gian,
+  risk level, country, …).
+  Index trên: userId, sourceIp,
+  timestamp, riskLevel.
+end note
+
+' UC-08 Chi tiết risk score
+:UC-08 Xem chi tiết Risk Score: as UC08
+note right of UC08
+  Mã: UC-08
+  Mô tả: Xem Rule Score
+  (từng rule hit + weight),
+  Anomaly Score (Isolation Forest),
+  Total Risk Score, reason codes.
+  Giải thích = top-K feature
+  permutation importance.
+end note
+
+' UC-09 Tiếp nhận alert
+:UC-09 Tiếp nhận & chuyển trạng thái: as UC09
+note right of UC09
+  Mã: UC-09
+  Mô tả: Mở chi tiết alert,
+  xem login history & context,
+  chuyển NEW→ACK→INVESTIGATING,
+  ghi chú xử lý.
+  Ghi AuditLog mỗi lần
+  chuyển trạng thái.
+end note
+
+' UC-10 Phân loại alert
+:UC-10 Phân loại alert (TP/FP): as UC10
+note right of UC10
+  Mã: UC-10
+  Mô tả: Phân loại alert:
+  TRUE_POSITIVE, FALSE_POSITIVE,
+  NEEDS_WATCH. Ghi chú bắt buộc
+  (≥ 10 ký tự). Kết quả
+  gửi về ML pipeline để
+  cải thiện training set.
+end note
+
+' UC-11 Hành động bảo vệ
+:UC-11 Áp dụng hành động bảo vệ: as UC11
+note right of UC11
+  Mã: UC-11
+  Mô tả: Yêu cầu MFA lại,
+  thu hồi session, giới hạn
+  đăng nhập, khóa tạm thời.
+  Mỗi action có lý do bắt buộc.
+  Nếu không đủ quyền →
+  đề xuất Admin.
+  <<extend>> UC-09
+end note
+
+' UC-12 Đóng incident
+:UC-12 Đóng incident: as UC12
+note right of UC12
+  Mã: UC-12
+  Mô tả: Đóng incident sau khi
+  điều tra xong, alert đã
+  phân loại (UC-10), action
+  bảo vệ đã áp dụng (UC-11).
+  Tự động đóng sau 30 ngày
+  không hoạt động.
+end note
+
+' ====== QUAN HỆ ======
+SOC --> UC06
+SOC --> UC07
+SOC --> UC08
+SOC --> UC09
+SOC --> UC10
+SOC --> UC11
+SOC --> UC12
+
+' Flow: UC-09 → UC-10 → UC-11 → UC-12
+UC09 ..> UC10 : <<include>>\n(phân loại)
+UC10 ..> UC11 : <<include>>\n(TP thì hành động)
+UC11 ..> UC09 : <<extend>>
+
+' Alert engine cung cấp dữ liệu cho các UC SOC
+UC06 ..> AL : <<include>>
+UC08 ..> RE : <<include>>
+UC08 ..> ML : <<include>>
+
+@enduml
