@@ -1,0 +1,103 @@
+@startuml sentinel-auth-ml-service-domain
+skinparam classAttributeIconSize 0
+left to right direction
+
+package "ml-service (owner: ml_service)" {
+  class FeatureSchema {
+    +id: UUID
+    +version: Int <<unique>>
+    +digest: SHA256 <<unique>>
+    +status: ACTIVE | DEPRECATED | RETIRED
+  }
+  class FeatureDefinition {
+    +featureSchemaId: UUID
+    +name: String
+    +position: Int <<unique per schema>>
+    +dataType: INTEGER | NUMBER | BOOLEAN
+    +bounds: JSON
+    +sensitivity: NONE
+  }
+  class TrainingDatasetManifest {
+    +id: UUID
+    +digest: SHA256 <<unique>>
+    +sourceType: SYNTHETIC | CURATED
+    +generatorVersion: String?
+    +sampleCount: Long
+    +containsRawSecurityData: Bool = false
+  }
+  class ModelArtifact {
+    +digest: SHA256
+    +objectKey: String
+    +mediaType: String
+    +sizeBytes: Long
+    +createdAt: DateTime
+  }
+  class ModelVersion {
+    +id: UUID
+    +version: String <<unique>>
+    +status: CANDIDATE | ACTIVE | RETIRED
+    +metrics: JSON <<immutable>>
+    +createdAt: DateTime
+  }
+  class CalibrationProfile {
+    +id: UUID
+    +method: PERCENTILE_LINEAR_V1
+    +lowerBound: Decimal
+    +upperBound: Decimal
+    +anomalyThreshold: Decimal
+  }
+  class ModelPromotion {
+    +id: UUID
+    +decision: APPROVED | REJECTED
+    +approvedBy: UUID? <<logical User ref>>
+    +reviewRef: UUID?
+    +occurredAt: DateTime
+  }
+  class InferenceRecord {
+    +id: UUID
+    +inputDigest: SHA256
+    +correlationId: UUID
+    +status: SCORED | FAILED
+    +anomalyScore: Decimal?
+    +reasonCodes: JSON
+    +latencyMs: Int
+    +occurredAt: DateTime
+  }
+}
+
+class "FeatureVector v1\n(detection-engine)" as feature_vector <<external contract>> {
+  +featureSchemaVersion: Int
+  +ordered derived values only
+}
+class "RiskAssessment\n(detection-engine)" as assessment <<external reference>> {
+  +inferenceId: UUID?
+  +modelVersion: String?
+}
+
+FeatureSchema "1" *-- "1..*" FeatureDefinition : ordered contract
+FeatureSchema "1" -- "*" TrainingDatasetManifest : compatible training data
+FeatureSchema "1" -- "*" ModelVersion : model input contract
+TrainingDatasetManifest "1" -- "*" ModelVersion : trained from
+ModelArtifact "1" -- "1" ModelVersion : immutable artifact
+ModelVersion "1" *-- "1" CalibrationProfile : normalizes raw score
+ModelVersion "1" -- "*" ModelPromotion : reviewed lifecycle
+ModelVersion "1" -- "*" InferenceRecord : scored by
+feature_vector ..> FeatureSchema : exact version + order
+assessment ..> InferenceRecord : inference_id, no DB FK
+
+note bottom of ModelPromotion
+Only an APPROVED candidate can be ACTIVE.
+Exactly one model is active per supported feature schema.
+end note
+
+note right of InferenceRecord
+Input digest is SHA-256 of the canonical vector.
+No raw IP, device ID, password, OTP or token is retained.
+Reason codes are heuristic signals, not causal explanations.
+end note
+
+legend right
+Solid line: relationship owned by ml_service.
+Dashed line: versioned HTTP/UUID reference across service ownership; no cross-database FK.
+endlegend
+@enduml

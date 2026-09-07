@@ -1,0 +1,101 @@
+@startuml sentinel-auth-ml-service-erd
+hide circle
+skinparam linetype ortho
+
+entity "ml_service.feature_schemas" as feature_schemas {
+  * id : uuid <<PK>>
+  --
+  version : int <<UQ>>
+  digest : text <<UQ, SHA-256>>
+  status : text
+  created_at : timestamptz
+}
+entity "ml_service.feature_definitions" as feature_definitions {
+  * feature_schema_id : uuid <<FK>>
+  * name : text
+  --
+  position : int <<UQ per schema>>
+  data_type : text
+  bounds : jsonb
+  sensitivity : text <<NONE>>
+}
+entity "ml_service.training_dataset_manifests" as datasets {
+  * id : uuid <<PK>>
+  --
+  feature_schema_id : uuid <<FK>>
+  digest : text <<UQ, SHA-256>>
+  source_type : text
+  generator_version : text
+  sample_count : bigint
+  contains_raw_security_data : bool <<false>>
+  created_at : timestamptz
+}
+entity "ml_service.model_artifacts" as artifacts {
+  * digest : text <<PK, SHA-256>>
+  --
+  object_key : text
+  media_type : text
+  size_bytes : bigint
+  created_at : timestamptz
+}
+entity "ml_service.model_versions" as models {
+  * id : uuid <<PK>>
+  --
+  version : text <<UQ>>
+  feature_schema_id : uuid <<FK>>
+  training_dataset_manifest_id : uuid <<FK>>
+  artifact_digest : text <<FK>>
+  status : text
+  metrics : jsonb <<immutable>>
+  created_at : timestamptz
+}
+entity "ml_service.calibration_profiles" as calibrations {
+  * id : uuid <<PK>>
+  --
+  model_version_id : uuid <<FK, UQ>>
+  method : text
+  lower_bound : numeric
+  upper_bound : numeric
+  anomaly_threshold : numeric
+}
+entity "ml_service.model_promotions" as promotions {
+  * id : uuid <<PK>>
+  --
+  model_version_id : uuid <<FK>>
+  decision : text
+  approved_by : uuid <<logical User ref>>
+  review_ref : uuid
+  occurred_at : timestamptz
+}
+entity "ml_service.inference_records" as inferences {
+  * id : uuid <<PK>>
+  --
+  model_version_id : uuid <<FK>>
+  input_digest : text <<SHA-256, no raw features>>
+  correlation_id : uuid
+  status : text
+  anomaly_score : numeric
+  reason_codes : jsonb
+  latency_ms : int
+  occurred_at : timestamptz
+}
+
+feature_schemas ||--o{ feature_definitions
+feature_schemas ||--o{ datasets
+feature_schemas ||--o{ models
+datasets ||--o{ models
+artifacts ||--|| models
+models ||--|| calibrations
+models ||--o{ promotions
+models ||--o{ inferences
+
+note bottom of models
+Partial unique index: one ACTIVE model for each feature_schema_id.
+Application rule: the latest approval must be APPROVED before activation.
+end note
+
+note bottom of inferences
+Retention is configured independently of raw login-event retention.
+The source login attempt/inference response is correlated by UUID outside this DB.
+end note
+@enduml

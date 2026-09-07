@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sentinel-auth.local/schemas/security.action-requested.v1.json",
+  "title": "security.action-requested.v1 payload",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["request_id", "user_id", "action", "evidence_ref", "expires_at"],
+  "properties": {
+    "request_id": {"type": "string", "format": "uuid"},
+    "user_id": {"type": "string", "format": "uuid"},
+    "action": {"type": "string", "enum": ["REQUIRE_MFA", "REVOKE_SESSIONS", "LOCK_USER", "RATE_LIMIT_IP"]},
+    "evidence_ref": {"type": "string", "format": "uuid"},
+    "reason": {"type": "string", "minLength": 10, "maxLength": 1000},
+    "expires_at": {"type": "string", "format": "date-time"},
+    "approval_ref": {"type": ["string", "null"], "format": "uuid"}
+  }
+}

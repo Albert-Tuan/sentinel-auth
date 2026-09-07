@@ -1,91 +1,26 @@
 @startuml use-case-tong-quat
-hide stereotype
-skinparam actorStyle awesome
 left to right direction
-
-' ====== ACTOR ======
-actor "User\n(Nhân viên)" as U
+skinparam actorStyle awesome
+actor User
 actor "SOC Analyst" as SOC
-actor "Security Admin" as SA
-actor "Security Manager" as SM
-actor "Rule Engine" as RE
-actor "ML Engine" as ML
-actor "Risk Engine" as RSK
-actor "Alert Engine" as AL
-actor "Email/\nTelegram" as EXT
-
-' ====== USE CASES - USER ======
-:UC-01 Đăng nhập: as UC01
-:UC-02 Thực hiện MFA: as UC02
-:UC-03 Xem phiên đăng nhập: as UC03
-:UC-04 Xác nhận đăng nhập: as UC04
-:UC-05 Quản lý thiết bị tin cậy: as UC05
-
-' ====== USE CASES - SOC ======
-:UC-06 Dashboard real-time: as UC06
-:UC-07 Tìm kiếm/lọc event: as UC07
-:UC-08 Xem chi tiết risk score: as UC08
-:UC-09 Tiếp nhận & chuyển trạng thái alert: as UC09
-:UC-10 Phân loại alert (TP/FP): as UC10
-:UC-11 Áp dụng hành động bảo vệ: as UC11
-:UC-12 Đóng incident: as UC12
-
-' ====== USE CASES - ADMIN ======
-:UC-13 Quản lý tài khoản & vai trò: as UC13
-:UC-14 Cấu hình chính sách xác thực: as UC14
-:UC-15 Quản lý Rule & threshold: as UC15
-:UC-16 Cấu hình kênh cảnh báo: as UC16
-:UC-17 Quản lý danh sách tin cậy/chặn: as UC17
-:UC-18 Xem Audit Log: as UC18
-:UC-19 Cấu hình tham số vận hành: as UC19
-
-' ====== USE CASES - MANAGER ======
-:UC-20 Dashboard tổng hợp Manager: as UC20
-:UC-21 Xem / xuất báo cáo: as UC21
-
-' ====== USE CASES - AUTO ======
-:UC-22 Rule Engine tính Rule Score: as UC22
-:UC-23 ML Engine tính Anomaly Score: as UC23
-:UC-24 Risk Engine tổng hợp: as UC24
-:UC-25 Alert Engine tạo alert/incident: as UC25
-:UC-26 Alert Engine gửi thông báo: as UC26
-
-' ====== QUAN HỆ INCLUDE/EXTEND ======
-UC01 ..> UC22 : <<include>>
-UC01 ..> UC23 : <<include>>
-UC22 ..> UC24 : <<include>>
-UC23 ..> UC24 : <<include>>
-UC24 ..> UC25 : <<include>> (vượt ngưỡng)
-UC02 ..> UC01 : <<extend>>
-UC11 ..> UC09 : <<extend>>
-
-' ====== GẮN ACTOR ======
-U --> UC01
-U --> UC02
-U --> UC03
-U --> UC04
-U --> UC05
-SOC --> UC06
-SOC --> UC07
-SOC --> UC08
-SOC --> UC09
-SOC --> UC10
-SOC --> UC11
-SOC --> UC12
-SA --> UC13
-SA --> UC14
-SA --> UC15
-SA --> UC16
-SA --> UC17
-SA --> UC18
-SA --> UC19
-SM --> UC20
-SM --> UC21
-RE --> UC22
-ML --> UC23
-RSK --> UC24
-AL --> UC25
-AL --> UC26
-EXT <-- UC26
-
+actor "Security Admin" as Admin
+actor "Security Manager" as Manager
+actor "Email / Telegram" as Channel
+rectangle "Sentinel Auth" {
+  usecase "Authenticate\nUC-01, UC-02" as auth
+  usecase "Self-service security\nUC-03..05" as self
+  usecase "SOC investigation\nUC-06..12" as soc
+  usecase "Security administration\nUC-13..19" as admin
+  usecase "Management reporting\nUC-20..21" as manager
+  usecase "Asynchronous assessment\nUC-22..25" as assess
+  usecase "Notification\nUC-26" as notify
+}
+User --> auth
+User --> self
+SOC --> soc
+Admin --> admin
+Manager --> manager
+Channel --> notify
+auth ..> assess : login event published after decision
+assess ..> notify : <<extend>>\n[alert channel configured]
 @enduml

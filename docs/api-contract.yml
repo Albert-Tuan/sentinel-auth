@@ -1,0 +1,395 @@
+openapi: 3.1.0
+info:
+  title: Sentinel Auth contracts
+  version: 1.0.0
+  description: |
+    Cross-module HTTP contract. Asynchronous login attempts use the JSON schemas
+    in docs/events. Internal endpoints require workload identity and are not browser endpoints.
+servers:
+  - url: http://localhost:8001
+    description: core-app local endpoint
+  - url: http://localhost:8002
+    description: detection-engine local endpoint
+  - url: http://localhost:8003
+    description: ml-service local endpoint
+tags:
+  - name: operations
+  - name: auth
+  - name: enforcement
+  - name: soc
+  - name: ml
+paths:
+  /health:
+    get:
+      tags: [operations]
+      summary: Process health; readiness checks must additionally validate owned dependencies.
+      responses:
+        '200':
+          description: Process is healthy.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Health'
+  /ready:
+    get:
+      tags: [operations]
+      summary: ml-service readiness; a verified ACTIVE model must be loaded.
+      description: Private ML workload endpoint. A degraded process can remain live while readiness is 503.
+      responses:
+        '200':
+          description: An approved model artifact was verified and loaded.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MlReadiness'
+        '503':
+          $ref: '#/components/responses/Problem'
+  /api/v1/auth/login:
+    post:
+      tags: [auth]
+      summary: Start the synchronous authentication path in core-app.
+      parameters:
+        - $ref: '#/components/parameters/CorrelationId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LoginRequest'
+      responses:
+        '200':
+          description: Authentication result. Browser clients must not infer account existence from errors.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LoginDecision'
+        '400':
+          $ref: '#/components/responses/Problem'
+        '401':
+          $ref: '#/components/responses/Problem'
+        '429':
+          $ref: '#/components/responses/Problem'
+  /api/v1/auth/mfa/verify:
+    post:
+      tags: [auth]
+      summary: Complete an MFA challenge bound to a pre-auth transaction.
+      parameters:
+        - $ref: '#/components/parameters/CorrelationId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/MfaVerification'
+      responses:
+        '200':
+          description: MFA passed and a session was created.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SessionIssued'
+        '400':
+          $ref: '#/components/responses/Problem'
+        '401':
+          $ref: '#/components/responses/Problem'
+        '429':
+          $ref: '#/components/responses/Problem'
+  /internal/v1/actions:
+    post:
+      tags: [enforcement]
+      summary: Submit a detection action request to core-app; core-app validates before enforcement.
+      security:
+        - WorkloadBearer: [core.enforce]
+      parameters:
+        - $ref: '#/components/parameters/CorrelationId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ActionRequest'
+      responses:
+        '202':
+          description: Request accepted for policy evaluation or enforcement.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ActionResult'
+        '401':
+          $ref: '#/components/responses/Problem'
+        '403':
+          $ref: '#/components/responses/Problem'
+        '409':
+          $ref: '#/components/responses/Problem'
+  /api/v1/alerts:
+    get:
+      tags: [soc]
+      summary: Query alerts owned by detection-engine.
+      security:
+        - UserBearer: [alerts.read]
+      parameters:
+        - $ref: '#/components/parameters/CorrelationId'
+        - name: cursor
+          in: query
+          schema: {type: string}
+        - name: status
+          in: query
+          schema: {$ref: '#/components/schemas/AlertStatus'}
+      responses:
+        '200':
+          description: Cursor-paginated alert page.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AlertPage'
+        '401':
+          $ref: '#/components/responses/Problem'
+        '403':
+          $ref: '#/components/responses/Problem'
+  /api/v1/alerts/{alert_id}:
+    patch:
+      tags: [soc]
+      summary: Apply a validated state transition with optimistic locking.
+      security:
+        - UserBearer: [alerts.write]
+      parameters:
+        - $ref: '#/components/parameters/CorrelationId'
+        - name: alert_id
+          in: path
+          required: true
+          schema: {type: string, format: uuid}
+        - name: If-Match
+          in: header
+          required: true
+          schema: {type: integer, minimum: 0}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AlertTransition'
+      responses:
+        '200':
+          description: Updated alert.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Alert'
+        '409':
+          $ref: '#/components/responses/Problem'
+        '422':
+          $ref: '#/components/responses/Problem'
+  /internal/v1/ml/score:
+    post:
+      tags: [ml]
+      summary: Score a versioned feature vector using the verified ACTIVE model in ml-service.
+      description: |
+        A 200 response is always SCORED. If no verified model is available, the
+        endpoint returns a 503 Problem response; detection-engine records that
+        condition as a DEGRADED risk assessment with anomaly_score=null.
+      security:
+        - WorkloadBearer: [ml.score]
+      parameters:
+        - $ref: '#/components/parameters/CorrelationId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ScoreRequest'
+      responses:
+        '200':
+          description: Versioned, calibrated model score and non-causal heuristic reason codes.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ScoreResponse'
+        '401':
+          $ref: '#/components/responses/Problem'
+        '422':
+          $ref: '#/components/responses/Problem'
+        '503':
+          $ref: '#/components/responses/Problem'
+components:
+  securitySchemes:
+    UserBearer:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: Browser token with issuer, audience, subject, expiry and scopes validated.
+    WorkloadBearer:
+      type: oauth2
+      flows:
+        clientCredentials:
+          tokenUrl: https://identity.example.internal/oauth/token
+          scopes:
+            core.enforce: Submit scoped enforcement requests to core-app.
+            ml.score: Request ML scoring.
+  parameters:
+    CorrelationId:
+      name: X-Correlation-ID
+      in: header
+      required: true
+      schema: {type: string, format: uuid}
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: true
+      schema: {type: string, minLength: 16, maxLength: 128}
+  responses:
+    Problem:
+      description: RFC 9457 problem response.
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+  schemas:
+    Health:
+      type: object
+      required: [status, service]
+      properties:
+        status: {type: string, enum: [ok, degraded]}
+        service: {type: string}
+    MlReadiness:
+      type: object
+      additionalProperties: false
+      required: [status, service, model_loaded]
+      properties:
+        status: {type: string, const: ok}
+        service: {type: string, const: ml-service}
+        model_loaded: {type: boolean, const: true}
+    LoginRequest:
+      type: object
+      additionalProperties: false
+      required: [username, password]
+      properties:
+        username: {type: string, minLength: 1, maxLength: 254}
+        password: {type: string, minLength: 1, writeOnly: true}
+        device_fingerprint: {type: string, maxLength: 512}
+    LoginDecision:
+      oneOf:
+        - $ref: '#/components/schemas/SessionIssued'
+        - $ref: '#/components/schemas/MfaRequired'
+        - $ref: '#/components/schemas/Denied'
+    SessionIssued:
+      type: object
+      additionalProperties: false
+      required: [decision, access_token, refresh_token, token_type, expires_in]
+      properties:
+        decision: {type: string, const: ALLOW}
+        access_token: {type: string, writeOnly: true}
+        refresh_token: {type: string, writeOnly: true}
+        token_type: {type: string, const: Bearer}
+        expires_in: {type: integer, minimum: 1}
+    MfaRequired:
+      type: object
+      additionalProperties: false
+      required: [decision, pre_auth_token, expires_in]
+      properties:
+        decision: {type: string, const: MFA_REQUIRED}
+        pre_auth_token: {type: string, writeOnly: true}
+        expires_in: {type: integer, maximum: 300}
+    Denied:
+      type: object
+      additionalProperties: false
+      required: [decision, message]
+      properties:
+        decision: {type: string, const: DENY}
+        message: {type: string, const: Authentication could not be completed.}
+    MfaVerification:
+      type: object
+      additionalProperties: false
+      required: [pre_auth_token, challenge_response]
+      properties:
+        pre_auth_token: {type: string, writeOnly: true}
+        challenge_response: {type: string, writeOnly: true, minLength: 1, maxLength: 2048}
+    ActionRequest:
+      type: object
+      additionalProperties: false
+      required: [request_id, user_id, action, evidence_ref, expires_at]
+      properties:
+        request_id: {type: string, format: uuid}
+        user_id: {type: string, format: uuid}
+        action: {type: string, enum: [REQUIRE_MFA, REVOKE_SESSIONS, LOCK_USER, RATE_LIMIT_IP]}
+        evidence_ref: {type: string, format: uuid}
+        reason: {type: string, minLength: 10, maxLength: 1000}
+        expires_at: {type: string, format: date-time}
+        approval_ref: {type: string, format: uuid}
+    ActionResult:
+      type: object
+      required: [request_id, status]
+      properties:
+        request_id: {type: string, format: uuid}
+        status: {type: string, enum: [APPLIED, PENDING_APPROVAL, REJECTED, DUPLICATE]}
+    AlertStatus:
+      type: string
+      enum: [NEW, ACKNOWLEDGED, INVESTIGATING, RESOLVED, CLOSED]
+    AlertTransition:
+      type: object
+      additionalProperties: false
+      required: [to_status, note]
+      properties:
+        to_status: {$ref: '#/components/schemas/AlertStatus'}
+        note: {type: string, minLength: 10, maxLength: 4000}
+    Alert:
+      type: object
+      required: [id, login_attempt_id, risk_level, status, version, created_at]
+      properties:
+        id: {type: string, format: uuid}
+        login_attempt_id: {type: string, format: uuid}
+        risk_level: {type: string, enum: [LOW, MEDIUM, HIGH, CRITICAL, DEGRADED]}
+        status: {$ref: '#/components/schemas/AlertStatus'}
+        version: {type: integer, minimum: 0}
+        created_at: {type: string, format: date-time}
+    AlertPage:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items: {$ref: '#/components/schemas/Alert'}
+        next_cursor: {type: [string, 'null']}
+    ScoreRequest:
+      type: object
+      additionalProperties: false
+      required: [login_attempt_id, feature_schema_version, features]
+      properties:
+        login_attempt_id: {type: string, format: uuid}
+        feature_schema_version: {type: integer, const: 1}
+        features:
+          type: object
+          additionalProperties: false
+          required: [hour_of_day, fail_count_24h, ip_change_rate_7d, new_device, average_login_interval_seconds, deviation_score]
+          properties:
+            hour_of_day: {type: integer, minimum: 0, maximum: 23}
+            fail_count_24h: {type: integer, minimum: 0}
+            ip_change_rate_7d: {type: number, minimum: 0, maximum: 1}
+            new_device: {type: boolean}
+            average_login_interval_seconds: {type: number, minimum: 0}
+            deviation_score: {type: number, minimum: 0, maximum: 1}
+    ScoreResponse:
+      type: object
+      additionalProperties: false
+      required: [inference_id, login_attempt_id, status, feature_schema_version, anomaly_score, is_anomaly, model_version, model_artifact_digest, reason_codes]
+      properties:
+        inference_id: {type: string, format: uuid}
+        login_attempt_id: {type: string, format: uuid}
+        status: {type: string, const: SCORED}
+        feature_schema_version: {type: integer, const: 1}
+        anomaly_score: {type: number, minimum: 0, maximum: 1}
+        is_anomaly: {type: boolean}
+        model_version: {type: string}
+        model_artifact_digest: {type: string, pattern: '^[a-f0-9]{64}$'}
+        reason_codes:
+          type: array
+          items: {type: string}
+    Problem:
+      type: object
+      required: [type, title, status]
+      properties:
+        type: {type: string, format: uri-reference}
+        title: {type: string}
+        status: {type: integer}
+        detail: {type: string}
+        instance: {type: string, format: uri-reference}
