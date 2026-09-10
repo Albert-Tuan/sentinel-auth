@@ -1,90 +1,72 @@
-@startuml use-case-tong-quat
+@startuml sentinel-auth-use-cases
 left to right direction
 skinparam actorStyle awesome
 
-actor "User\n(Nhân viên)" as U
-actor "SOC Analyst" as SOC
-actor "Security Admin" as ADM
-actor "Security Manager" as MGR
+actor "User" as user
+actor "SOC Analyst" as soc
+actor "Security Admin" as admin
+actor "Security Manager" as manager
+actor "Email / Telegram" as notification
 
-actor "Rule Engine\n(auto)" as RE
-actor "ML Engine\n(auto)" as ML
-actor "Risk Engine\n(auto)" as RISK
-actor "Alert Engine\n(auto)" as AE
-actor "Email/Telegram" as NOTI
-
-rectangle "Hệ thống giám sát đăng nhập bất thường" {
-
-  usecase "UC-01\nĐăng nhập" as UC01
-  usecase "UC-02\nThực hiện MFA" as UC02
-  usecase "UC-03\nXem phiên gần đây" as UC03
-  usecase "UC-04\nXác nhận / báo cáo\nđăng nhập" as UC04
-  usecase "UC-05\nQuản lý thiết bị\ntin cậy" as UC05
-
-  usecase "UC-06\nTheo dõi dashboard\nlogin event" as UC06
-  usecase "UC-07\nTìm kiếm / lọc\nlogin event" as UC07
-  usecase "UC-08\nXem chi tiết\nrisk score" as UC08
-  usecase "UC-09\nTiếp nhận & chuyển\ntrạng thái cảnh báo" as UC09
-  usecase "UC-10\nPhân loại cảnh báo" as UC10
-  usecase "UC-11\nÁp dụng hành động\nbảo vệ" as UC11
-  usecase "UC-12\nĐóng incident" as UC12
-
-  usecase "UC-13\nQuản lý tài khoản\n& vai trò" as UC13
-  usecase "UC-14\nCấu hình chính sách\nxác thực" as UC14
-  usecase "UC-15\nQuản lý Rule\n& threshold" as UC15
-  usecase "UC-16\nCấu hình kênh\ncảnh báo" as UC16
-  usecase "UC-17\nQuản lý danh sách\ntin cậy / chặn" as UC17
-  usecase "UC-18\nXem Audit Log\nquản trị" as UC18
-  usecase "UC-19\nCấu hình tham số\nvận hành" as UC19
-
-  usecase "UC-20\nXem dashboard\ntổng hợp" as UC20
-  usecase "UC-21\nXem / xuất báo cáo" as UC21
-
-  usecase "UC-22\nTính Rule Score" as UC22
-  usecase "UC-23\nTính Anomaly Score" as UC23
-  usecase "UC-24\nTổng hợp Risk Score" as UC24
-  usecase "UC-25\nTạo Alert / Incident" as UC25
-  usecase "UC-26\nGửi thông báo\nEmail / Telegram" as UC26
+rectangle "Sentinel Auth" {
+  usecase "UC-01\nĐăng nhập" as uc01
+  usecase "UC-02\nThực hiện MFA" as uc02
+  usecase "UC-03\nQuản lý phiên" as uc03
+  usecase "UC-04\nXác nhận / báo cáo đăng nhập" as uc04
+  usecase "UC-05\nQuản lý thiết bị tin cậy" as uc05
+  usecase "UC-06\nTheo dõi dashboard" as uc06
+  usecase "UC-07\nTìm kiếm login attempt" as uc07
+  usecase "UC-08\nXem evidence rủi ro" as uc08
+  usecase "UC-09\nNhận và điều tra alert" as uc09
+  usecase "UC-10\nPhân loại incident" as uc10
+  usecase "UC-11\nYêu cầu hành động bảo vệ" as uc11
+  usecase "UC-12\nĐóng incident" as uc12
+  usecase "UC-13\nQuản lý tài khoản / role" as uc13
+  usecase "UC-14\nQuản lý version AuthPolicy" as uc14
+  usecase "UC-15\nQuản lý RuleSet version" as uc15
+  usecase "UC-16\nCấu hình kênh thông báo" as uc16
+  usecase "UC-17\nQuản lý trust / block list" as uc17
+  usecase "UC-18\nXem audit event" as uc18
+  usecase "UC-19\nQuản lý tham số vận hành" as uc19
+  usecase "UC-20\nXem dashboard tổng hợp" as uc20
+  usecase "UC-21\nXuất báo cáo aggregate" as uc21
+  usecase "UC-22\nĐánh giá Rule" as uc22
+  usecase "UC-23\nChấm điểm ML" as uc23
+  usecase "UC-24\nLưu risk assessment" as uc24
+  usecase "UC-25\nTạo alert" as uc25
+  usecase "UC-26\nGửi thông báo" as uc26
 }
 
-U --> UC01
-U --> UC02
-U --> UC03
-U --> UC04
-U --> UC05
+user --> uc01
+user --> uc02
+user --> uc03
+user --> uc04
+user --> uc05
+soc --> uc06
+soc --> uc07
+soc --> uc08
+soc --> uc09
+soc --> uc10
+soc --> uc11
+soc --> uc12
+admin --> uc13
+admin --> uc14
+admin --> uc15
+admin --> uc16
+admin --> uc17
+admin --> uc18
+admin --> uc19
+manager --> uc20
+manager --> uc21
+notification --> uc26
 
-SOC --> UC06
-SOC --> UC07
-SOC --> UC08
-SOC --> UC09
-SOC --> UC10
-SOC --> UC11
-SOC --> UC12
-
-ADM --> UC13
-ADM --> UC14
-ADM --> UC15
-ADM --> UC16
-ADM --> UC17
-ADM --> UC18
-ADM --> UC19
-
-MGR --> UC20
-MGR --> UC21
-
-RE --> UC22
-ML --> UC23
-RISK --> UC24
-AE --> UC25
-AE --> UC26
-NOTI --> UC26
-
-UC01 ..> UC22 : <<include>>
-UC01 ..> UC23 : <<include>>
-UC22 ..> UC24 : <<include>>
-UC23 ..> UC24 : <<include>>
-UC24 ..> UC25 : <<include>>\n(vượt ngưỡng)
-UC02 ..> UC01 : <<extend>>
-UC11 ..> UC09 : <<extend>>
-
+uc02 ..> uc01 : <<extend>>\n[MFA_REQUIRED]
+uc09 ..> uc08 : <<include>>
+uc10 ..> uc09 : <<extend>>
+uc11 ..> uc09 : <<extend>>
+uc12 ..> uc09 : <<extend>>
+uc22 ..> uc24 : <<include>>
+uc23 ..> uc24 : <<include>>
+uc25 ..> uc24 : <<extend>>\n[risk >= threshold]
+uc26 ..> uc25 : <<extend>>\n[channel configured]
 @enduml

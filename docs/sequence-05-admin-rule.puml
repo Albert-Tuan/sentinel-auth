@@ -1,13 +1,22 @@
-@startuml st05-admin-config-rule
-actor "Security Admin" as ADM
-participant "Admin UI" as UI
-participant "RuleService" as RS
-participant "AuditLog" as AUD
+@startuml st05-versioned-rule-change
+actor "Security Admin" as admin
+actor "Security Manager" as manager
+participant "Admin UI" as ui
+participant "detection-engine" as detection
+database "detection_engine" as db
 
-ADM -> UI : Chỉnh sửa Rule-001 threshold
-UI -> RS : PUT /rules/{id} {newThreshold}
-RS -> RS : validate (weight in [0,1])
-RS -> AUD : write(action="rule.update", before, after)
-RS --> UI : 200 OK
-UI --> ADM : Cau hinh da luu, ap dung cho event moi
+admin -> ui : propose RuleSet change
+ui -> detection : POST rule-set versions
+detection -> detection : validate rules, thresholds and effective_at
+detection -> db : save CANDIDATE version + audit event
+alt high-impact change requires approval
+  manager -> ui : approve candidate
+  ui -> detection : approve version
+end
+detection -> db : mark APPROVED version active at effective_at
+detection --> ui : immutable version id and rollback target
+note right of db
+Existing assessments retain their
+original rule-set version.
+end note
 @enduml

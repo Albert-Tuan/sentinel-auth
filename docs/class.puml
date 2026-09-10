@@ -1,187 +1,225 @@
-@startuml class-diagram
-
+@startuml sentinel-auth-domain-model
 skinparam classAttributeIconSize 0
-skinparam stereotypeCBackgroundColor #EEE
+hide circle
 
-package "core-app (Sony)" {
+package "core-app (owner: core_app)" {
   class User {
-    +id : UUID
-    +username : String
-    +email : String
-    +passwordHash : String
-    +status : Enum {ACTIVE, LOCKED, DISABLED}
-    +createdAt : DateTime
-    +lockedUntil : DateTime?
+    +id: UUID
+    +username: String
+    +email: String
+    +passwordHash: String
+    +status: ACTIVE | LOCKED | DISABLED
+    +tokenVersion: Int
   }
-  class Role {
-    +id : UUID
-    +name : Enum {USER, SOC_ANALYST, SECURITY_ADMIN, SECURITY_MANAGER}
+  class AuthPolicyVersion {
+    +id: UUID
+    +version: String
+    +mfaRequired: Bool
+    +lockoutPolicy: JSON
+    +effectiveAt: DateTime
   }
-  class UserRole {
-    +userId : UUID
-    +roleId : UUID
+  class LoginAttempt {
+    +id: UUID
+    +authPolicyVersionId: UUID
+    +occurredAt: DateTime
+    +outcome: ALLOW | MFA_REQUIRED | DENY
+    +sourceIp: INET
+    +deviceFingerprintHash: String?
+    +policyVersion: String
   }
-  class TrustedDevice {
-    +id : UUID
-    +userId : UUID
-    +deviceFingerprint : String
-    +trustLevel : Enum
-    +addedAt : DateTime
-  }
-  class Session {
-    +id : UUID
-    +userId : UUID
-    +token : String
-    +sourceIp : String
-    +deviceId : String?
-    +createdAt : DateTime
-    +expiresAt : DateTime
-    +revokedAt : DateTime?
+  class PreAuthTransaction {
+    +id: UUID
+    +expiresAt: DateTime
+    +status: PENDING | VERIFIED | EXPIRED | FAILED
+    +boundIpHash: String
   }
   class MfaChallenge {
-    +id : UUID
-    +userId : UUID
-    +sessionId : UUID
-    +method : Enum {TOTP, SMS, PUSH}
-    +codeHash : String
-    +expiresAt : DateTime
-    +status : Enum {PENDING, PASS, FAIL}
+    +id: UUID
+    +method: WEBAUTHN | TOTP | EMAIL_OTP
+    +challengeHash: String
+    +attemptCount: Int
+    +expiresAt: DateTime
   }
-  class AuthPolicy {
-    +id : UUID
-    +name : String
-    +passwordMinLen : Int
-    +mfaRequired : Bool
-    +lockoutThreshold : Int
-    +sessionTtl : Int
+  class Session {
+    +id: UUID
+    +accessJti: String
+    +refreshTokenHash: String
+    +expiresAt: DateTime
+    +revokedAt: DateTime?
+  }
+  class OutboxEvent {
+    +eventId: UUID
+    +eventType: String
+    +payloadChecksum: String
+    +publishedAt: DateTime?
+  }
+  class EnforcementAudit {
+    +id: UUID
+    +actionRequestId: UUID?
+    +subjectUserId: UUID
+    +policyVersion: String
+    +correlationId: UUID
+    +outcome: APPLIED | REJECTED | PENDING_APPROVAL
+    +occurredAt: DateTime
   }
 }
 
-package "detection-engine (Tuấn Anh)" {
-  class LoginEvent {
-    +id : UUID
-    +userId : UUID
-    +timestamp : DateTime
-    +success : Bool
-    +sourceIp : String
-    +deviceId : String?
-    +userAgent : String
-    +region : String?
-    +mfaUsed : Bool
-    +failureReason : String?
+package "detection-engine (owner: detection_engine)" {
+  class LoginAttemptProjection {
+    +id: UUID
+    +eventId: UUID <<unique>>
+    +occurredAt: DateTime
+    +outcome: String
+    +sourceIp: INET
   }
-  class Rule {
-    +id : UUID
-    +code : String {RULE-001..006}
-    +name : String
-    +description : String
-    +weight : Decimal
-    +threshold : Decimal
-    +enabled : Bool
+  class RuleSetVersion {
+    +id: UUID
+    +version: String
+    +effectiveAt: DateTime
   }
   class RuleHit {
-    +id : UUID
-    +loginEventId : UUID
-    +ruleId : UUID
-    +ruleScore : Decimal
-    +hitAt : DateTime
+    +id: UUID
+    +riskAssessmentId: UUID
+    +ruleCode: String
+    +score: Decimal
+    +evidence: JSON
   }
-  class RiskScore {
-    +id : UUID
-    +loginEventId : UUID
-    +ruleScore : Decimal
-    +anomalyScore : Decimal
-    +totalRiskScore : Decimal
-    +riskLevel : Enum {LOW, MEDIUM, HIGH, CRITICAL}
-    +computedAt : DateTime
+  class RiskAssessment {
+    +id: UUID
+    +ruleScore: Decimal
+    +anomalyScore: Decimal?
+    +mlStatus: SCORED | DEGRADED | NOT_APPLICABLE
+    +riskLevel: LOW | MEDIUM | HIGH | CRITICAL
+    +policyVersion: String
+    +featureSchemaVersion: Int
+    +modelVersion: String?
+    +inferenceId: UUID?
   }
   class Alert {
-    +id : UUID
-    +loginEventId : UUID
-    +riskScoreId : UUID
-    +level : Enum
-    +status : Enum {NEW, ACK, INVESTIGATING, RESOLVED, CLOSED}
-    +assignedTo : UUID?
-    +createdAt : DateTime
+    +id: UUID
+    +status: NEW | ACKNOWLEDGED | INVESTIGATING | RESOLVED | CLOSED
+    +version: Int
+    +assignedTo: UUID?
   }
   class Incident {
-    +id : UUID
-    +alertId : UUID
-    +status : Enum {OPEN, IN_PROGRESS, RESOLVED, CLOSED}
-    +classification : Enum {TRUE_POSITIVE, FALSE_POSITIVE, NEEDS_WATCH}
-    +notes : String
-    +closedAt : DateTime?
+    +id: UUID
+    +status: OPEN | IN_PROGRESS | RESOLVED | CLOSED
+    +classification: TRUE_POSITIVE | FALSE_POSITIVE | NEEDS_WATCH
   }
-  class AuditLog {
-    +id : UUID
-    +actorId : UUID
-    +action : String
-    +resource : String
-    +beforeState : JSON
-    +afterState : JSON
-    +timestamp : DateTime
+  class IncidentAlert {
+    +incidentId: UUID
+    +alertId: UUID
+    +addedAt: DateTime
+    +addedBy: UUID?
+    +reason: String?
   }
-  class TrustedList {
-    +id : UUID
-    +type : Enum {IP, DEVICE, USER}
-    +value : String
-    +mode : Enum {TRUST, BLOCK}
-    +note : String
+  class ActionRequest {
+    +id: UUID
+    +targetUserId: UUID
+    +evidenceRef: UUID
+    +requestedBy: UUID
+    +action: REQUIRE_MFA | REVOKE_SESSIONS | LOCK_USER | RATE_LIMIT_IP
+    +expiresAt: DateTime
+    +status: REQUESTED | APPLIED | REJECTED | PENDING_APPROVAL
+  }
+  class TrustedListEntry {
+    +id: UUID
+    +targetType: IP | DEVICE | USER
+    +normalizedValue: String
+    +mode: TRUST | BLOCK
+    +reason: String
+    +expiresAt: DateTime
+    +version: Int
+  }
+  class SocAuditEvent {
+    +id: UUID
+    +actorType: USER | WORKLOAD
+    +actorId: UUID?
+    +action: String
+    +beforeState: JSON
+    +afterState: JSON
+    +correlationId: UUID
+    +occurredAt: DateTime
+  }
+  class AuditTargetReference <<value object>> {
+    +targetType: ALERT | INCIDENT | ACTION_REQUEST | RULE_SET | TRUST_LIST
+    +targetId: UUID
   }
 }
 
-package "ml-service (Khang)" {
-  class FeatureVector {
-    +id : UUID
-    +userId : UUID
-    +hourOfDay : Int
-    +failCountWindow : Int
-    +ipChangeRate : Decimal
-    +newDeviceFlag : Bool
-    +avgTimeBetweenLogins : Decimal
-    +deviationScore : Decimal
-  }
-  class AnomalyScore {
-    +id : UUID
-    +loginEventId : UUID
-    +rawScore : Decimal
-    +normalizedScore : Decimal
-    +isAnomaly : Bool
-    +modelVersion : String
-    +modelType : String
-    +reasonCodes : List<String>
+package "ml-service (owner: ml_service)" {
+  class FeatureSchema {
+    +id: UUID
+    +version: Int
+    +digest: String
+    +status: ACTIVE | DEPRECATED | RETIRED
   }
   class ModelVersion {
-    +id : UUID
-    +version : String
-    +trainedAt : DateTime
-    +metricsJson : JSON
-    +status : Enum {ACTIVE, RETIRED, CANDIDATE}
+    +id: UUID
+    +version: String
+    +status: CANDIDATE | ACTIVE | RETIRED
+    +metrics: JSON
+    +createdAt: DateTime
+  }
+  class InferenceRecord {
+    +id: UUID
+    +inputDigest: SHA256
+    +correlationId: UUID
+    +status: SCORED | FAILED
+    +anomalyScore: Decimal?
+    +reasonCodes: JSON
+    +latencyMs: Int
+    +occurredAt: DateTime
   }
 }
 
-UserRole }o--|| User
-UserRole }o--|| Role
+User "1" -- "*" LoginAttempt
+User "1" -- "*" Session
+User "1" -- "*" PreAuthTransaction
+AuthPolicyVersion "1" -- "*" LoginAttempt : applied policy
+PreAuthTransaction "1" -- "*" MfaChallenge
+LoginAttempt "1" -- "0..1" PreAuthTransaction
+LoginAttempt "1" -- "1" OutboxEvent
 
-User ||--o{ TrustedDevice : has
-User ||--o{ Session : has
-User ||--o{ MfaChallenge : receives
+LoginAttempt ..> LoginAttemptProjection : auth.login-attempt.v1
+LoginAttemptProjection "1" -- "*" RiskAssessment
+RiskAssessment "1" -- "*" RuleHit : immutable evidence
+RuleSetVersion "1" -- "*" RuleHit : evaluated with
+RiskAssessment "1" -- "0..1" Alert
+Incident "1" *-- "0..*" IncidentAlert : contains
+Alert "1" -- "0..*" IncidentAlert : associates
+RiskAssessment "1" -- "*" ActionRequest
 
-User ||--o{ LoginEvent : "performs"
+RiskAssessment ..> FeatureSchema : feature_schema_version
+RiskAssessment ..> ModelVersion : model_version
+RiskAssessment ..> InferenceRecord : inference_id
+TrustedListEntry ..> RiskAssessment : trust/block policy input
+SocAuditEvent "1" *-- "1" AuditTargetReference : records target
+ActionRequest ..> EnforcementAudit : request/enforcement correlation
 
-LoginEvent ||--o{ RuleHit : triggers
-Rule ||--o{ RuleHit : "matched by"
+FeatureSchema "1" -- "*" ModelVersion : model input contract
+ModelVersion "1" -- "*" InferenceRecord : scored by
 
-LoginEvent ||--|| RiskScore : scored by
-LoginEvent ||--|| AnomalyScore : scored by
-FeatureVector }o--|| AnomalyScore : feeds
-ModelVersion ||--o{ AnomalyScore : produced by
+note right of AuditTargetReference
+Logical reference to exactly one of:
+Alert, Incident, ActionRequest,
+RuleSetVersion or TrustedListEntry.
+actorId may reference User or workload identity.
+No cross-database foreign key exists.
+end note
 
-RiskScore ||--|| Alert : generates
-Alert ||--|| Incident : escalated to
+note right of InferenceRecord
+Only a digest of the canonical feature vector is retained;
+raw IP, device, password, OTP and token are never copied into ML evidence.
+Reason codes are heuristic feature signals, not causal model explanations.
+See ml-service-domain.puml for the full ML lifecycle.
+end note
 
-User ||--o{ AuditLog : performs
-
-TrustedList .. User : "applies to"
-
+legend right
+Solid line: relationship inside the same database owner.
+Dashed line: versioned event or UUID reference; never a cross-database FK.
+IncidentAlert is the explicit association entity between Incident and Alert.
+SocAuditEvent owns AuditTargetReference because it audits multiple target types.
+ML owns schema, artifact, calibration, promotion and inference evidence; see its bounded-context diagram for internals.
+endlegend
 @enduml

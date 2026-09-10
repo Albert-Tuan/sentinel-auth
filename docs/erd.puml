@@ -1,0 +1,206 @@
+@startuml sentinel-auth-erd
+hide circle
+skinparam linetype ortho
+
+entity "core_app.users" as users {
+  * id : uuid <<PK>>
+  --
+  username : text <<UQ>>
+  password_hash : text
+  status : text
+  token_version : int
+}
+entity "core_app.login_attempts" as login_attempts {
+  * id : uuid <<PK>>
+  --
+  user_id : uuid <<FK>>
+  occurred_at : timestamptz
+  outcome : text
+  policy_version : text
+}
+entity "core_app.pre_auth_transactions" as preauth {
+  * id : uuid <<PK>>
+  --
+  login_attempt_id : uuid <<FK, UQ>>
+  user_id : uuid <<FK>>
+  expires_at : timestamptz
+  status : text
+}
+entity "core_app.mfa_challenges" as mfa {
+  * id : uuid <<PK>>
+  --
+  pre_auth_transaction_id : uuid <<FK>>
+  challenge_hash : text
+  attempt_count : int
+}
+entity "core_app.sessions" as sessions {
+  * id : uuid <<PK>>
+  --
+  user_id : uuid <<FK>>
+  access_jti : text <<UQ>>
+  refresh_token_hash : text
+  revoked_at : timestamptz
+}
+entity "core_app.outbox_events" as outbox {
+  * event_id : uuid <<PK>>
+  --
+  login_attempt_id : uuid <<FK>>
+  event_type : text
+  published_at : timestamptz
+}
+entity "core_app.enforcement_audits" as enforcement_audits {
+  * id : uuid <<PK>>
+  --
+  subject_user_id : uuid <<FK>>
+  action_request_id : uuid <<logical ref>>
+  policy_version : text
+  correlation_id : uuid
+  outcome : text
+}
+
+entity "detection_engine.login_attempt_projections" as projections {
+  * id : uuid <<PK>>
+  --
+  event_id : uuid <<UQ>>
+  occurred_at : timestamptz
+  source_ip : inet
+}
+entity "detection_engine.risk_assessments" as assessments {
+  * id : uuid <<PK>>
+  --
+  login_attempt_id : uuid <<FK>>
+  rule_set_version : text
+  model_version : text
+  ml_status : text
+}
+entity "detection_engine.rule_set_versions" as rule_sets {
+  * id : uuid <<PK>>
+  --
+  version : text <<UQ>>
+  effective_at : timestamptz
+}
+entity "detection_engine.rule_hits" as rule_hits {
+  * id : uuid <<PK>>
+  --
+  risk_assessment_id : uuid <<FK>>
+  rule_set_version_id : uuid <<FK>>
+  rule_code : text
+  evidence : jsonb
+}
+entity "detection_engine.alerts" as alerts {
+  * id : uuid <<PK>>
+  --
+  risk_assessment_id : uuid <<FK>>
+  status : text
+  version : int
+}
+entity "detection_engine.incidents" as incidents {
+  * id : uuid <<PK>>
+  --
+  status : text
+  classification : text
+}
+entity "detection_engine.incident_alerts" as incident_alerts {
+  * incident_id : uuid <<FK>>
+  * alert_id : uuid <<FK>>
+  --
+  added_at : timestamptz
+  added_by : uuid <<logical ref>>
+  reason : text
+}
+entity "detection_engine.action_requests" as action_requests {
+  * id : uuid <<PK>>
+  --
+  risk_assessment_id : uuid <<FK>>
+  target_user_id : uuid <<logical ref>>
+  evidence_ref : uuid
+  status : text
+}
+entity "detection_engine.trusted_list_entries" as trusted_list {
+  * id : uuid <<PK>>
+  --
+  target_type : text
+  normalized_value : text
+  mode : text
+  expires_at : timestamptz
+}
+entity "detection_engine.soc_audit_events" as soc_audit {
+  * id : uuid <<PK>>
+  --
+  actor_id : uuid <<logical ref>>
+  target_type : text
+  target_id : uuid <<polymorphic ref>>
+  correlation_id : uuid
+  action : text
+}
+entity "audit_target_ref <<conceptual, not a table>>" as audit_target {
+  target_type : text
+  target_id : uuid
+}
+entity "ml_service.feature_schemas" as feature_schemas {
+  * id : uuid <<PK>>
+  --
+  version : int <<UQ>>
+  digest : text <<UQ>>
+  status : text
+}
+entity "ml_service.model_versions" as models {
+  * id : uuid <<PK>>
+  --
+  version : text <<UQ>>
+  feature_schema_id : uuid <<FK>>
+  artifact_digest : text <<SHA-256>>
+  status : text
+  metrics : jsonb <<immutable>>
+}
+entity "ml_service.inference_records" as inferences {
+  * id : uuid <<PK>>
+  --
+  model_version_id : uuid <<FK>>
+  input_digest : text <<SHA-256, no raw features>>
+  correlation_id : uuid
+  status : text
+  anomaly_score : numeric
+  reason_codes : jsonb
+  latency_ms : int
+}
+
+users ||--o{ login_attempts
+users ||--o{ preauth
+users ||--o{ sessions
+users ||--o{ enforcement_audits
+login_attempts ||--o| preauth
+preauth ||--o{ mfa
+login_attempts ||--|| outbox
+
+projections ||--o{ assessments
+assessments ||--o{ rule_hits
+rule_sets ||--o{ rule_hits
+assessments ||--o| alerts
+incidents ||--o{ incident_alerts
+alerts ||--o{ incident_alerts
+outbox ..> projections : Redis event, no DB FK
+assessments ..> models : version reference, no DB FK
+assessments ..> inferences : inference ID, no DB FK
+trusted_list ..> assessments : policy input, no FK
+assessments ||--o{ action_requests
+action_requests ..> enforcement_audits : request ID, cross DB
+soc_audit ..> audit_target : targetType + targetId
+feature_schemas ||--o{ models
+models ||--o{ inferences
+
+note right of audit_target
+Targets exactly one Alert, Incident,
+ActionRequest, RuleSet or TrustedList entry.
+This is deliberately not a physical table or FK.
+end note
+
+legend right
+Solid line: foreign-key relationship inside one owner database.
+Dashed line: event, version, logical UUID or polymorphic reference; no cross-database FK.
+incident_alerts is the explicit join entity for Incident and Alert.
+soc_audit_events uses targetType + targetId for a polymorphic logical reference.
+ml_service keeps no raw feature vector in inference_records; input_digest permits safe correlation.
+See ml-service-erd.puml for the artifact, dataset, calibration and promotion tables.
+endlegend
+@enduml

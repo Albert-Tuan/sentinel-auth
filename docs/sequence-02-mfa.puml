@@ -1,18 +1,23 @@
-@startuml st02-login-mfa
+@startuml st02-mfa-preauth
 actor User
-participant "AuthController" as AC
-participant "RiskEngine" as RK
-participant "MFA Service" as MFA
-participant "LoginEventStore" as ES
+participant "core-app\nMFA" as core
+database "core_app" as db
 
-User -> AC : POST /login
-AC -> RK : evaluate risk
-RK --> AC : riskLevel = MEDIUM/HIGH
-AC -> MFA : createChallenge(userId)
-MFA --> User : Gửi OTP / push notification
-User -> AC : POST /mfa/verify {otp}
-AC -> MFA : verify(challengeId, otp)
-MFA --> AC : PASS
-AC -> ES : create Session
-AC --> User : 200 OK + token
+User -> core : POST /api/v1/auth/login
+core --> User : MFA_REQUIRED + pre-auth token
+User -> core : POST /api/v1/auth/mfa/verify
+core -> db : load active PreAuthTransaction
+core -> core : verify bound challenge, expiry\nand attempt count
+alt verification passes
+  core -> db : mark transaction VERIFIED\ncreate Session(token hashes only)
+  core --> User : 200 ALLOW + tokens
+else verification fails or expires
+  core -> db : increment attempts / mark FAILED
+  core --> User : generic 401 response
+end
+note right of db
+MfaChallenge references a pre-auth
+transaction, not a Session that does
+not exist yet.
+end note
 @enduml

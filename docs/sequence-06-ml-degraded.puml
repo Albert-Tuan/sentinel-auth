@@ -1,0 +1,24 @@
+@startuml st06-ml-degraded
+queue "Redis Stream" as stream
+participant "detection-engine" as detection
+participant "ml-service" as ml
+database "detection_engine" as db
+actor "SOC Analyst" as soc
+
+stream -> detection : auth.login-attempt.v1
+detection -> detection : evaluate rules and create FeatureVector v1
+detection -> ml : score(timeout=500ms)
+ml -->x detection : timeout or 503 Problem\n(no verified ACTIVE model/artifact)
+detection -> detection : circuit-breaker update\nset ml_status=DEGRADED
+detection -> db : save RiskAssessment(anomaly_score=null)
+alt rule evidence reaches alert threshold
+  detection -> db : create Alert with DEGRADED marker
+  detection --> soc : notify SOC of alert and ML degradation
+else insufficient rule evidence
+  detection -> db : retain assessment for replay
+end
+note right of detection
+Missing ML is never represented as
+an anomaly score of zero.
+end note
+@enduml

@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sentinel-auth.local/schemas/auth.login-attempt.v1.json",
+  "title": "auth.login-attempt.v1 payload",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["login_attempt_id", "user_id", "occurred_at", "outcome", "source_ip", "device_fingerprint_hash", "policy_version"],
+  "properties": {
+    "login_attempt_id": {"type": "string", "format": "uuid"},
+    "user_id": {"type": ["string", "null"], "format": "uuid"},
+    "occurred_at": {"type": "string", "format": "date-time"},
+    "outcome": {"type": "string", "enum": ["ALLOW", "MFA_REQUIRED", "DENY"]},
+    "source_ip": {"type": "string", "minLength": 3, "maxLength": 45, "description": "Normalized IPv4 or IPv6 address."},
+    "device_fingerprint_hash": {"type": ["string", "null"], "maxLength": 128},
+    "user_agent": {"type": ["string", "null"], "maxLength": 1024},
+    "region_code": {"type": ["string", "null"], "maxLength": 32},
+    "policy_version": {"type": "string", "maxLength": 64},
+    "mfa_completed": {"type": "boolean"}
+  }
+}

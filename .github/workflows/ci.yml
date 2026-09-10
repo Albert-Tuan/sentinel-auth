@@ -1,0 +1,23 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  python:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        service: [core-app, detection-engine, ml-service]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: pip install -r ${{ matrix.service }}/requirements.txt
+      - if: matrix.service == 'ml-service'
+        run: pip install -r ml-service/requirements-ml.txt
+      - run: python -m compileall -q ${{ matrix.service }}
+      - run: cd ${{ matrix.service }} && python -m pytest -q

@@ -1,19 +1,24 @@
-@startuml st04-soc-handle-alert
-actor "SOC Analyst" as SOC
-participant "SOC Dashboard" as DASH
-participant "AlertService" as AS
-participant "AuditLog" as AUD
+@startuml st04-soc-investigation
+actor "SOC Analyst" as soc
+participant "SOC UI" as ui
+participant "detection-engine" as detection
+database "detection_engine" as detdb
+participant "core-app" as core
 
-SOC -> DASH : Xem alert list
-DASH --> SOC : List alerts (status=NEW)
-SOC -> DASH : Mở alert chi tiết
-DASH -> AS : getDetail(alertId)
-AS --> DASH : event, ruleHits, riskScore
-SOC -> DASH : Chuyển trạng thái ACK -> INVESTIGATING
-DASH -> AS : updateStatus
-AS -> AUD : write(action="alert.ack", actor=SOC, ...)
-SOC -> DASH : Phân loại + ghi chú
-SOC -> DASH : Áp dụng action (terminate session / lock user)
-SOC -> DASH : Đóng incident (status=RESOLVED)
-DASH -> AUD : write(action="incident.close")
+soc -> ui : open alert evidence
+ui -> detection : GET /api/v1/alerts/{id}
+detection --> ui : assessment, rules, model status, audit timeline
+soc -> ui : ACKNOWLEDGED / INVESTIGATING + note
+ui -> detection : PATCH alert (If-Match version)
+detection -> detdb : validate transition, append SocAuditEvent
+alt action is required
+  soc -> ui : request REVOKE_SESSIONS / REQUIRE_MFA
+  ui -> detection : create ActionRequest
+  detection -> core : authenticated request + evidence reference
+  core --> detection : action result
+  detection -> detdb : append result audit
+end
+soc -> ui : classify incident and close
+ui -> detection : transition incident
+detection -> detdb : validate state + append audit
 @enduml

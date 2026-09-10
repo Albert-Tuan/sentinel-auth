@@ -1,100 +1,22 @@
 @startuml use-case-user
-hide stereotype
+left to right direction
 skinparam actorStyle awesome
-left to right direction
-
-title **Sơ đồ Use-case — Nhân viên / User**
-
-' ====== ACTOR ======
-actor "User\n(Nhân viên)" as U
-
-' ====== AUTO ACTORS ======
-actor "Rule Engine" as RE
-actor "ML Engine" as ML
-actor "Risk Engine" as RSK
-actor "Policy/Response\nEngine" as PE
-
-' ====== USE CASES ======
-left to right direction
-
-note right of U
-  User là nhân viên tổ chức.
-  Phạm vi: đăng nhập, MFA,
-  xem phiên, xác nhận đăng nhập,
-  quản lý thiết bị tin cậy.
+actor User
+rectangle "Sentinel Auth" {
+  usecase "UC-01\nĐăng nhập" as login
+  usecase "UC-02\nThực hiện MFA" as mfa
+  usecase "UC-03\nXem / thu hồi phiên" as sessions
+  usecase "UC-04\nXác nhận / báo cáo đăng nhập" as confirm
+  usecase "UC-05\nQuản lý thiết bị tin cậy" as devices
+}
+User --> login
+User --> mfa
+User --> sessions
+User --> confirm
+User --> devices
+mfa ..> login : <<extend>>\n[MFA_REQUIRED]
+note right of login
+Synchronous decision: ALLOW, MFA_REQUIRED or DENY.
+Detection runs after the attempt is written to the outbox.
 end note
-
-' UC-01 Đăng nhập
-:UC-01 Đăng nhập: as UC01
-note right of UC01
-  Mã: UC-01
-  Mô tả: Xác thực tài khoản,
-  ghi nhận LoginEvent,
-  đánh giá rủi ro qua
-  Rule Engine + ML Engine,
-  tạo session hoặc yêu cầu MFA.
-  Yêu cầu: Argon2id, rate limit 5/p/ph,
-  không log plaintext.
-end note
-
-' UC-02 Thực hiện MFA
-:UC-02 Thực hiện MFA: as UC02
-note right of UC02
-  Mã: UC-02
-  Mô tả: Xác thực đa yếu tố
-  (OTP 60s / push) khi
-  Risk Level = MEDIUM/HIGH
-  hoặc theo AuthPolicy.
-  <<extend>> UC-01
-end note
-
-' UC-03 Xem phiên
-:UC-03 Xem phiên đăng nhập: as UC03
-note right of UC03
-  Mã: UC-03
-  Mô tả: Xem danh sách phiên
-  gần nhất (thiết bị, IP,
-  thời gian, trạng thái),
-  có thể thu hồi phiên lạ.
-end note
-
-' UC-04 Xác nhận đăng nhập
-:UC-04 Xác nhận đăng nhập: as UC04
-note right of UC04
-  Mã: UC-04
-  Mô tả: Xác nhận / báo cáo
-  đăng nhập bất thường
-  qua email/Telegram link
-  (HMAC-signed, 72h).
-  Phản hồi là ground-truth
-  label cho ML model.
-end note
-
-' UC-05 Thiết bị tin cậy
-:UC-05 Quản lý thiết bị tin cậy: as UC05
-note right of UC05
-  Mã: UC-05
-  Mô tả: Xem, thêm, gỡ thiết bị
-  tin cậy (tối đa 5 thiết bị,
-  theo AuthPolicy).
-  Hash deviceFingerprint trước
-  khi lưu.
-end note
-
-' ====== QUAN HỆ ======
-U --> UC01
-U --> UC02
-U --> UC03
-U --> UC04
-U --> UC05
-
-' Gắn auto actors vào UC-01
-UC01 ..> RE : <<include>>
-UC01 ..> ML : <<include>>
-UC01 ..> RSK : <<include>>
-UC01 ..> PE : <<include>>
-
-' MFA extend login
-UC02 ..> UC01 : <<extend>>
-
 @enduml

@@ -1,25 +1,27 @@
-@startuml st01-login-happy-path
+@startuml st01-synchronous-login-and-outbox
 actor User
-participant "AuthController" as AC
-participant "Authentication\nService" as AS
-participant "LoginEventStore" as ES
-participant "RuleEngine" as RE
-participant "MLService" as ML
-participant "RiskEngine" as RK
-participant "PolicyEngine" as PE
+participant "core-app\nAuth" as core
+database "core_app" as db
+queue "outbox" as outbox
 
-User -> AC : POST /login {username, password}
-AC -> AS : authenticate(credentials)
-AS -> ES : create LoginEvent (pending)
-AS -> RE : evaluate(event)
-AS -> ML : evaluate(event)
-RE --> AS : ruleScore
-ML --> AS : anomalyScore
-AS -> RK : computeRiskScore(ruleScore, anomalyScore)
-RK --> AS : totalRiskScore, riskLevel
-AS -> PE : decide(riskLevel, policy)
-PE --> AS : ALLOW
-AS -> ES : update LoginEvent (success=true)
-AS --> AC : 200 OK + session token
-AC --> User : Login success
+User -> core : POST /api/v1/auth/login
+core -> core : rate limit + generic credential verification
+alt static policy allows access
+  core -> db : create LoginAttempt(ALLOW)\ncreate Session(token hashes only)
+  core -> outbox : insert auth.login-attempt.v1
+  core --> User : 200 ALLOW + access/refresh token
+else policy requires MFA
+  core -> db : create LoginAttempt(MFA_REQUIRED)\ncreate PreAuthTransaction
+  core -> outbox : insert auth.login-attempt.v1
+  core --> User : 200 MFA_REQUIRED + pre-auth token
+else denied
+  core -> db : create LoginAttempt(DENY)
+  core -> outbox : insert auth.login-attempt.v1
+  core --> User : generic 401 response
+end
+note right of outbox
+The outbox row commits in the same
+transaction as the login attempt.
+Detection is never on this path.
+end note
 @enduml
