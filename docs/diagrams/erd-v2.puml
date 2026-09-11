@@ -1,0 +1,269 @@
+@startuml SentinelAuth-ERD-v2
+
+!theme plain
+skinparam linetype ortho
+skinparam dpi 150
+
+' =============================================================================
+' SENTINEL AUTH - Entity Relationship Diagram v2
+' Based on: infra/postgres/schema-v2.sql
+' =============================================================================
+
+' --------------------- ENTITIES ---------------------
+
+entity "roles" as roles <<REFERENCE TABLE>> {
+    * id : TEXT (PK)
+    --
+    name : TEXT
+    description : TEXT
+    created_at : TIMESTAMPTZ
+}
+
+entity "users" as users <<CORE>> {
+    * id : UUID (PK)
+    --
+    username : TEXT (UNIQUE)
+    password_hash : TEXT
+    email : TEXT
+    full_name : TEXT
+    status : TEXT ('active'|'suspended'|'locked')
+    admin_mfa_required : BOOLEAN
+    detection_mfa_once : BOOLEAN
+    last_login_at : TIMESTAMPTZ
+    failed_login_count : INTEGER
+    locked_at : TIMESTAMPTZ
+    created_at : TIMESTAMPTZ
+    updated_at : TIMESTAMPTZ
+}
+
+entity "user_roles" as user_roles <<JUNCTION>> {
+    * user_id : UUID (FK)
+    * role_id : TEXT (FK)
+    --
+    assigned_at : TIMESTAMPTZ
+    assigned_by : UUID (FK)
+}
+
+entity "sessions" as sessions <<SESSION>> {
+    * id : UUID (PK)
+    --
+    user_id : UUID (FK)
+    access_token_hash : TEXT
+    refresh_token_hash : TEXT
+    refresh_token_family : UUID
+    token_jti : TEXT (UNIQUE)
+    expires_at : TIMESTAMPTZ
+    last_activity_at : TIMESTAMPTZ
+    revoked_at : TIMESTAMPTZ
+    ip_address : INET
+    user_agent : TEXT
+    created_at : TIMESTAMPTZ
+    updated_at : TIMESTAMPTZ
+}
+
+entity "pre_auth_transactions" as pre_auth_transactions <<MFA>> {
+    * id : UUID (PK)
+    --
+    user_id : UUID (FK)
+    mfa_type : TEXT ('persistent'|'one_time')
+    expires_at : TIMESTAMPTZ
+    status : TEXT ('pending'|'completed'|'expired'|'failed')
+    bound_ip : TEXT
+    notification_id : UUID (FK)
+    fail_count : INTEGER
+    created_at : TIMESTAMPTZ
+    updated_at : TIMESTAMPTZ
+}
+
+entity "mfa_notifications" as mfa_notifications <<MFA>> {
+    * id : UUID (PK)
+    --
+    pre_auth_transaction_id : UUID (FK)
+    channel : TEXT ('email')
+    recipient : TEXT
+    mfa_code_hash : TEXT
+    sent_at : TIMESTAMPTZ
+    delivered_at : TIMESTAMPTZ
+    failed_at : TIMESTAMPTZ
+    failure_reason : TEXT
+    expires_at : TIMESTAMPTZ
+    verified_at : TIMESTAMPTZ
+    created_at : TIMESTAMPTZ
+}
+
+entity "rate_limits" as rate_limits <<OPERATIONAL>> {
+    * ip_address : INET (PK)
+    * action : TEXT (PK)
+    --
+    count : INTEGER
+    max_count : INTEGER
+    window_start : TIMESTAMPTZ
+}
+
+entity "policy_versions" as policy_versions <<POLICY>> {
+    * id : UUID (PK)
+    --
+    version : TEXT (UNIQUE)
+    description : TEXT
+    rules_json : JSONB
+    weights : JSONB
+    thresholds : JSONB
+    is_active : BOOLEAN
+    created_by_user_id : UUID (FK)
+    created_at : TIMESTAMPTZ
+    activated_at : TIMESTAMPTZ
+    deactivated_at : TIMESTAMPTZ
+}
+
+entity "login_attempts" as login_attempts <<AUDIT>> {
+    * id : UUID (PK)
+    --
+    user_id : UUID (FK)
+    username_attempted : TEXT
+    occurred_at : TIMESTAMPTZ
+    outcome : TEXT
+    source_ip : INET
+    user_agent : TEXT
+    rate_limited : BOOLEAN
+    policy_version_id : UUID (FK)
+    request_id : UUID
+    detection_features : JSONB
+    primary_alert_id : UUID (FK)
+    risk_level : TEXT
+    mfa_used : BOOLEAN
+    detection_decision : TEXT
+    created_at : TIMESTAMPTZ
+    updated_at : TIMESTAMPTZ
+}
+
+entity "risk_assessments" as risk_assessments <<RISK>> {
+    * id : UUID (PK)
+    --
+    login_attempt_id : UUID (FK) <<UNIQUE>>
+    policy_version_id : UUID (FK)
+    rule_score : NUMERIC(5,4)
+    anomaly_score : NUMERIC(5,4)
+    ml_score : NUMERIC(5,4)
+    ml_status : TEXT
+    ml_model_version : TEXT
+    rule_hits : JSONB
+    ml_features_used : JSONB
+    combined_score : NUMERIC(5,4)
+    risk_level : TEXT
+    decision : TEXT
+    created_at : TIMESTAMPTZ
+}
+
+entity "detection_logs" as detection_logs <<AUDIT>> {
+    * id : UUID (PK)
+    --
+    login_attempt_id : UUID (FK)
+    request_id : UUID
+    stage : TEXT ('rule'|'ml'|'combined'|'action')
+    stage_detail : TEXT
+    rule_id : UUID
+    rule_name : TEXT
+    score : NUMERIC(5,4)
+    decision : TEXT
+    reason : TEXT
+    details : JSONB
+    created_at : TIMESTAMPTZ
+}
+
+entity "alerts" as alerts <<SOC>> {
+    * id : UUID (PK)
+    --
+    login_attempt_id : UUID (FK)
+    policy_version_id : UUID (FK)
+    request_id : UUID
+    status : TEXT ('open'|'acknowledged'|'resolved'|'false_positive')
+    risk_level : TEXT
+    detection_reason : TEXT
+    detection_scores : JSONB
+    assigned_to : TEXT
+    resolved_by : TEXT
+    resolved_at : TIMESTAMPTZ
+    notes : TEXT
+    created_at : TIMESTAMPTZ
+    updated_at : TIMESTAMPTZ
+}
+
+entity "audit_logs" as audit_logs <<AUDIT>> {
+    * id : UUID (PK)
+    --
+    request_id : UUID
+    actor : TEXT
+    action : TEXT
+    resource : TEXT
+    resource_id : UUID
+    before_state : JSONB
+    after_state : JSONB
+    change_reason : TEXT
+    ip_address : INET
+    user_agent : TEXT
+    created_at : TIMESTAMPTZ
+}
+
+' =============================================================================
+' RELATIONSHIPS
+' =============================================================================
+
+' User -> UserRoles (1:N)
+users ||--o{ user_roles : "has"
+
+' Role -> UserRoles (1:N)
+roles ||--o{ user_roles : "assigned to"
+
+' User -> Sessions (1:N)
+users ||--o{ sessions : "owns"
+
+' User -> PreAuth (1:N)
+users ||--o{ pre_auth_transactions : "initiates"
+
+' PreAuth -> MfaNotification (1:1)
+pre_auth_transactions ||--o| mfa_notifications : "creates"
+
+' User -> PolicyVersions (1:N, creator)
+users ||--o{ policy_versions : "creates"
+
+' User -> LoginAttempts (1:N)
+users ||--o{ login_attempts : "performs"
+
+' User -> AuditLogs (1:N, actor)
+users ||--o{ audit_logs : "triggers"
+
+' LoginAttempts -> RiskAssessments (1:1)
+login_attempts ||--|| risk_assessments : "evaluated by"
+
+' LoginAttempts -> DetectionLogs (1:N)
+login_attempts ||--o{ detection_logs : "generates"
+
+' LoginAttempts -> Alerts (1:N)
+login_attempts ||--o{ alerts : "triggers"
+
+' LoginAttempts -> Self (for primary_alert_id)
+login_attempts ||--o| login_attempts : "primary alert"
+
+' PolicyVersions -> LoginAttempts (1:N)
+policy_versions ||--o{ login_attempts : "applied to"
+
+' PolicyVersions -> RiskAssessments (1:N)
+policy_versions ||--o{ risk_assessments : "used in"
+
+' PolicyVersions -> Alerts (1:N)
+policy_versions ||--o{ alerts : "context for"
+
+' =============================================================================
+' LEGEND
+' =============================================================================
+
+legend right
+  |= Symbol |= Meaning |
+  |= PK |= Primary Key |
+  |= FK |= Foreign Key |
+  |= (UNIQUE) |= Unique Constraint |
+  |= ||--o{ |= One-to-Many |
+  ||= ||--||= One-to-One |
+endlegend
+
+@enduml
