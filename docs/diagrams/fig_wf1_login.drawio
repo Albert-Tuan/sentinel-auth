@@ -1,0 +1,237 @@
+<mxfile>
+  <diagram name="WF-1: Login">
+    <mxGraphModel dx="1200" dy="900" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1000" pageHeight="800" math="0" shadow="0">
+      <root>
+        <mxCell id="0"/>
+        <mxCell id="1" parent="0"/>
+
+        <!-- Title -->
+        <mxCell id="title" value="WF-1: Đăng nhập (Login Flow)" style="text;html=1;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;whiteSpace=wrap;rounded=0;fontSize=18;fontStyle=1;fontColor=#2C3E50;" vertex="1" parent="1">
+          <mxGeometry x="320" y="10" width="400" height="35" as="geometry"/>
+        </mxCell>
+
+        <!-- Lifelines -->
+        <!-- User -->
+        <mxCell id="ll1_box" value="User&#xa;(Browser)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#D5E8D4;strokeColor=#82B366;align=center;fontSize=13;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="60" y="60" width="100" height="40" as="geometry"/>
+        </mxCell>
+        <mxCell id="ll1_line" value="" style="endArrow=none;dashed=1;html=1;dashPattern=1 3;strokeWidth=1;strokeColor=#82B366;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="110" y="100" as="sourcePoint"/>
+            <mxPoint x="110" y="680" as="targetPoint"/>
+          </mxGeometry>
+        </mxCell>
+
+        <!-- Auth API -->
+        <mxCell id="ll2_box" value="Auth API" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#DAE8FC;strokeColor=#6C8EBF;align=center;fontSize=13;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="220" y="60" width="100" height="40" as="geometry"/>
+        </mxCell>
+        <mxCell id="ll2_line" value="" style="endArrow=none;dashed=1;html=1;dashPattern=1 3;strokeWidth=1;strokeColor=#6C8EBF;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="270" y="100" as="sourcePoint"/>
+            <mxPoint x="270" y="680" as="targetPoint"/>
+          </mxGeometry>
+        </mxCell>
+
+        <!-- PostgreSQL -->
+        <mxCell id="ll3_box" value="PostgreSQL" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#F5F5F5;strokeColor=#666666;align=center;fontSize=13;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="400" y="60" width="100" height="40" as="geometry"/>
+        </mxCell>
+        <mxCell id="ll3_line" value="" style="endArrow=none;dashed=1;html=1;dashPattern=1 3;strokeWidth=1;strokeColor=#666666;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="450" y="100" as="sourcePoint"/>
+            <mxPoint x="450" y="680" as="targetPoint"/>
+          </mxGeometry>
+        </mxCell>
+
+        <!-- MFA Service (optional) -->
+        <mxCell id="ll4_box" value="MFA&#xa;(TOTP/Email)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#E1D5E7;strokeColor=#9673A6;align=center;fontSize=13;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="580" y="60" width="100" height="40" as="geometry"/>
+        </mxCell>
+        <mxCell id="ll4_line" value="" style="endArrow=none;dashed=1;html=1;dashPattern=1 3;strokeWidth=1;strokeColor=#9673A6;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="630" y="100" as="sourcePoint"/>
+            <mxPoint x="630" y="680" as="targetPoint"/>
+          </mxGeometry>
+        </mxCell>
+
+        <!-- Step 1: Login request -->
+        <mxCell id="s1_box" value="1. POST /auth/login&#xa;(username, password, source_ip)" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#FFF2CC;strokeColor=#D6A656;align=center;fontSize=11;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="140" y="115" width="140" height="45" as="geometry"/>
+        </mxCell>
+        <mxCell id="s1_arrow" value="" style="endArrow=classic;html=1;strokeWidth=1.5;strokeColor=#333;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;" edge="1" parent="1" source="ll1_line" target="s1_box">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+
+        <!-- Step 2: Lookup user -->
+        <mxCell id="s2_box" value="2. SELECT user&#xa;WHERE username" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#FFF2CC;strokeColor=#D6A656;align=center;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="290" y="175" width="140" height="45" as="geometry"/>
+        </mxCell>
+        <mxCell id="s2_arrow" value="" style="endArrow=classic;html=1;strokeWidth=1.5;strokeColor=#333;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="270" y="197" as="sourcePoint"/>
+            <mxPoint x="400" y="197" as="targetPoint"/>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="s2_ret_arrow" value="" style="endArrow=classic;html=1;strokeWidth=1.5;strokeColor=#82B366;dashed=1;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="400" y="235" as="sourcePoint"/>
+            <mxPoint x="270" y="235" as="targetPoint"/>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="s2_ret_label" value="user record&#xa;(hash, status)" style="text;html=1;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;whiteSpace=wrap;rounded=0;fontSize=10;fontColor=#82B366;fontStyle=2;" vertex="1" parent="1">
+          <mxGeometry x="315" y="235" width="80" height="30" as="geometry"/>
+        </mxCell>
+
+        <!-- Decision diamond -->
+        <mxCell id="dec1" value="credentials&#xa;valid?" style="rhombus;whiteSpace=wrap;html=1;fillColor=#FFE6CC;strokeColor=#D79B00;align=center;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="220" y="255" width="100" height="70" as="geometry"/>
+        </mxCell>
+        <mxCell id="dec1_arrow" value="" style="endArrow=classic;html=1;strokeWidth=1.5;strokeColor=#333;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="270" y="250" as="sourcePoint"/>
+            <mxPoint x="270" y="255" as="targetPoint"/>
+          </mxGeometry>
+        </mxCell>
+
+        <!-- Branch: invalid -->
+        <mxCell id="err_label" value="401 Invalid credentials" style="text;html=1;strokeColor=none;fillColor=none;align=left;verticalAlign=middle;whiteSpace=wrap;rounded=0;fontSize=10;fontColor=#CC0000;" vertex="1" parent="1">
+          <mxGeometry x="10" y="265" width="150" height="25" as="geometry"/>
+        </mxCell>
+        <mxCell id="err_arrow" value="" style="endArrow=classic;html=1;strokeWidth=1.5;strokeColor=#CC0000;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="220" y="290" as="sourcePoint"/>
+            <mxPoint x="110" y="290" as="targetPoint"/>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="err_label2" value="(generic error&#xa;không leak)" style="text;html=1;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;whiteSpace=wrap;rounded=0;fontSize=9;fontColor=#888;fontStyle=2;" vertex="1" parent="1">
+          <mxGeometry x="10" y="295" width="100" height="30" as="geometry"/>
+        </mxCell>
+
+        <!-- Branch: valid -->
+        <mxCell id="valid_arrow" value="" style="endArrow=classic;html=1;strokeWidth=1.5;strokeColor=#333;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="320" y="290" as="sourcePoint"/>
+            <mxPoint x="320" y="295" as="targetPoint"/>
+          </mxGeometry>
+        </mxCell>
+
+        <!-- Step 3: MFA check -->
+        <mxCell id="dec2" value="MFA&#xa;enabled?" style="rhombus;whiteSpace=wrap;html=1;fillColor=#FFE6CC;strokeColor=#D79B00;align=center;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="270" y="340" width="100" height="70" as="geometry"/>
+        </mxCell>
+        <mxCell id="dec2_arrow" value="" style="endArrow=classic;html=1;strokeWidth=1.5;strokeColor=#333;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="320" y="330" as="sourcePoint"/>
+            <mxPoint x="320" y="340" as="targetPoint"/>
+          </mxGeometry>
+        </mxCell>
+
+        <!-- Branch: MFA NO -->
+        <mxCell id="nomfa_label" value="ALLOW" style="text;html=1;strokeColor=none;fillColor=#D5E8D4;align=center;verticalAlign=middle;whiteSpace=wrap;rounded=1;fontSize=12;fontColor=#2C3E50;fontStyle=2;" vertex="1" parent="1">
+          <mxGeometry x="10" y="355" width="80" height="30" as="geometry"/>
+        </mxCell>
+        <mxCell id="nomfa_arrow" value="" style="endArrow=classic;html=1;strokeWidth=1.5;strokeColor=#82B366;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="270" y="375" as="sourcePoint"/>
+            <mxPoint x="110" y="375" as="targetPoint"/>
+          </mxGeometry>
+        </mxCell>
+
+        <!-- Step 4: No MFA path - insert session -->
+        <mxCell id="s4_box" value="4. INSERT session&#xa;+ login_attempt" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#FFF2CC;strokeColor=#D6A656;align=center;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="290" y="420" width="150" height="45" as="geometry"/>
+        </mxCell>
+        <mxCell id="s4_arrow" value="" style="endArrow=classic;html=1;strokeWidth=1.5;strokeColor=#333;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="370" y="430" as="sourcePoint"/>
+            <mxPoint x="400" y="430" as="targetPoint"/>
+          </mxGeometry>
+        </mxCell>
+
+        <!-- Step 5: Return token -->
+        <mxCell id="s5_box" value="5. {access_token,&#xa;refresh_token}" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#D5E8D4;strokeColor=#82B366;align=center;fontSize=11;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="140" y="480" width="130" height="45" as="geometry"/>
+        </mxCell>
+        <mxCell id="s5_arrow" value="" style="endArrow=classic;html=1;strokeWidth=2;strokeColor=#82B366;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="110" y="495" as="sourcePoint"/>
+            <mxPoint x="270" y="495" as="targetPoint"/>
+          </mxGeometry>
+        </mxCell>
+
+        <!-- MFA YES branch -->
+        <mxCell id="mfa_yes_label" value="MFA_REQUIRED" style="text;html=1;strokeColor=none;fillColor=#FFF2CC;align=center;verticalAlign=middle;whiteSpace=wrap;rounded=1;fontSize=12;fontColor=#2C3E50;fontStyle=2;" vertex="1" parent="1">
+          <mxGeometry x="380" y="355" width="130" height="30" as="geometry"/>
+        </mxCell>
+        <mxCell id="mfa_yes_arrow" value="" style="endArrow=classic;html=1;strokeWidth=1.5;strokeColor=#D79B00;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="370" y="375" as="sourcePoint"/>
+            <mxPoint x="450" y="375" as="targetPoint"/>
+          </mxGeometry>
+        </mxCell>
+
+        <!-- Step 6: Create pre-auth tx -->
+        <mxCell id="s6_box" value="6. INSERT&#xa;pre_auth_transaction" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#FFF2CC;strokeColor=#D6A656;align=center;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="400" y="435" width="130" height="45" as="geometry"/>
+        </mxCell>
+        <mxCell id="s6_arrow" value="" style="endArrow=classic;html=1;strokeWidth=1.5;strokeColor=#333;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="450" y="457" as="sourcePoint"/>
+            <mxPoint x="450" y="457" as="targetPoint"/>
+          </mxGeometry>
+        </mxCell>
+
+        <!-- Step 7: Return mfa_required -->
+        <mxCell id="s7_box" value="7. {mfa_required:true,&#xa;session_id}" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFF2CC;strokeColor=#D6A656;align=center;fontSize=11;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="140" y="545" width="130" height="45" as="geometry"/>
+        </mxCell>
+        <mxCell id="s7_arrow" value="" style="endArrow=classic;html=1;strokeWidth=2;strokeColor=#D79B00;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="110" y="560" as="sourcePoint"/>
+            <mxPoint x="270" y="560" as="targetPoint"/>
+          </mxGeometry>
+        </mxCell>
+
+        <!-- MFA verify flow -->
+        <mxCell id="mfa_divider" value="──────── MFA Verify ────────" style="text;html=1;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;whiteSpace=wrap;rounded=0;fontSize=11;fontColor=#9673A6;fontStyle=2;" vertex="1" parent="1">
+          <mxGeometry x="200" y="605" width="280" height="25" as="geometry"/>
+        </mxCell>
+
+        <!-- Step 8: MFA verify request -->
+        <mxCell id="s8_box" value="8. POST /auth/mfa/verify&#xa;(session_id, mfa_code)" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#E1D5E7;strokeColor=#9673A6;align=center;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="140" y="630" width="160" height="45" as="geometry"/>
+        </mxCell>
+        <mxCell id="s8_arrow" value="" style="endArrow=classic;html=1;strokeWidth=1.5;strokeColor=#333;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="270" y="650" as="sourcePoint"/>
+            <mxPoint x="270" y="650" as="targetPoint"/>
+          </mxGeometry>
+        </mxCell>
+
+        <!-- Step 9: Select pre-auth tx -->
+        <mxCell id="s9_box" value="9. SELECT&#xa;pre_auth_transaction" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#FFF2CC;strokeColor=#D6A656;align=center;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="290" y="630" width="140" height="45" as="geometry"/>
+        </mxCell>
+        <mxCell id="s9_arrow" value="" style="endArrow=classic;html=1;strokeWidth=1.5;strokeColor=#333;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="400" y="650" as="sourcePoint"/>
+            <mxPoint x="450" y="650" as="targetPoint"/>
+          </mxGeometry>
+        </mxCell>
+
+        <!-- Return -->
+        <mxCell id="s10_box" value="10. {access_token,&#xa;refresh_token}" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#D5E8D4;strokeColor=#82B366;align=center;fontSize=11;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="60" y="680" width="130" height="45" as="geometry"/>
+        </mxCell>
+        <mxCell id="s10_arrow" value="" style="endArrow=classic;html=1;strokeWidth=2;strokeColor=#82B366;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="110" y="680" as="sourcePoint"/>
+            <mxPoint x="270" y="680" as="targetPoint"/>
+          </mxGeometry>
+        </mxCell>
+
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>
