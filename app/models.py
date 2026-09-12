@@ -112,8 +112,6 @@ class Session(Base):
         Index("idx_sessions_user_id", "user_id"),
         Index("idx_sessions_access_hash", "access_token_hash"),
         Index("idx_sessions_expires_at", "expires_at"),
-        Index("idx_sessions_token_jti", "token_jti", postgresql_where=token_jti.isnot(None)),
-        Index("idx_sessions_refresh_family", "refresh_token_family", postgresql_where=refresh_token_family.isnot(None)),
     )
 
     id: Mapped[str] = Column(UUID(as_uuid=True), primary_key=True, default=uuid4)
@@ -226,7 +224,6 @@ class PolicyVersion(Base):
     __table_args__ = (
         UniqueConstraint("version", name="uq_policy_version"),
         Index("idx_policy_versions_version", "version"),
-        Index("idx_policy_versions_is_active", "is_active", postgresql_where=is_active.is_(True)),
     )
 
     id: Mapped[str] = Column(UUID(as_uuid=True), primary_key=True, default=uuid4)
@@ -419,3 +416,64 @@ class AuditLog(Base):
 
     # Relationships
     actor_user: Mapped[Optional["User"]] = relationship("User", foreign_keys="AuditLog.actor", back_populates="audit_logs", primaryjoin="AuditLog.actor==User.id", viewonly=True)
+
+
+# =============================================================================
+# AlertTimeline - SOC collaboration audit trail
+# =============================================================================
+
+class AlertTimeline(Base):
+    """Immutable audit trail for all SOC analyst actions on alerts."""
+    __tablename__ = "alert_timeline"
+    __table_args__ = (
+        Index("idx_timeline_alert", "alert_id"),
+        Index("idx_timeline_created", "created_at"),
+        Index("idx_timeline_actor", "actor"),
+    )
+
+    id: Mapped[str] = Column(UUID(as_uuid=True), primary_key=True, default=uuid4)
+    alert_id: Mapped[str] = Column(UUID(as_uuid=True), ForeignKey("alerts.id", ondelete="CASCADE"), nullable=False)
+    event_type: Mapped[str] = Column(Text, nullable=False)
+    actor: Mapped[str] = Column(Text, nullable=False)
+    old_value: Mapped[Optional[str]] = Column(Text, nullable=True)
+    new_value: Mapped[Optional[str]] = Column(Text, nullable=True)
+    comment: Mapped[Optional[str]] = Column(Text, nullable=True)
+    ip_address: Mapped[Optional[str]] = Column(INET, nullable=True)
+    created_at: Mapped[datetime] = Column(DateTime(timezone=True), nullable=False, default=now_utc)
+
+    # Relationships
+    alert: Mapped["Alert"] = relationship("Alert", back_populates="timeline")
+
+
+# =============================================================================
+# UserTrustedDevice - Remember This Device
+# =============================================================================
+
+class UserTrustedDevice(Base):
+    """Trusted devices that skip MFA on login."""
+    __tablename__ = "user_trusted_devices"
+    __table_args__ = (
+        Index("idx_trusted_user", "user_id"),
+        Index("idx_trusted_fingerprint", "device_fingerprint"),
+    )
+
+    id: Mapped[str] = Column(UUID(as_uuid=True), primary_key=True, default=uuid4)
+    user_id: Mapped[str] = Column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    device_fingerprint: Mapped[str] = Column(Text, nullable=False)
+    device_name: Mapped[Optional[str]] = Column(Text, nullable=True)
+    last_ip: Mapped[Optional[str]] = Column(INET, nullable=True)
+    last_user_agent: Mapped[Optional[str]] = Column(Text, nullable=True)
+    last_used_at: Mapped[datetime] = Column(DateTime(timezone=True), nullable=False, default=now_utc)
+    expires_at: Mapped[Optional[datetime]] = Column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = Column(DateTime(timezone=True), nullable=False, default=now_utc)
+
+    # Relationships
+    user: Mapped["User"] = relationship("User", back_populates="trusted_devices")
+
+
+# Add back_populates to User model
+User.trusted_devices = relationship("UserTrustedDevice", back_populates="user")
+
+
+# Add back_populates to Alert model
+Alert.timeline = relationship("AlertTimeline", back_populates="alert", order_by="AlertTimeline.created_at")

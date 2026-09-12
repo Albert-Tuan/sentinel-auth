@@ -8,6 +8,8 @@ from app import db
 from app.auth import router as auth_router
 from app.detection import router as detection_router
 from app.ml import router as ml_router
+from app.alerts import router as alerts_router
+from app.devices import router as devices_router
 
 
 @asynccontextmanager
@@ -36,6 +38,8 @@ app.add_middleware(
 app.include_router(auth_router)
 app.include_router(detection_router)
 app.include_router(ml_router)
+app.include_router(alerts_router)
+app.include_router(devices_router)
 
 
 @app.get("/health")
