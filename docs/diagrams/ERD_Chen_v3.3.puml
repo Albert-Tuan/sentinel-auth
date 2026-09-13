@@ -1,54 +1,21 @@
-@startuml ERD_Chen_v3.3
+@startuml ERD_Chen_v3.3_core
+' =============================================================================
+' ERD v3.3 - Chen's Notation (Peter Chen) - CORE-DB
+' Sentinel Auth - Core Database
+' =============================================================================
 
-!define METADATA /'
-================================================================================
-ERD v3.3 - Chen's Notation (Peter Chen)
-Sentinel Auth - 3 Database Architecture
-================================================================================
-Legend:
-  - Entity: Rectangle (hình chữ nhật)
-  - Relationship: Diamond (hình thoi)
-  - Attribute: Ellipse (hình oval), PK underlined
-  - Cardinality: (min, max) format
+title ERD v3.3 - Chen's Notation - <b>CORE-DB</b>
 
-Databases:
-  1. CORE-DB (core-app): 13 tables
-  2. DETECTION-DB (detection-engine): 7 tables
-  3. ML-SERVICE-DB (ml-service): 3 tables
-'/
+skinparam dpi 120
+skinparam shadowing false
 
-' ==============================================================================
-' STYLE DEFINITIONS
-' ==============================================================================
+' ------------------------------------------------------------------------------
+' CORE-DB ENTITIES
+' ------------------------------------------------------------------------------
 
-skinparam rectangle {
-    BackgroundColor #White
-    BorderColor #333333
-    FontSize 11
-    FontStyle Bold
-}
+package "CORE-DB (core-app)" {
 
-skinparam diamond {
-    BackgroundColor #LightBlue
-    BorderColor #333333
-    FontSize 10
-}
-
-skinparam entity {
-    BackgroundColor #LightYellow
-    BorderColor #333333
-    FontSize 11
-}
-
-' ==============================================================================
-' CORE-DB SECTION
-' ==============================================================================
-
-title **CORE-DB Entities (core-app)**
-
-package "CORE-DB" {
-
-    entity "USER" as user <<Entity>> {
+    entity "USER" as user {
         * id : UUID <<PK>>
         --
         username : TEXT <<UK>>
@@ -65,7 +32,7 @@ package "CORE-DB" {
         updated_at : TIMESTAMPTZ
     }
 
-    entity "ROLE" as role <<Entity>> {
+    entity "ROLE" as role {
         * id : TEXT <<PK>>
         --
         name : TEXT
@@ -74,7 +41,7 @@ package "CORE-DB" {
         created_at : TIMESTAMPTZ
     }
 
-    entity "USER_ROLE" as user_role <<Entity>> {
+    entity "USER_ROLE" as user_role {
         * id : UUID <<PK>>
         --
         * user_id : UUID <<FK>>
@@ -83,7 +50,7 @@ package "CORE-DB" {
         assigned_by : UUID <<FK>>
     }
 
-    entity "IP_ADDRESS" as ip_address <<Entity>> {
+    entity "IP_ADDRESS" as ip_address {
         * id : UUID <<PK>>
         --
         * ip_address : INET <<UK>>
@@ -96,7 +63,7 @@ package "CORE-DB" {
         last_seen_at : TIMESTAMPTZ
     }
 
-    entity "SESSION" as session <<Entity>> {
+    entity "SESSION" as session {
         * id : UUID <<PK>>
         --
         * user_id : UUID <<FK>>
@@ -113,7 +80,7 @@ package "CORE-DB" {
         updated_at : TIMESTAMPTZ
     }
 
-    entity "MFA_TRANSACTION" as mfa_transaction <<Entity>> {
+    entity "MFA_TRANSACTION" as mfa_tx {
         * id : UUID <<PK>>
         --
         * user_id : UUID <<FK>>
@@ -127,7 +94,7 @@ package "CORE-DB" {
         updated_at : TIMESTAMPTZ
     }
 
-    entity "MFA_NOTIFICATION" as mfa_notification <<Entity>> {
+    entity "MFA_NOTIFICATION" as mfa_notif {
         * id : UUID <<PK>>
         --
         * mfa_transaction_id : UUID <<FK>>
@@ -143,7 +110,7 @@ package "CORE-DB" {
         created_at : TIMESTAMPTZ
     }
 
-    entity "AUDIT_LOG" as audit_log <<Entity>> {
+    entity "AUDIT_LOG" as audit_log {
         * id : UUID <<PK>>
         --
         request_id : UUID
@@ -160,7 +127,7 @@ package "CORE-DB" {
         created_at : TIMESTAMPTZ
     }
 
-    entity "TRUSTED_DEVICE" as trusted_device <<Entity>> {
+    entity "TRUSTED_DEVICE" as trusted_device {
         * id : UUID <<PK>>
         --
         * user_id : UUID <<FK>>
@@ -173,7 +140,7 @@ package "CORE-DB" {
         created_at : TIMESTAMPTZ
     }
 
-    entity "SYSTEM_SETTING" as system_setting <<Entity>> {
+    entity "SYSTEM_SETTING" as system_setting {
         * key : TEXT <<PK>>
         --
         value : TEXT
@@ -184,7 +151,7 @@ package "CORE-DB" {
         updated_at : TIMESTAMPTZ
     }
 
-    entity "OUTBOX_EVENT" as outbox_event <<Entity>> {
+    entity "OUTBOX_EVENT" as outbox_event {
         * id : UUID <<PK>>
         --
         aggregate_type : TEXT
@@ -201,7 +168,7 @@ package "CORE-DB" {
         published_at : TIMESTAMPTZ
     }
 
-    entity "USER_NOTIFICATION" as user_notification <<Entity>> {
+    entity "USER_NOTIFICATION" as user_notification {
         * id : UUID <<PK>>
         --
         * user_id : UUID <<FK>>
@@ -216,7 +183,7 @@ package "CORE-DB" {
         created_at : TIMESTAMPTZ
     }
 
-    entity "RATE_LIMIT" as rate_limit <<Entity>> {
+    entity "RATE_LIMIT" as rate_limit {
         * ip_address : INET <<PK>>
         * action : TEXT <<PK>>
         --
@@ -227,47 +194,46 @@ package "CORE-DB" {
 
 }
 
-' ==============================================================================
-' CORE-DB RELATIONSHIPS (Chen Notation)
-' ==============================================================================
+' ------------------------------------------------------------------------------
+' CORE-DB RELATIONSHIPS (Chen Notation with cardinality)
+' ------------------------------------------------------------------------------
 
-' User has Roles (M:N via user_role)
-user --{ user_role : "HAS"
-role --{ user_role : "ASSIGNED_TO"
+user ||--o{ user_role : "HAS (1,N)"
+role ||--o{ user_role : "ASSIGNED_TO (1,N)"
+user_role }o--|| user : "assigned_by (0,1)"
 
-' User creates Sessions (1:N)
-user --{ session : "CREATES"
+user ||--o{ session : "CREATES (0,N)"
+session }o--|| ip_address : "FROM (0,1)"
 
-' Session from IP (N:1, optional)
-session }o-- ip_address : "FROM"
+user ||--o{ mfa_tx : "INITIATES (0,N)"
+mfa_tx ||--|| mfa_notif : "CREATES (1,1)"
 
-' User initiates MFA Transactions (1:N)
-user --{ mfa_transaction : "INITIATES"
-
-' MFA Transaction creates Notification (1:1)
-mfa_transaction --|| mfa_notification : "CREATES"
-
-' User actions audit logged (1:N)
-user --{ audit_log : "ACTIONS_BY"
-
-' User registers Trusted Devices (1:N)
-user --{ trusted_device : "REGISTERS"
-
-' User receives Notifications (1:N)
-user --{ user_notification : "RECEIVES"
-
-' User updates System Settings (1:N)
-user --{ system_setting : "UPDATES"
+user ||--o{ audit_log : "ACTIONS_BY (0,N)"
+user ||--o{ trusted_device : "REGISTERS (0,N)"
+user ||--o{ user_notification : "RECEIVES (0,N)"
+user ||--o{ system_setting : "UPDATES (0,N)"
+user ||--o{ outbox_event : "EMITS (0,N)"
 
 @enduml
 
 @startuml ERD_Chen_v3.3_detection
+' =============================================================================
+' ERD v3.3 - Chen's Notation - DETECTION-DB
+' Sentinel Auth - Detection Engine Database
+' =============================================================================
 
-title **DETECTION-DB Entities (detection-engine)**
+title ERD v3.3 - Chen's Notation - <b>DETECTION-DB</b>
 
-package "DETECTION-DB" {
+skinparam dpi 120
+skinparam shadowing false
 
-    entity "POLICY" as policy <<Entity>> {
+' ------------------------------------------------------------------------------
+' DETECTION-DB ENTITIES
+' ------------------------------------------------------------------------------
+
+package "DETECTION-DB (detection-engine)" {
+
+    entity "POLICY" as policy {
         * id : UUID <<PK>>
         --
         * version : TEXT <<UK>>
@@ -282,7 +248,7 @@ package "DETECTION-DB" {
         deactivated_at : TIMESTAMPTZ
     }
 
-    entity "LOGIN_ATTEMPT" as login_attempt <<Entity>> {
+    entity "LOGIN_ATTEMPT" as login_attempt {
         * id : UUID <<PK>>
         --
         * event_id : UUID <<UK>>
@@ -303,10 +269,10 @@ package "DETECTION-DB" {
         updated_at : TIMESTAMPTZ
     }
 
-    entity "RISK_ASSESSMENT" as risk_assessment <<Entity>> {
+    entity "RISK_ASSESSMENT" as risk_assessment {
         * id : UUID <<PK>>
         --
-        * login_attempt_id : UUID <<FK>>
+        * login_attempt_id : UUID <<FK,UK>>
         policy_id : UUID <<FK>>
         rule_score : NUMERIC
         ml_score : NUMERIC
@@ -321,7 +287,7 @@ package "DETECTION-DB" {
         created_at : TIMESTAMPTZ
     }
 
-    entity "DETECTION_LOG" as detection_log <<Entity>> {
+    entity "DETECTION_LOG" as detection_log {
         * id : UUID <<PK>>
         --
         login_attempt_id : UUID <<FK>>
@@ -338,10 +304,10 @@ package "DETECTION-DB" {
         created_at : TIMESTAMPTZ
     }
 
-    entity "SOC_ANALYST" as soc_analyst <<Entity>> {
+    entity "SOC_ANALYST" as soc_analyst {
         * id : UUID <<PK>>
         --
-        * user_id : UUID <<FK>>
+        * user_id : UUID <<FK,UK>>
         display_name : TEXT
         is_active : BOOLEAN
         max_alerts : INTEGER
@@ -349,7 +315,7 @@ package "DETECTION-DB" {
         updated_at : TIMESTAMPTZ
     }
 
-    entity "ALERT" as alert <<Entity>> {
+    entity "ALERT" as alert {
         * id : UUID <<PK>>
         --
         * login_attempt_id : UUID <<FK>>
@@ -368,7 +334,7 @@ package "DETECTION-DB" {
         updated_at : TIMESTAMPTZ
     }
 
-    entity "ALERT_TIMELINE" as alert_timeline <<Entity>> {
+    entity "ALERT_TIMELINE" as alert_timeline {
         * id : UUID <<PK>>
         --
         * alert_id : UUID <<FK>>
@@ -384,52 +350,52 @@ package "DETECTION-DB" {
 
 }
 
-' ==============================================================================
-' DETECTION-DB RELATIONSHIPS (Chen Notation)
-' ==============================================================================
+' ------------------------------------------------------------------------------
+' DETECTION-DB RELATIONSHIPS (Chen Notation with cardinality)
+' ------------------------------------------------------------------------------
 
-' Login Attempt has Risk Assessment (1:1) - UNIQUE constraint
-login_attempt --|| risk_assessment : "HAS"
+login_attempt ||--|| risk_assessment : "HAS (1,1)"
+login_attempt ||--o{ detection_log : "GENERATES (0,N)"
+login_attempt ||--o{ alert : "TRIGGERS (0,N)"
+login_attempt }o--|| policy : "EVALUATED_WITH (0,1)"
+login_attempt }o--o| alert : "PRIMARY_ALERT (0,1)"
 
-' Login Attempt generates Detection Logs (1:N)
-login_attempt --{ detection_log : "GENERATES"
+risk_assessment }o--|| policy : "EVALUATED_WITH (0,1)"
+alert }o--|| policy : "CONTEXT (0,1)"
 
-' Login Attempt triggers Alerts (1:N)
-login_attempt --{ alert : "TRIGGERS"
+alert }o--|| soc_analyst : "ASSIGNED_TO (0,1)"
+alert }o--|| soc_analyst : "RESOLVED_BY (0,1)"
+alert ||--o{ alert_timeline : "HAS (0,N)"
 
-' Login Attempt evaluated with Policy (N:1, optional)
-login_attempt }o--|| policy : "EVALUATED_WITH"
-
-' Risk Assessment evaluated with Policy (N:1, optional)
-risk_assessment }o--|| policy : "EVALUATED_WITH"
-
-' Alert has Policy context (N:1, optional)
-alert }o--|| policy : "CONTEXT"
-
-' Alert assigned to SOC Analyst (N:1, optional)
-alert }o--|| soc_analyst : "ASSIGNED_TO"
-
-' Alert resolved by SOC Analyst (N:1, optional)
-alert }o--|| soc_analyst : "RESOLVED_BY"
-
-' Alert has Timeline (1:N)
-alert --{ alert_timeline : "HAS"
-
-' SOC Analyst is User (1:1) - cross-service
-soc_analyst --|| user : "IS_ANALYST"
-
-' Login Attempt primary Alert (1:1, optional)
-login_attempt --o| alert : "PRIMARY_ALERT"
+' Cross-service reference: soc_analyst.user_id -> user.id (core-db)
+' Represented as informational note
+note right of soc_analyst
+  **Cross-service FK:**
+  soc_analyst.user_id
+  references user.id
+  in core-db
+end note
 
 @enduml
 
 @startuml ERD_Chen_v3.3_ml
+' =============================================================================
+' ERD v3.3 - Chen's Notation - ML-SERVICE-DB
+' Sentinel Auth - ML Service Database
+' =============================================================================
 
-title **ML-SERVICE-DB Entities (ml-service)**
+title ERD v3.3 - Chen's Notation - <b>ML-SERVICE-DB</b>
 
-package "ML-SERVICE-DB" {
+skinparam dpi 120
+skinparam shadowing false
 
-    entity "MODEL_VERSION" as model_version <<Entity>> {
+' ------------------------------------------------------------------------------
+' ML-SERVICE-DB ENTITIES
+' ------------------------------------------------------------------------------
+
+package "ML-SERVICE-DB (ml-service)" {
+
+    entity "MODEL_VERSION" as model_version {
         * id : UUID <<PK>>
         --
         name : TEXT
@@ -448,7 +414,7 @@ package "ML-SERVICE-DB" {
         updated_at : TIMESTAMPTZ
     }
 
-    entity "INFERENCE_LOG" as inference_log <<Entity>> {
+    entity "INFERENCE_LOG" as inference_log {
         * id : UUID <<PK>>
         --
         * request_id : UUID <<UK>>
@@ -466,7 +432,7 @@ package "ML-SERVICE-DB" {
         created_at : TIMESTAMPTZ
     }
 
-    entity "FEATURE_STATISTIC" as feature_statistic <<Entity>> {
+    entity "FEATURE_STATISTIC" as feature_statistic {
         * id : UUID <<PK>>
         --
         * feature_name : TEXT
@@ -486,338 +452,16 @@ package "ML-SERVICE-DB" {
 
 }
 
-' ==============================================================================
-' ML-SERVICE-DB RELATIONSHIPS (Chen Notation)
-' ==============================================================================
-
-' Inference Log references Model Version (FK, same DB)
-inference_log }o--|| model_version : "REFERENCES"
-
-' Detection Engine calls ML Service (HTTP - no FK relationship shown)
-' This is a cross-service call, represented as dashed line
-
-@enduml
-
-@startuml ERD_Chen_v3.3_complete
-
-' ==============================================================================
-' COMPLETE ERD - Chen's Notation
-' Sentinel Auth v3.3 - 3 Databases
-' ==============================================================================
-
-title **Sentinel Auth ERD v3.3 - Chen's Notation\n(Rectangle=Entity, Diamond=Relationship, Oval=Attribute)'
-
-skinparam dpi 120
-skinparam shadowing false
-
 ' ------------------------------------------------------------------------------
-' LEGEND
-' ------------------------------------------------------------------------------
-legend right
-|= Symbol |= Meaning |
-| <<Rectangle>> | Entity (Bảng) |
-| <<Diamond>> | Relationship (Quan hệ) |
-| <<Oval>> | Attribute (Thuộc tính) |
-| **Underline** | Primary Key |
-| (0,1) | Zero or One |
-| (1,1) | Exactly One |
-| (0,N) | Zero to Many |
-| (1,N) | One to Many |
-| -- | Identifying Relationship |
-| .. | Non-Identifying Relationship |
-endlegend
-
-' ==============================================================================
-' CORE-DB: USERS & AUTHENTICATION
-' ==============================================================================
-
-rectangle "USER" <<Entity>> #LightYellow {
-    (id) "PK"
-    (username) "UK"
-    (email) "UK"
-    (password_hash)
-    (full_name)
-    (status)
-    (admin_mfa_required)
-    (detection_mfa_once)
-    (last_login_at)
-    (failed_login_count)
-    (locked_at)
-    (created_at)
-    (updated_at)
-}
-
-rectangle "ROLE" <<Entity>> #LightYellow {
-    (id) "PK"
-    (name)
-    (name_vi)
-    (description)
-    (created_at)
-}
-
-rectangle "USER_ROLE" <<Entity>> #LightYellow {
-    (id) "PK"
-    (user_id) "FK"
-    (role_id) "FK"
-    (assigned_at)
-    (assigned_by) "FK"
-}
-
-rectangle "SESSION" <<Entity>> #LightYellow {
-    (id) "PK"
-    (user_id) "FK"
-    (access_token_hash)
-    (refresh_token_hash)
-    (refresh_token_family)
-    (token_jti) "UK"
-    (expires_at)
-    (last_activity_at)
-    (revoked_at)
-    (ip_address_id) "FK"
-    (user_agent)
-    (created_at)
-    (updated_at)
-}
-
-rectangle "IP_ADDRESS" <<Entity>> #LightYellow {
-    (id) "PK"
-    (ip_address) "UK"
-    (country_code)
-    (country_name)
-    (is_proxy)
-    (is_vpn)
-    (is_tor)
-    (first_seen_at)
-    (last_seen_at)
-}
-
-rectangle "MFA_TRANSACTION" <<Entity>> #LightYellow {
-    (id) "PK"
-    (user_id) "FK"
-    (mfa_type)
-    (status)
-    (bound_ip)
-    (notification_id) "FK"
-    (fail_count)
-    (expires_at)
-    (created_at)
-    (updated_at)
-}
-
-rectangle "MFA_NOTIFICATION" <<Entity>> #LightYellow {
-    (id) "PK"
-    (mfa_transaction_id) "FK"
-    (channel)
-    (recipient)
-    (mfa_code_hash)
-    (sent_at)
-    (delivered_at)
-    (failed_at)
-    (failure_reason)
-    (expires_at)
-    (verified_at)
-    (created_at)
-}
-
-rectangle "SYSTEM_SETTING" <<Entity>> #LightYellow {
-    (key) "PK"
-    (value)
-    (value_type)
-    (description)
-    (category)
-    (updated_by) "FK"
-    (updated_at)
-}
-
-' ------------------------------------------------------------------------------
-' CORE-DB RELATIONSHIPS
+' ML-SERVICE-DB RELATIONSHIPS (Chen Notation with cardinality)
 ' ------------------------------------------------------------------------------
 
-USER }o--o{ USER_ROLE : "(1,N)"
-ROLE }o--o{ USER_ROLE : "(1,N)"
-USER_ROLE }o--|| USER : "(0,1)"
+inference_log }o--|| model_version : "REFERENCES (0,1)"
 
-USER --{ SESSION : "(1,N)"
-SESSION }o--|| IP_ADDRESS : "(0,1)"
-
-USER --{ MFA_TRANSACTION : "(1,N)"
-MFA_TRANSACTION --|| MFA_NOTIFICATION : "(1,1)"
-
-USER --o{ SYSTEM_SETTING : "(0,N)"
-
-' ==============================================================================
-' DETECTION-DB: RISK ASSESSMENT & SOC
-' ==============================================================================
-
-rectangle "POLICY" <<Entity>> #LightBlue {
-    (id) "PK"
-    (version) "UK"
-    (name)
-    (description)
-    (rules)
-    (config)
-    (is_active)
-    (created_by) "FK"
-    (created_at)
-    (activated_at)
-    (deactivated_at)
-}
-
-rectangle "LOGIN_ATTEMPT" <<Entity>> #LightBlue {
-    (id) "PK"
-    (event_id) "UK"
-    (user_id) "FK"
-    (username_attempted)
-    (outcome)
-    (mfa_used)
-    (ip_address)
-    (user_agent)
-    (timestamp)
-    (status)
-    (policy_id) "FK"
-    (request_id)
-    (primary_alert_id) "FK"
-    (risk_level)
-    (detection_decision)
-    (created_at)
-    (updated_at)
-}
-
-rectangle "RISK_ASSESSMENT" <<Entity>> #LightBlue {
-    (id) "PK"
-    (login_attempt_id) "FK,UK"
-    (policy_id) "FK"
-    (rule_score)
-    (ml_score)
-    (combined_score)
-    (ml_status)
-    (ml_model_version)
-    (rule_hits)
-    (ml_reason_codes)
-    (ml_features_used)
-    (risk_level)
-    (decision)
-    (created_at)
-}
-
-rectangle "SOC_ANALYST" <<Entity>> #LightBlue {
-    (id) "PK"
-    (user_id) "FK,UK"
-    (display_name)
-    (is_active)
-    (max_alerts)
-    (created_at)
-    (updated_at)
-}
-
-rectangle "ALERT" <<Entity>> #LightBlue {
-    (id) "PK"
-    (login_attempt_id) "FK"
-    (policy_id) "FK"
-    (request_id)
-    (status)
-    (risk_level)
-    (detection_reason)
-    (detection_scores)
-    (assigned_to_id) "FK"
-    (resolved_by_id) "FK"
-    (resolved_at)
-    (resolution)
-    (notes)
-    (created_at)
-    (updated_at)
-}
-
-rectangle "ALERT_TIMELINE" <<Entity>> #LightBlue {
-    (id) "PK"
-    (alert_id) "FK"
-    (event_type)
-    (actor_id) "FK"
-    (actor_type)
-    (old_value)
-    (new_value)
-    (comment)
-    (ip_address)
-    (created_at)
-}
-
-' ------------------------------------------------------------------------------
-' DETECTION-DB RELATIONSHIPS
-' ------------------------------------------------------------------------------
-
-LOGIN_ATTEMPT --|| RISK_ASSESSMENT : "(1,1)"
-LOGIN_ATTEMPT --{ ALERT : "(1,N)"
-LOGIN_ATTEMPT }o--|| POLICY : "(0,1)"
-
-ALERT }o--|| SOC_ANALYST : "(0,1)" : "assigned"
-ALERT }o--|| SOC_ANALYST : "(0,1)" : "resolved"
-ALERT --{ ALERT_TIMELINE : "(1,N)"
-
-SOC_ANALYST --|| USER : "(1,1)" : "cross-service"
-
-' ==============================================================================
-' ML-SERVICE-DB: MODEL REGISTRY
-' ==============================================================================
-
-rectangle "MODEL_VERSION" <<Entity>> #LightGreen {
-    (id) "PK"
-    (name)
-    (version) "UK"
-    (algorithm)
-    (description)
-    (model_path)
-    (config)
-    (status)
-    (is_production)
-    (trained_by) "FK"
-    (training_date)
-    (deployed_at)
-    (archived_at)
-    (created_at)
-    (updated_at)
-}
-
-rectangle "INFERENCE_LOG" <<Entity>> #LightGreen {
-    (id) "PK"
-    (request_id) "UK"
-    (model_version_id) "FK"
-    (model_version_used)
-    (features)
-    (raw_score)
-    (normalized_score)
-    (is_anomaly)
-    (reason_codes)
-    (model_status)
-    (processing_time_ms)
-    (error_message)
-    (ip_address)
-    (created_at)
-}
-
-rectangle "FEATURE_STATISTIC" <<Entity>> #LightGreen {
-    (id) "PK"
-    (feature_name)
-    (timestamp)
-    (count)
-    (mean)
-    (std)
-    (min)
-    (max)
-    (p25)
-    (p50)
-    (p75)
-    (p95)
-    (anomaly_rate)
-    (created_at)
-}
-
-' ------------------------------------------------------------------------------
-' ML-SERVICE-DB RELATIONSHIPS
-' ------------------------------------------------------------------------------
-
-INFERENCE_LOG }o--|| MODEL_VERSION : "(0,1)"
-
-' Cross-service: Detection Engine calls ML Service (HTTP only, no FK)
-LOGIN_ATTEMPT .dashed.|| MODEL_VERSION : "HTTP call\n(cross-service)"
+note bottom of model_version
+  **ML Service is stateless.**
+  DB used for model registry,
+  inference logs, and feature stats.
+end note
 
 @enduml
