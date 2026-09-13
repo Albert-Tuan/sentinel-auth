@@ -1,17 +1,11 @@
 -- =============================================================================
--- Sentinel Auth - Database Schema v3.2
--- Balanced Normalization: 3NF Compliance + Simplicity
+-- Sentinel Auth - Core Database Schema v3.3
+-- Core app only (without Detection Engine tables)
 --
--- Version: 3.2
+-- Version: 3.3
 -- Date: 2026-09-13
--- Based on: v3.1 with 3NF fixes for transitive dependencies
---
--- Design Decisions:
--- - SOC Analyst là User đặc biệt (1:1 relationship)
--- - Risk Assessment cho mọi Login (1:1 relationship)
--- - IP Address normalized vào bảng riêng
--- - Actor type: user hoặc system
--- - Giữ CHECK constraints cho enums đơn giản
+-- Based on: v3.2
+-- Note: Detection Engine tables moved to schema-detection-v3.3.sql
 -- =============================================================================
 
 -- =============================================================================
@@ -25,7 +19,6 @@ CREATE EXTENSION IF NOT EXISTS "pg_trgm";
 -- HELPER FUNCTIONS
 -- =============================================================================
 
--- Auto-update updated_at column
 CREATE OR REPLACE FUNCTION update_updated_at_column()
 RETURNS TRIGGER AS $$
 BEGIN
@@ -221,220 +214,6 @@ ALTER TABLE mfa_transactions
     FOREIGN KEY (notification_id) REFERENCES mfa_notifications(id) ON DELETE SET NULL;
 
 -- =============================================================================
--- POLICY VERSIONS (Detection Rules Versioning)
--- =============================================================================
-
-CREATE TABLE IF NOT EXISTS policy_versions (
-    id                  UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    version             TEXT NOT NULL UNIQUE,
-    description         TEXT,
-    rules_json          JSONB NOT NULL,
-    weights_json        JSONB NOT NULL DEFAULT '{"rule": 0.4, "ml": 0.6}',
-    thresholds_json     JSONB NOT NULL DEFAULT '{"challenge": 0.3, "block": 0.7}',
-    is_active           BOOLEAN NOT NULL DEFAULT FALSE,
-    created_by_user_id  UUID REFERENCES users(id) ON DELETE SET NULL,
-    created_at         TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    activated_at       TIMESTAMPTZ,
-    deactivated_at      TIMESTAMPTZ,
-
-    CONSTRAINT chk_single_active_policy
-        CHECK (
-            NOT (is_active AND EXISTS (
-                SELECT 1 FROM policy_versions pv2
-                WHERE pv2.is_active = TRUE AND pv2.id != id
-            ))
-        )
-);
-
-CREATE TRIGGER trg_policy_versions_updated_at
-    BEFORE UPDATE ON policy_versions
-    FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
-
-CREATE INDEX idx_policy_versions_version ON policy_versions(version);
-CREATE INDEX idx_policy_versions_active ON policy_versions(is_active) WHERE is_active = TRUE;
-CREATE INDEX idx_policy_versions_creator ON policy_versions(created_by_user_id);
-
--- =============================================================================
--- LOGIN ATTEMPTS (Audit Trail & Detection Source)
--- =============================================================================
-
-CREATE TABLE IF NOT EXISTS login_attempts (
-    id                    UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    user_id               UUID REFERENCES users(id) ON DELETE SET NULL,
-    username_attempted    TEXT,
-    occurred_at           TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    outcome               TEXT NOT NULL
-                            CHECK (outcome IN (
-                                'success', 'failure', 'mfa_required',
-                                'mfa_success', 'mfa_failed', 'blocked', 'locked', 'rate_limited'
-                            )),
-    source_ip             INET,
-    user_agent            TEXT,
-    rate_limited          BOOLEAN NOT NULL DEFAULT FALSE,
-    policy_version_id     UUID REFERENCES policy_versions(id) ON DELETE SET NULL,
-    request_id            UUID NOT NULL DEFAULT gen_random_uuid(),
-    detection_features    JSONB,
-    primary_alert_id      UUID,
-    risk_level            TEXT CHECK (risk_level IN ('low', 'medium', 'high', 'critical')),
-    mfa_used              BOOLEAN NOT NULL DEFAULT FALSE,
-    detection_decision    TEXT CHECK (detection_decision IN ('allow', 'challenge', 'block')),
-    created_at            TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    updated_at            TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);
-
-CREATE TRIGGER trg_login_attempts_updated_at
-    BEFORE UPDATE ON login_attempts
-    FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
-
-CREATE INDEX idx_login_attempts_user ON login_attempts(user_id);
-CREATE INDEX idx_login_attempts_occurred ON login_attempts(occurred_at);
-CREATE INDEX idx_login_attempts_outcome ON login_attempts(outcome);
-CREATE INDEX idx_login_attempts_risk_level ON login_attempts(risk_level);
-CREATE INDEX idx_login_attempts_request ON login_attempts(request_id);
-CREATE INDEX idx_login_attempts_username ON login_attempts(username_attempted);
-CREATE INDEX idx_login_attempts_source_ip ON login_attempts(source_ip);
-CREATE INDEX idx_login_attempts_policy ON login_attempts(policy_version_id);
-
--- =============================================================================
--- RISK ASSESSMENTS (Per Login Attempt - 1:1)
--- =============================================================================
-
-CREATE TABLE IF NOT EXISTS risk_assessments (
-    id                     UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    login_attempt_id       UUID NOT NULL REFERENCES login_attempts(id) ON DELETE CASCADE,
-    policy_version_id      UUID REFERENCES policy_versions(id) ON DELETE SET NULL,
-    rule_score             NUMERIC(5,4),
-    anomaly_score          NUMERIC(5,4),
-    ml_score               NUMERIC(5,4),
-    ml_status              TEXT CHECK (ml_status IN ('success', 'unavailable', 'error')),
-    ml_model_version       TEXT,
-    rule_hits              JSONB,
-    ml_features_used       JSONB,
-    combined_score         NUMERIC(5,4),
-    risk_level             TEXT CHECK (risk_level IN ('low', 'medium', 'high', 'critical')),
-    decision               TEXT CHECK (decision IN ('allow', 'challenge', 'block')),
-    created_at             TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-
-    CONSTRAINT uq_risk_assessment_login UNIQUE (login_attempt_id)
-);
-
-CREATE INDEX idx_risk_assessments_login ON risk_assessments(login_attempt_id);
-CREATE INDEX idx_risk_assessments_risk_level ON risk_assessments(risk_level);
-CREATE INDEX idx_risk_assessments_policy ON risk_assessments(policy_version_id);
-CREATE INDEX idx_risk_assessments_ml_status ON risk_assessments(ml_status);
-
--- =============================================================================
--- DETECTION LOGS (Audit Trail for ML/Rule)
--- =============================================================================
-
-CREATE TABLE IF NOT EXISTS detection_logs (
-    id               UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    login_attempt_id UUID REFERENCES login_attempts(id) ON DELETE SET NULL,
-    request_id       UUID,
-    stage            TEXT NOT NULL CHECK (stage IN ('rule', 'ml', 'combined', 'action')),
-    stage_detail     TEXT,
-    rule_id          UUID,
-    rule_name        TEXT,
-    score            NUMERIC(5,4),
-    decision         TEXT CHECK (decision IN ('allow', 'challenge', 'block')),
-    reason           TEXT,
-    details          JSONB,
-    created_at       TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);
-
-CREATE INDEX idx_detection_logs_login ON detection_logs(login_attempt_id);
-CREATE INDEX idx_detection_logs_stage ON detection_logs(stage);
-CREATE INDEX idx_detection_logs_request ON detection_logs(request_id);
-CREATE INDEX idx_detection_logs_decision ON detection_logs(decision);
-
--- =============================================================================
--- SOC ANALYSTS (Normalized from alerts.assigned_to/resolved_by)
--- =============================================================================
-
-CREATE TABLE IF NOT EXISTS soc_analysts (
-    id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    user_id         UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-    display_name    TEXT,
-    is_active       BOOLEAN NOT NULL DEFAULT TRUE,
-    max_alerts      INTEGER NOT NULL DEFAULT 50,
-    created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-
-    CONSTRAINT uq_soc_analyst_user UNIQUE (user_id)
-);
-
-CREATE TRIGGER trg_soc_analysts_updated_at
-    BEFORE UPDATE ON soc_analysts
-    FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
-
-CREATE INDEX idx_soc_analysts_user ON soc_analysts(user_id);
-CREATE INDEX idx_soc_analysts_active ON soc_analysts(is_active);
-
--- =============================================================================
--- ALERTS (SOC Workflow)
--- =============================================================================
-
-CREATE TABLE IF NOT EXISTS alerts (
-    id                 UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    login_attempt_id   UUID NOT NULL REFERENCES login_attempts(id) ON DELETE CASCADE,
-    policy_version_id  UUID REFERENCES policy_versions(id) ON DELETE SET NULL,
-    request_id         UUID,
-    status             TEXT NOT NULL DEFAULT 'open'
-                         CHECK (status IN ('open', 'acknowledged', 'resolved', 'false_positive')),
-    risk_level         TEXT CHECK (risk_level IN ('low', 'medium', 'high', 'critical')),
-    detection_reason   TEXT,
-    detection_scores   JSONB,
-    assigned_to_id     UUID REFERENCES soc_analysts(id) ON DELETE SET NULL,
-    resolved_by_id     UUID REFERENCES soc_analysts(id) ON DELETE SET NULL,
-    resolved_at        TIMESTAMPTZ,
-    notes              TEXT,
-    created_at         TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    updated_at         TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);
-
-CREATE TRIGGER trg_alerts_updated_at
-    BEFORE UPDATE ON alerts
-    FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
-
-CREATE INDEX idx_alerts_login_attempt ON alerts(login_attempt_id);
-CREATE INDEX idx_alerts_status ON alerts(status);
-CREATE INDEX idx_alerts_risk_level ON alerts(risk_level);
-CREATE INDEX idx_alerts_assigned_to ON alerts(assigned_to_id);
-CREATE INDEX idx_alerts_resolved_by ON alerts(resolved_by_id);
-CREATE INDEX idx_alerts_created ON alerts(created_at);
-CREATE INDEX idx_alerts_policy ON alerts(policy_version_id);
-
--- Add FK from login_attempts to alerts (primary_alert_id)
-ALTER TABLE login_attempts
-    ADD CONSTRAINT fk_login_attempt_primary_alert
-    FOREIGN KEY (primary_alert_id) REFERENCES alerts(id) ON DELETE SET NULL;
-
--- =============================================================================
--- ALERT TIMELINE (SOC Collaboration Audit Trail)
--- =============================================================================
-
-CREATE TABLE IF NOT EXISTS alert_timeline (
-    id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    alert_id        UUID NOT NULL REFERENCES alerts(id) ON DELETE CASCADE,
-    event_type      TEXT NOT NULL CHECK (event_type IN (
-                    'created', 'assigned', 'unassigned', 'acknowledged',
-                    'escalated', 'note_added', 'status_changed', 'resolved'
-                )),
-    actor_id        UUID REFERENCES users(id) ON DELETE SET NULL,
-    actor_type      TEXT NOT NULL CHECK (actor_type IN ('user', 'system')),
-    old_value       TEXT,
-    new_value       TEXT,
-    comment         TEXT,
-    ip_address      INET,
-    created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);
-
-CREATE INDEX idx_alert_timeline_alert ON alert_timeline(alert_id);
-CREATE INDEX idx_alert_timeline_created ON alert_timeline(created_at);
-CREATE INDEX idx_alert_timeline_actor ON alert_timeline(actor_id);
-CREATE INDEX idx_alert_timeline_event_type ON alert_timeline(event_type);
-
--- =============================================================================
 -- AUDIT LOGS (Immutable Audit Trail)
 -- =============================================================================
 
@@ -585,28 +364,6 @@ CREATE TABLE IF NOT EXISTS rate_limits (
 CREATE INDEX idx_rate_limits_window ON rate_limits(window_start);
 
 -- =============================================================================
--- SEED DATA: Default Policy Version
--- =============================================================================
-
-INSERT INTO policy_versions (version, description, rules_json, is_active, created_at) VALUES
-    (
-        'v1.0',
-        'Default detection policy for v1',
-        '{
-            "rules": [
-                {"name": "geo_block", "description": "Block logins from high-risk countries", "conditions": {"countries": ["XX"]}, "score": 0.95, "enabled": true},
-                {"name": "new_country", "description": "Login from new country for user", "conditions": {"threshold_days": 90}, "score": 0.6, "enabled": true},
-                {"name": "asn_reputation", "description": "Low ASN reputation score", "conditions": {"min_reputation": 0.3}, "score": 0.5, "enabled": true},
-                {"name": "failed_attempts", "description": "Multiple failed login attempts", "conditions": {"threshold": 3}, "score": 0.7, "enabled": true},
-                {"name": "unusual_hour", "description": "Login outside usual hours", "conditions": {"hour_range": [0, 6]}, "score": 0.3, "enabled": true}
-            ]
-        }'::jsonb,
-        TRUE,
-        NOW()
-    )
-ON CONFLICT (version) DO NOTHING;
-
--- =============================================================================
 -- SEED DATA: Default System Settings
 -- =============================================================================
 
@@ -623,13 +380,6 @@ INSERT INTO system_settings (key, value, value_type, description, category) VALU
     ('rate_limit.api.max_requests', '100', 'integer', 'Số request API tối đa', 'rate_limit'),
     ('rate_limit.api.window_seconds', '60', 'integer', 'Window cho API rate limit (giây)', 'rate_limit'),
 
-    -- Detection
-    ('detection.rule_weight', '0.4', 'string', 'Trọng số rule engine', 'detection'),
-    ('detection.ml_weight', '0.6', 'string', 'Trọng số ML model', 'detection'),
-    ('detection.challenge_threshold', '0.3', 'string', 'Ngưỡng challenge MFA', 'detection'),
-    ('detection.block_threshold', '0.7', 'string', 'Ngưỡng block', 'detection'),
-    ('detection.mfa_once_threshold', '0.5', 'string', 'Ngưỡng MFA 1 lần', 'detection'),
-
     -- Session
     ('session.access_token_ttl', '900', 'integer', 'Access token TTL (giây)', 'auth'),
     ('session.refresh_token_ttl', '604800', 'integer', 'Refresh token TTL (giây)', 'auth'),
@@ -638,7 +388,11 @@ INSERT INTO system_settings (key, value, value_type, description, category) VALU
 
     -- Notification
     ('notification.enabled', 'true', 'boolean', 'Kích hoạt thông báo', 'notification'),
-    ('notification.new_login_enabled', 'true', 'boolean', 'Thông báo đăng nhập mới', 'notification')
+    ('notification.new_login_enabled', 'true', 'boolean', 'Thông báo đăng nhập mới', 'notification'),
+
+    -- Detection Engine (reference only)
+    ('detection.internal_secret', '', 'string', 'Shared secret for detection-engine communication', 'detection'),
+    ('detection.endpoint_url', 'http://detection-engine:8000', 'string', 'Detection engine URL', 'detection')
 ON CONFLICT (key) DO NOTHING;
 
 -- =============================================================================
@@ -648,33 +402,13 @@ ON CONFLICT (key) DO NOTHING;
 COMMENT ON TABLE users IS 'Core user accounts with authentication and MFA settings.';
 COMMENT ON TABLE roles IS 'Role definitions with i18n support.';
 COMMENT ON TABLE user_roles IS 'User-role assignments with audit trail.';
-COMMENT ON TABLE ip_addresses IS 'Normalized IP address tracking with geolocation.';
+COMMENT ON TABLE ip_addresses IS 'Normalized IP address tracking.';
 COMMENT ON TABLE sessions IS 'Active user sessions with JWT refresh tokens.';
 COMMENT ON TABLE mfa_transactions IS 'MFA challenge transactions.';
 COMMENT ON TABLE mfa_notifications IS 'MFA notification lifecycle tracking.';
-COMMENT ON TABLE policy_versions IS 'Versioned detection rule sets with weights and thresholds.';
-COMMENT ON TABLE login_attempts IS 'All login attempts with outcome and risk metadata.';
-COMMENT ON TABLE risk_assessments IS 'Per-attempt risk scoring (rule + ML + combined).';
-COMMENT ON TABLE detection_logs IS 'Detailed audit trail of detection engine decisions.';
-COMMENT ON TABLE soc_analysts IS 'SOC analyst profiles linked to users.';
-COMMENT ON TABLE alerts IS 'SOC alerts created from high-risk login attempts.';
-COMMENT ON TABLE alert_timeline IS 'Immutable audit trail for all SOC analyst actions on alerts.';
 COMMENT ON TABLE audit_logs IS 'Immutable audit trail of all admin and system actions.';
 COMMENT ON TABLE user_trusted_devices IS 'Trusted devices that skip MFA on login.';
 COMMENT ON TABLE system_settings IS 'Dynamic system configuration values.';
 COMMENT ON TABLE outbox_events IS 'Transactional outbox for reliable event publishing.';
 COMMENT ON TABLE user_notifications IS 'In-app notifications for users.';
 COMMENT ON TABLE rate_limits IS 'Rate limiting counters per IP and action.';
-
--- =============================================================================
--- 3NF COMPLIANCE NOTES
--- =============================================================================
-
--- v3.2 fixes from v3.1:
--- 1. alerts.assigned_to/resolved_by → soc_analysts.id (fixes transitive dependency)
--- 2. alert_timeline.actor → actor_id + actor_type (fixes mixed content)
--- 3. audit_logs.actor → actor_id + actor_type (fixes mixed content)
--- 4. sessions.ip_address → ip_address_id (normalizes repeated IP data)
-
--- CHECK constraints kept for simple enums (status, risk_level, etc.)
--- Reference tables NOT created for these enums to maintain simplicity

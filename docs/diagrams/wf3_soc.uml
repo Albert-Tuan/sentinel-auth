@@ -1,0 +1,72 @@
+@startuml
+skinparam backgroundColor #FFFFFF
+
+title WF-3: SOC — Xem và xử lý Alert
+
+participant "SOC Analyst\n(Browser)" as S #CCE5FF
+participant "Auth API\n(SOC endpoints)" as A #DAE8FC
+participant "PostgreSQL" as DB #F5F5F5
+
+== List Alerts ==
+
+S -> A : **1. GET /api/v1/alerts**\n?status=open&risk_level=high
+activate A
+
+A -> DB : 2. SELECT alerts\nWHERE status=? AND risk_level=?
+activate DB
+DB --> A : [alert1, alert2, ...]
+deactivate DB
+
+A --> S : **200 OK**\n{alerts: [{id, risk_level,\nuser_id, created_at...}]}
+deactivate A
+
+== Alert Detail ==
+
+S -> A : **3. GET /api/v1/alerts/{id}**
+activate A
+
+A -> DB : 4. SELECT alert\n+ login_attempt info
+activate DB
+DB --> A : {alert detail}
+deactivate DB
+
+A --> S : **200 OK**\n{alert: {...}}
+deactivate A
+
+== Handle Alert ==
+
+alt Acknowledge
+    S -> A : **5a. PATCH /api/v1/alerts/{id}**\n{status: "acknowledged", notes: "..."}
+    activate A
+    A -> DB : 6a. UPDATE alert\n(status=acknowledged,\nassigned_to=S.id, notes)
+    activate DB
+    deactivate DB
+    A --> S : **200 OK**\n{alert: {status: "acknowledged"}}
+    deactivate A
+
+else Resolve
+    S -> A : **5b. PATCH /api/v1/alerts/{id}**\n{status: "resolved", notes,\nresolved_by: S.id}
+    activate A
+    A -> DB : 6b. UPDATE alert\n(status=resolved, resolved_by,\nresolved_at, notes)
+    activate DB
+    deactivate DB
+    A --> S : **200 OK**\n{alert: {status: "resolved"}}
+    deactivate A
+
+else Mark False Positive
+    S -> A : **5c. PATCH /api/v1/alerts/{id}**\n{status: "false_positive", notes}
+    activate A
+    A -> DB : 6c. UPDATE alert\n(status=false_positive,\nresolved_by, resolved_at)
+    activate DB
+    deactivate DB
+    A --> S : **200 OK**\n{alert: {status: "false_positive"}}
+    deactivate A
+end
+
+legend right
+  Alert State Machine:
+  **open** → acknowledged → **resolved**
+                     ↘ **false_positive**
+endlegend
+
+@enduml
