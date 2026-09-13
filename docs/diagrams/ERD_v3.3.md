@@ -13,6 +13,9 @@
 | 2 | Alert:LoginAttempt? | 1:N | **Giữ v3.2** | `primary_alert_id` cho phép 1 login → nhiều alerts |
 | 3 | Detection Logs Stage? | rule/ml/combined/action | **Thêm chi tiết** | rule_evaluation, ml_call, scoring, action_sent |
 | 4 | Detection Engine DB? | Chung với Core | **Tách riêng** | Detection Engine có DB riêng |
+| 5 | risk_assessments:login_attempts? | ERD gốc khai báo 1:N | **Sửa thành 1:1** | UNIQUE constraint trên login_attempt_id |
+| 6 | inference_logs:model_versions? | ERD gốc vẽ nét đứt | **Sửa thành nét liền** | Cùng ml-service-db = FK thật |
+| 7 | system_settings.updated_by? | ERD gốc thiếu | **Thêm quan hệ 1:N** | FK có trong schema nhưng thiếu trong ERD |
 
 ---
 
@@ -417,16 +420,17 @@ erDiagram
     %% Core: Users → Notifications (1:N, CASCADE)
     users ||--o{ user_notifications : "receives"
 
-    %% ============================================================================
+    %% Core: Users → System Settings (1:N, OPTIONAL) — updated_by
+    users ||--o{ system_settings : "updates"
+
     %% Detection: Login Attempts Flow
     %% ============================================================================
 
     %% Core → Detection: LoginEvent triggers LoginAttempt
-    login_attempts_de ||--o{ risk_assessments : "evaluated by"
     login_attempts_de ||--o{ detection_logs : "generates"
     login_attempts_de ||--o{ alerts : "triggers"
 
-    %% Detection: Risk Assessment per Login (1:1)
+    %% Detection: Risk Assessment per Login (1:1) — UNIQUE constraint enforces 1:1
     login_attempts_de ||--|| risk_assessments : "has"
 
     %% Detection: Login → Primary Alert (1:1, OPTIONAL)
@@ -460,12 +464,14 @@ erDiagram
     soc_analysts ||--|| users : "is_analyst"
 
     %% ============================================================================
-    %% ML Service: Detection → ML
+    %% ML Service: Intra-DB Relationships
     %% ============================================================================
 
-    %% Detection Engine calls ML Service (no DB relationship)
-    detection_logs }o..|| model_versions : "uses model"
-    inference_logs }o..|| model_versions : "references"
+    %% ML Service: inference_logs → model_versions (FK, cùng ml-service-db)
+    inference_logs }o--|| model_versions : "references"
+
+    %% Detection Engine calls ML Service (HTTP, cross-service)
+    detection_logs }o..|| model_versions : "calls"
 ```
 ```
 
