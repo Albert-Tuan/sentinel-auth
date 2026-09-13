@@ -1,0 +1,133 @@
+# WF-5: Session Management
+
+## Mermaid Source
+
+```mermaid
+sequenceDiagram
+    participant U as User
+    participant A as Auth API
+    participant DB as PostgreSQL
+
+    == Create Session ==
+
+    U->>A: POST /auth/login (username, password)
+    A->>DB: SELECT user WHERE username
+    DB-->>A: user record
+
+    alt MFA not required
+        A->>DB: INSERT session (token_jti, expires_at)
+        A-->>U: 200 {access_token, refresh_token}
+    else MFA required
+        A-->>U: 200 MFA_REQUIRED
+        U->>A: POST /mfa/verify
+        A->>DB: INSERT session
+        A-->>U: 200 {access_token, refresh_token}
+    end
+
+    == Token Refresh ==
+
+    U->>A: POST /auth/refresh (refresh_token)
+    A->>DB: SELECT session WHERE refresh_token_hash=?
+
+    alt valid + not expired
+        A->>DB: UPDATE session (new expires_at)
+        A-->>U: 200 {access_token}
+    else expired/revoked
+        A-->>U: 401 TOKEN_EXPIRED
+    end
+
+    == Logout (Single Session) ==
+
+    U->>A: POST /auth/logout (access_token)
+    A->>DB: UPDATE session (revoked_at = NOW())
+    A-->>U: 200 {logged_out: true}
+
+    == Logout (All Sessions) ==
+
+    U->>A: POST /auth/logout-all
+    A->>DB: UPDATE session WHERE user_id (revoked_at = NOW())
+    A-->>U: 200 {logged_out_all: true, sessions_revoked: N}
+
+    == List Sessions ==
+
+    U->>A: GET /api/v1/sessions
+    A->>DB: SELECT sessions WHERE user_id = current_user_id
+    DB-->>A: [sessions...]
+    A-->>U: 200 {sessions: [...]}
+
+    == Revoke Own Session ==
+
+    U->>A: DELETE /api/v1/sessions/{id}
+    alt own session
+        A->>DB: UPDATE session (revoked_at = NOW())
+        A-->>U: 200 {revoked: true}
+    else not own
+        A-->>U: 403 FORBIDDEN
+    end
+```
+
+## Session Flow
+
+```mermaid
+flowchart TD
+    subgraph Login["Login Flow"]
+        L["POST /auth/login"] --> U{User<br/>exists?}
+        U --> |no| E["401 Invalid"]
+        U --> |yes| P{Password<br/>correct?}
+        P --> |no| E
+        P --> |yes| MFA{MFA<br/>required?}
+        MFA --> |yes| MFAV["POST /mfa/verify"]
+        MFA --> |no| CS["Create Session"]
+        MFAV --> CS
+    end
+
+    subgraph Token["Token Lifecycle"]
+        CS --> AT["Access Token<br/>(15 min)"]
+        AT --> RE{Refresh?}
+        RE --> |yes| RT["POST /auth/refresh"]
+        RT --> AT
+        RE --> |expired| L
+    end
+
+    subgraph Logout["Logout"]
+        AT --> LOG["POST /auth/logout"]
+        LOG --> RL["Revoke Session"]
+        RL --> DONE["Logged Out"]
+    end
+
+    style Login fill:#d4edda
+    style Token fill:#fff3cd
+    style Logout fill:#f8d7da
+```
+
+## API Endpoints
+
+| Method | Endpoint | Mô tả |
+|--------|----------|--------|
+| POST | `/api/v1/auth/login` | Đăng nhập, tạo session |
+| POST | `/api/v1/auth/refresh` | Refresh access token |
+| POST | `/api/v1/auth/logout` | Logout session hiện tại |
+| POST | `/api/v1/auth/logout-all` | Logout tất cả sessions |
+| GET | `/api/v1/sessions` | List active sessions |
+| DELETE | `/api/v1/sessions/{id}` | Revoke một session |
+| POST | `/api/v1/admin/sessions/{id}/revoke` | Admin revoke session |
+
+## Token Configuration
+
+| Token | Lifetime | Storage |
+|-------|----------|---------|
+| Access Token | 15 minutes | JWT (stateless) |
+| Refresh Token | 7 days | PostgreSQL (hashed) |
+| MFA Session | 5 minutes | PostgreSQL |
+
+## Session States
+
+```mermaid
+stateDiagram-v2
+    [*] --> Active: INSERT session
+    Active --> Active: UPDATE last_activity
+    Active --> Revoked: POST /logout
+    Active --> Expired: expires_at reached
+    Revoked --> [*]
+    Expired --> [*]
+```

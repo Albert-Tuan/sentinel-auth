@@ -1,0 +1,310 @@
+# Workflows — Mermaid source
+
+These diagrams render in any Markdown viewer that supports Mermaid
+(GitHub, GitLab, VS Code with Mermaid extension).
+
+---
+
+## WF-1: Đăng nhập
+
+```mermaid
+sequenceDiagram
+    participant U as User
+    participant A as Auth API
+    participant DB as PostgreSQL
+
+    U->>A: POST /api/v1/auth/login<br/>(username, password, source_ip)
+    A->>DB: SELECT user WHERE username
+    DB-->>A: user record (hash, status)
+
+    alt user not found OR wrong password
+        A-->>U: 401 {"error": "Invalid credentials"}
+    else user locked/suspended
+        A-->>U: 403 {"error": "Account unavailable"}
+    else credentials valid + MFA disabled
+        A->>DB: INSERT login_attempt (outcome=success)
+        A->>DB: INSERT session (token_hash, expires_at)
+        A-->>U: 200 {access_token, refresh_token}
+    else credentials valid + MFA enabled
+        A->>DB: INSERT pre_auth_transaction (status=pending, expires_at+5min)
+        A-->>U: 200 {mfa_required: true, session_id}
+    end
+
+    Note over U,A: MFA flow (nếu mfa_required=true)
+
+    U->>A: POST /api/v1/auth/mfa/verify<br/>(session_id, mfa_code)
+    A->>DB: SELECT pre_auth_transaction WHERE id=session_id
+    DB-->>A: transaction record
+
+    alt code wrong OR expired OR IP mismatch
+        A->>DB: UPDATE pre_auth_transaction (status=failed)
+        A-->>U: 401 {"error": "MFA failed"}
+    else code valid
+        A->>DB: UPDATE pre_auth_transaction (status=completed)
+        A->>DB: INSERT login_attempt (outcome=mfa_success)
+        A->>DB: INSERT session (token_hash, expires_at)
+        A-->>U: 200 {access_token, refresh_token}
+    end
+```
+
+---
+
+## WF-2: Detection Inline
+
+```mermaid
+sequenceDiagram
+    participant A as Auth API
+    participant D as Detection API
+    participant ML as ML API
+    participant DB as PostgreSQL
+
+    Note over A,D: Sau khi login thành công (WF-1)
+
+    A->>D: POST /internal/v1/detect<br/>(login_attempt_id, user_id, source_ip, ...)
+    D->>DB: SELECT user history<br/>(fail_count_24h, ip_change_rate, ...)
+
+    par Trích features
+        D->>D: Tính rule_score<br/>(IP mới? Fail nhiều? Giờ lạ?)
+    and Gọi ML
+        D->>ML: POST /internal/v1/ml/score<br/>(features)
+        ML-->>D: {anomaly_score, is_anomaly, reason_codes}
+    end
+
+    D->>DB: INSERT risk_assessment<br/>(rule_score, anomaly_score, ml_status, risk_level)
+
+    alt risk_level IN (high, critical)
+        D->>DB: INSERT alert (status=open, risk_level)
+        D-->>A: 200 {alert_created: true}
+    else risk_level IN (low, medium)
+        D-->>A: 200 {alert_created: false}
+    end
+
+    Note over D: ML unavailable → ml_status=error<br/>→ risk_level = medium (fallback)
+```
+
+---
+
+## WF-3: SOC xem và xử lý Alert
+
+```mermaid
+sequenceDiagram
+    participant S as SOC Analyst
+    participant A as Auth API
+    participant DB as PostgreSQL
+
+    S->>A: GET /api/v1/alerts<br/>(status=open, risk_level=high)
+    A->>DB: SELECT alerts WHERE status=? AND risk_level=?
+    DB-->>A: [alert1, alert2, ...]
+    A-->>S: 200 {alerts: [...]}
+
+    S->>A: GET /api/v1/alerts/{id}
+    A->>DB: SELECT alert WHERE id=?
+    DB-->>A: alert detail + login_attempt info
+    A-->>S: 200 {alert: {...}}
+
+    alt Acknowledge alert
+        S->>A: PATCH /api/v1/alerts/{id}<br/>{status: "acknowledged", notes: "..."}
+        A->>DB: UPDATE alert (status=acknowledged, assigned_to=S.id)
+        A-->>S: 200 {alert: {status: "acknowledged"}}
+    else Resolve alert (false positive)
+        S->>A: PATCH /api/v1/alerts/{id}<br/>{status: "resolved", notes: "user traveling", resolved_by: S.id}
+        A->>DB: UPDATE alert (status=resolved, resolved_by, resolved_at)
+        A-->>S: 200 {alert: {status: "resolved"}}
+    end
+```
+
+---
+
+## WF-4: MFA Flow - Chi tiết
+
+```mermaid
+sequenceDiagram
+    participant U as User
+    participant A as Auth API
+    participant N as MFA Notification
+    participant DB as PostgreSQL
+
+    Note over U,A: MFA được trigger khi:<br/>1. Login với MFA enabled<br/>2. Risk level HIGH/CRITICAL<br/>3. Sensitive operation
+
+    == MFA Types ==
+
+    alt MFA via EMAIL OTP
+        A->>N: Send OTP via Email
+        N-->>A: notification_id
+        A->>DB: INSERT mfa_notification (channel=email)
+        A-->>U: 200 {mfa_type: "email_otp", expires_in: 300}
+        U->>A: POST /mfa/verify (code: "123456")
+
+    else MFA via SMS OTP
+        A->>N: Send OTP via SMS
+        N-->>A: notification_id
+        A->>DB: INSERT mfa_notification (channel=sms)
+        A-->>U: 200 {mfa_type: "sms_otp", expires_in: 300}
+        U->>A: POST /mfa/verify (code: "123456")
+
+    else MFA via TOTP (Authenticator)
+        A-->>U: 200 {mfa_type: "totp", setup_url: "otpauth://..."}
+        Note over U: User nhập code từ<br/>Google Authenticator
+        U->>A: POST /mfa/verify (code: "123456")
+
+    else MFA via PUSH Notification
+        A->>N: Send Push Notification
+        N-->>A: notification_id
+        A-->>U: 200 {mfa_type: "push", expires_in: 120}
+        Note over U: User approve trên mobile app
+        U->>A: POST /mfa/verify (action: "approve")
+    end
+
+    == Verification ==
+
+    A->>DB: SELECT mfa_transaction WHERE id=session_id
+    DB-->>A: transaction record
+
+    alt Invalid / Expired / IP Mismatch
+        A->>DB: UPDATE mfa_transaction (status=failed, fail_count+1)
+        alt fail_count >= 3
+            A->>DB: UPDATE user (status=locked)
+            A-->>U: 403 ACCOUNT_LOCKED
+        else fail_count < 3
+            A-->>U: 401 MFA_FAILED (attempts_remaining: 2)
+        end
+    else Valid / Approved
+        A->>DB: UPDATE mfa_transaction (status=completed)
+        A->>DB: INSERT session
+        A-->>U: 200 OK {access_token, mfa_verified: true}
+    end
+
+    == Trusted Device (Persistent MFA) ==
+
+    alt User selects "Trust this device"
+        U->>A: POST /mfa/trust-device (device_fingerprint)
+        A->>DB: INSERT user_trusted_devices
+        A-->>U: 200 {trusted: true, expires_at: "+30 days"}
+    end
+
+    Note over U: Lần đăng nhập sau với<br/>trusted device → Không cần OTP
+```
+
+---
+
+## WF-5: Session Management
+
+```mermaid
+sequenceDiagram
+    participant U as User
+    participant A as Auth API
+    participant DB as PostgreSQL
+
+    == Create Session ==
+
+    U->>A: POST /auth/login (username, password)
+    A->>DB: SELECT user WHERE username
+    DB-->>A: user record
+
+    alt MFA not required
+        A->>DB: INSERT session (token_jti, expires_at)
+        A-->>U: 200 {access_token, refresh_token}
+    else MFA required
+        A-->>U: 200 MFA_REQUIRED
+        U->>A: POST /mfa/verify
+        A->>DB: INSERT session
+        A-->>U: 200 {access_token, refresh_token}
+    end
+
+    == Token Refresh ==
+
+    U->>A: POST /auth/refresh (refresh_token)
+    A->>DB: SELECT session WHERE refresh_token_hash=?
+
+    alt valid + not expired
+        A->>DB: UPDATE session (new expires_at)
+        A-->>U: 200 {access_token}
+    else expired/revoked
+        A-->>U: 401 TOKEN_EXPIRED
+    end
+
+    == Logout (Single Session) ==
+
+    U->>A: POST /auth/logout (access_token)
+    A->>DB: UPDATE session (revoked_at = NOW())
+    A-->>U: 200 {logged_out: true}
+
+    == Logout (All Sessions) ==
+
+    U->>A: POST /auth/logout-all
+    A->>DB: UPDATE session WHERE user_id (revoked_at = NOW())
+    A-->>U: 200 {logged_out_all: true, sessions_revoked: N}
+
+    == List Sessions ==
+
+    U->>A: GET /api/v1/sessions
+    A->>DB: SELECT sessions WHERE user_id = current_user_id
+    DB-->>A: [sessions...]
+    A-->>U: 200 {sessions: [...]}
+
+    == Revoke Own Session ==
+
+    U->>A: DELETE /api/v1/sessions/{id}
+    alt own session
+        A->>DB: UPDATE session (revoked_at = NOW())
+        A-->>U: 200 {revoked: true}
+    else not own
+        A-->>U: 403 FORBIDDEN
+    end
+```
+
+---
+
+## Tổng quan kiến trúc
+
+```mermaid
+flowchart LR
+    subgraph Auth["WF-1: Auth + WF-5: Sessions"]
+        L["POST /auth/login"] --> MFA{"MFA?"}
+        MFA --> |yes| V["POST /auth/mfa/verify"]
+        MFA --> |no| S["Session → Token"]
+        V --> S
+        S --> R["POST /auth/refresh"]
+        S --> O["POST /auth/logout"]
+    end
+
+    subgraph MFA["WF-4: MFA Flow"]
+        V --> MT["MFA Types"]
+        MT --> |email| E["Email OTP"]
+        MT --> |sms| SM["SMS OTP"]
+        MT --> |totp| T["TOTP Authenticator"]
+        MT --> |push| P["Push Notification"]
+    end
+
+    subgraph Detect["WF-2: Detection"]
+        S --> D["POST /internal/v1/detect"]
+        D --> F["Trích features"]
+        F --> ML["POST /internal/v1/ml/score"]
+        ML --> AL{"Alert?"}
+        AL --> |high/critical| A["INSERT alert"]
+        AL --> |low/medium| OK["Không alert"]
+    end
+
+    subgraph SOC["WF-3: SOC"]
+        A --> SOC["GET /alerts"]
+        SOC --> ACK["PATCH /alerts/{id}"]
+        SOC --> RES["PATCH /alerts/{id} (resolve)"]
+    end
+
+    style Auth fill:#d4edda,stroke:#28a745
+    style MFA fill:#e1d5e7,stroke:#9673a6
+    style Detect fill:#fff3cd,stroke:#ffc107
+    style SOC fill:#cce5ff,stroke:#17a2b8
+```
+
+---
+
+## Bảng tổng hợp Workflows
+
+| ID | Tên | Mô tả | Actors |
+|----|-----|--------|--------|
+| WF-1 | Login Flow | Đăng nhập + MFA verification | User |
+| WF-2 | Detection Inline | Risk assessment + ML scoring | System |
+| WF-3 | SOC Alert | Xem và xử lý alert | SOC Analyst |
+| WF-4 | MFA Flow | Chi tiết các loại MFA | User |
+| WF-5 | Session Management | Login, logout, refresh token | User |

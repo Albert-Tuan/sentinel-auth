@@ -1,0 +1,138 @@
+@startuml
+skinparam backgroundColor #FFFFFF
+
+title WF-4: MFA Flow - Chi tiết các loại MFA
+
+participant "User\n(Browser/App)" as U #D5E8D4
+participant "Auth API" as A #DAE8FC
+participant "MFA\nNotification" as N #E1D5E7
+participant "PostgreSQL" as DB #F5F5F5
+
+== MFA Initiation ==
+
+note over U, DB
+  **Trigger MFA:**
+  1. Login với MFA enabled
+  2. Risk level HIGH/CRITICAL
+  3. Sensitive operation
+  4. Periodic re-auth
+end note
+
+A -> DB : INSERT mfa_transaction\n(type=one_time/persistent, status=pending)
+activate DB
+deactivate DB
+
+alt MFA via EMAIL
+    A -> N : Send OTP via Email
+    activate N
+    N --> A : notification_id
+    deactivate N
+    A -> DB : INSERT mfa_notification\n(channel=email, recipient)
+    activate DB
+    deactivate DB
+    A --> U : **200 MFA_REQUIRED**\n{mfa_type: "email_otp", expires_in: 300}
+
+    U -> A : **POST /mfa/verify**\n(code: "123456")
+    
+else MFA via SMS
+    A -> N : Send OTP via SMS
+    activate N
+    N --> A : notification_id
+    deactivate N
+    A -> DB : INSERT mfa_notification\n(channel=sms, recipient)
+    activate DB
+    deactivate DB
+    A --> U : **200 MFA_REQUIRED**\n{mfa_type: "sms_otp", expires_in: 300}
+
+    U -> A : **POST /mfa/verify**\n(code: "123456")
+
+else MFA via TOTP (Authenticator)
+    A --> U : **200 MFA_REQUIRED**\n{mfa_type: "totp", setup_url: "otpauth://..."}
+    
+    note right: User nhập code từ\nGoogle Authenticator\nhoặc tương tự
+    
+    U -> A : **POST /mfa/verify**\n(code: "123456")
+
+else MFA via PUSH_NOTIFICATION
+    A -> N : Send Push Notification
+    activate N
+    N --> A : notification_id
+    deactivate N
+    A -> DB : INSERT mfa_notification\n(channel=push)
+    activate DB
+    deactivate DB
+    A --> U : **200 MFA_REQUIRED**\n{mfa_type: "push", expires_in: 120}
+
+    note over U: User approve trên\nmobile app
+    
+    U -> A : **POST /mfa/verify**\n{action: "approve"} hoặc {action: "reject"}
+end
+
+== MFA Verification ==
+
+A -> DB : SELECT mfa_transaction WHERE id=session_id
+activate DB
+DB --> A : transaction record
+deactivate DB
+
+alt Invalid Code / Expired / IP Mismatch
+    A -> DB : UPDATE mfa_transaction\n(status=failed, fail_count+1)
+    activate DB
+    deactivate DB
+    
+    alt fail_count >= 3
+        A -> DB : UPDATE user\n(status=locked)
+        activate DB
+        deactivate DB
+        A --> U : **403 ACCOUNT_LOCKED**\n{max_attempts_reached: true}
+    else fail_count < 3
+        A --> U : **401 MFA_FAILED**\n{attempts_remaining: 2}
+    end
+
+else Valid Code / Approved
+    A -> DB : UPDATE mfa_transaction\n(status=completed, verified_at)
+    activate DB
+    deactivate DB
+    
+    alt persistent MFA
+        A -> DB : INSERT persistent_mfa_token\n(user_id, device_fingerprint)
+        activate DB
+        deactivate DB
+    end
+    
+    A --> U : **200 OK**\n{access_token, refresh_token, mfa_verified: true}
+end
+
+== Persistent MFA (Remember Device) ==
+
+note over U, DB
+  **Persistent MFA Flow:**
+  Sau khi verify thành công,
+  user có thể chọn "Trust this device"
+  → sinh persistent token
+end note
+
+alt User clicks "Trust this device"
+    U -> A : **POST /mfa/trust-device**\n{device_fingerprint: "..."}
+    A -> DB : INSERT user_trusted_devices\n(user_id, device_fingerprint, expires_at)
+    activate DB
+    deactivate DB
+    A --> U : **200 OK**\n{trusted: true, expires_at: "+30 days"}
+end
+
+== Next Login with Trusted Device ==
+
+U -> A : **POST /auth/login**\n(device_fingerprint included)
+A -> DB : Check user_trusted_devices\nWHERE device_fingerprint=?
+activate DB
+DB --> A : trusted device found
+deactivate DB
+
+alt Trusted device valid
+    A -> DB : INSERT mfa_transaction\n(type=trusted_device, status=completed)
+    activate DB
+    deactivate DB
+    A --> U : **200 OK**\n{access_token} **← Không cần OTP**
+end
+
+@enduml

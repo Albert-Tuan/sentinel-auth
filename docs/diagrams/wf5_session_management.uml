@@ -1,0 +1,166 @@
+@startuml
+skinparam backgroundColor #FFFFFF
+
+title WF-5: Session Management
+
+participant "User\n(Browser/App)" as U #D5E8D4
+participant "Auth API" as A #DAE8FC
+participant "PostgreSQL" as DB #F5F5F5
+
+== Login Flow (Create Session) ==
+
+U -> A : **POST /auth/login**\n(username, password)
+activate A
+
+A -> DB : SELECT user WHERE username
+activate DB
+DB --> A : user record
+deactivate DB
+
+alt credentials valid + MFA not required
+    A -> DB : INSERT session\n(token_jti, access_token_hash,\nrefresh_token_hash, expires_at)
+    activate DB
+    deactivate DB
+    
+    A --> U : **200 OK**\n{access_token, refresh_token,\nexpires_in: 900}
+
+else credentials valid + MFA required
+    A -> DB : INSERT mfa_transaction (pending)
+    activate DB
+    deactivate DB
+    A --> U : **200 MFA_REQUIRED**\n{session_id, mfa_type}
+    
+    U -> A : **POST /auth/mfa/verify**
+    A -> DB : UPDATE mfa_transaction (completed)
+    A -> DB : INSERT session
+    activate DB
+    deactivate DB
+    A --> U : **200 OK**\n{access_token, refresh_token}
+end
+
+== Token Refresh ==
+
+U -> A : **POST /auth/refresh**\n(refresh_token)
+activate A
+
+A -> DB : SELECT session WHERE refresh_token_hash=?
+activate DB
+DB --> A : session record
+deactivate DB
+
+alt refresh_token valid + not revoked
+    alt access_token still valid (not expired)
+        A --> U : **200 OK**\n{use_current_token: true}
+    else access_token expired
+        A -> DB : UPDATE session\n(new token_jti, new expires_at)
+        activate DB
+        deactivate DB
+        A --> U : **200 OK**\n{access_token, expires_in: 900}
+    end
+else refresh_token expired / revoked
+    A --> U : **401 TOKEN_EXPIRED**\n{relogin_required: true}
+end
+
+== Logout (Single Session) ==
+
+U -> A : **POST /auth/logout**\n(access_token)
+activate A
+
+A -> DB : UPDATE session\n(revoked_at = NOW())
+activate DB
+deactivate DB
+
+A --> U : **200 OK**\n{logged_out: true}
+
+== Logout (All Sessions) ==
+
+U -> A : **POST /auth/logout-all**\n(access_token)
+activate A
+
+A -> DB : UPDATE session\n(revoked_at = NOW())\nWHERE user_id = current_user_id
+activate DB
+deactivate DB
+
+A --> U : **200 OK**\n{logged_out_all: true, sessions_revoked: 5}
+
+== Revoke Session (Admin) ==
+
+note over U
+  **Security Admin có thể revoke\nsessions của user khác**
+end note
+
+U -> A : **POST /admin/sessions/{id}/revoke**\n(admin_token)
+activate A
+
+A -> DB : UPDATE session\n(revoked_at = NOW(), revoked_by = admin_id)
+activate DB
+deactivate DB
+
+A -> DB : INSERT audit_log\n(action="session_revoked_by_admin")
+activate DB
+deactivate DB
+
+A --> U : **200 OK**\n{revoked: true}
+
+== Session Activity Update ==
+
+note over U
+  **Background: Cập nhật last_activity_at\nđịnh kỳ mỗi request**
+end note
+
+U -> A : Any API request\n(with access_token)
+activate A
+
+A -> DB : UPDATE session\n(last_activity_at = NOW())
+activate DB
+deactivate DB
+
+== Session Expiry Check ==
+
+note over A, DB
+  **Token Expiry Handling:**
+  1. Client gửi access_token
+  2. API check exp claim trong JWT
+  3. Nếu expired → reject với 401
+  4. Client dùng refresh_token
+  5. Hoặc user phải login lại
+end note
+
+alt Token expired
+    A --> U : **401 TOKEN_EXPIRED**\nWWW-Authenticate: Bearer realm="access_token"
+    U -> A : **POST /auth/refresh** (refresh_token)
+end
+
+== List Active Sessions ==
+
+U -> A : **GET /api/v1/sessions**\n(access_token)
+activate A
+
+A -> DB : SELECT sessions\nWHERE user_id = current_user_id\nAND revoked_at IS NULL
+activate DB
+DB --> A : [session1, session2, ...]
+deactivate DB
+
+A --> U : **200 OK**\n{sessions: [
+  {id, device, ip, last_activity, created_at}
+]}
+
+== Revoke Own Session ==
+
+U -> A : **DELETE /api/v1/sessions/{id}**\n(access_token)
+activate A
+
+A -> DB : SELECT session WHERE id=?
+activate DB
+DB --> A : session record
+
+alt session.user_id = current_user_id
+    A -> DB : UPDATE session\n(revoked_at = NOW())
+    activate DB
+    deactivate DB
+    A --> U : **200 OK**\n{revoked: true}
+else not own session
+    A --> U : **403 FORBIDDEN**
+end
+
+@enduml
