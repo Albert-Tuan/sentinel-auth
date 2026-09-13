@@ -288,20 +288,30 @@ async def update_setting(...)
 
 ## VI. FILES CREATED/UPDATED
 
+### Files
+
 | File | Action | Description |
 |------|--------|-------------|
-| `docs/02_BangYeuCauChucNangNghiepVu_SentinelAuth_v2.md` | Created | Bảng nghiệp vụ sửa đổi |
-| `docs/02_BangYeuCauMLService_SentinelAuth_v2.md` | Created | Bảng ML Service sửa đổi |
-| `docs/02_DeXuatThayDoiDuAn_SentinelAuth.md` | Created | Document này |
-| `app/ml.py` | Updated | Align ML Feature Contract v2, thêm reason_codes, threshold |
-| `app/alerts.py` | Created | SOC Alert CRUD + Timeline API (12 endpoints) |
-| `app/devices.py` | Created | Trusted Device Management (6 endpoints) |
-| `app/models.py` | Updated | Thêm AlertTimeline, UserTrustedDevice models |
-| `app/main.py` | Updated | Register 2 routers mới |
-| `infra/postgres/schema-complete.sql` | Created | Schema SQL hoàn chỉnh v3.1 |
-| `docs/diagrams/ERD_COMPLETE.md` | Created | ERD hoàn chỉnh với Mermaid |
-| `infra/postgres/schema-v3.sql` | Verified | Đã có đầy đủ 19 tables |
-| `docs/diagrams/erd-v3.md` | Verified | ERD đầy đủ với 17 tables |
+| `docs/diagrams/ERD_v4_DETAILED.md` | ✅ | ERD v4 chi tiết với PK/FK/Quan hệ |
+| `infra/postgres/schema-v4-3nf.sql` | ✅ | Schema SQL v4 (3NF) |
+| `infra/postgres/migrations/004_normalize_to_3nf.sql` | ✅ | Migration script |
+| `docs/02_DeXuatThayDoiDuAn_SentinelAuth.md` | Updated | Đề xuất thay đổi (document này) |
+| `docs/02_BangYeuCauChucNangNghiepVu_SentinelAuth_v2.md` | ✅ | Bảng YCNV v2 |
+| `docs/02_BangYeuCauMLService_SentinelAuth_v2.md` | ✅ | Bảng ML Service v2 |
+
+### Removed Files (Cleanup)
+
+| File | Lý do |
+|------|--------|
+| `docs/diagrams/erd-v2.*`, `docs/diagrams/erd-v3.*` | Phiên bản cũ, trùng lặp |
+| `docs/schema-v2-design-notes.md` | Không còn cần thiết |
+| `docs/TASK-core-app-design-detail.md` | Nội dung đã lỗi thời |
+| `docs/GAP-ANALYSIS-tai-lieu-vs-code.md` | Không còn cần thiết |
+| `docs/01-*.md`, `docs/02-*.md`, `docs/03-*.md` | Document cũ, đã có phiên bản mới |
+| `docs/workflows.mmd` | Không sử dụng |
+| `docs/generate_reports.py` | Không sử dụng |
+| `docs/diagrams/*.uml` (wf*) | Đã có .drawio |
+| `docs/diagrams/render_svg.py`, `generate_puml.py` | Không sử dụng |
 
 ---
 
