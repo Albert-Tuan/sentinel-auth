@@ -1,0 +1,18 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sentinel-auth.local/schemas/event-envelope.v1.json",
+  "title": "Sentinel Auth event envelope v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["event_id", "event_type", "schema_version", "occurred_at", "correlation_id", "producer", "payload"],
+  "properties": {
+    "event_id": {"type": "string", "format": "uuid"},
+    "event_type": {"type": "string", "pattern": "^[a-z]+(\\.[a-z-]+)+\\.v[1-9][0-9]*$"},
+    "schema_version": {"type": "integer", "minimum": 1},
+    "occurred_at": {"type": "string", "format": "date-time"},
+    "correlation_id": {"type": "string", "format": "uuid"},
+    "producer": {"type": "string", "enum": ["core-app", "detection-engine", "ml-service"]},
+    "traceparent": {"type": "string"},
+    "payload": {"type": "object"}
+  }
+}

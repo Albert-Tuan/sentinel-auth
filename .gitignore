@@ -1,0 +1,16 @@
+.DS_Store
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+coverage.xml
+htmlcov/
+.venv/
+venv/
+.env
+*.log
+*.sqlite3
+**/models/*.joblib
+**/models/*.pkl
+!ml-service/models/.gitkeep
+!ml-service/models/README.md
