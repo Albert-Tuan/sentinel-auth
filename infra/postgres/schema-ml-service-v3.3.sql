@@ -193,6 +193,79 @@ INSERT INTO model_versions (
 ON CONFLICT (version) DO NOTHING;
 
 -- =============================================================================
+-- MANAGER DASHBOARD VIEW (Cross-Database Aggregated View)
+-- =============================================================================
+-- Note: This view is a DEFERRABLE view placeholder.
+-- Since ml-service-db cannot directly query detection-db (different database),
+-- the implementation strategy is:
+-- 1. ml-service calls detection-engine HTTP API: GET /internal/dashboard/stats
+-- 2. detection-engine aggregates from login_attempts, risk_assessments, alerts
+-- 3. ml-service caches the result and exposes it as manager dashboard
+--
+-- Below is the conceptual SQL that would be used if both tables were in
+-- the same database (for documentation purposes):
+--
+-- CREATE OR REPLACE VIEW manager_dashboard AS
+-- SELECT
+--     -- Time window
+--     DATE_TRUNC('day', la.timestamp) AS day,
+--
+--     -- Alert statistics
+--     COUNT(DISTINCT a.id) FILTER (WHERE a.id IS NOT NULL) AS total_alerts,
+--     COUNT(DISTINCT a.id) FILTER (WHERE a.status = 'open') AS open_alerts,
+--     COUNT(DISTINCT a.id) FILTER (WHERE a.status = 'acknowledged') AS acknowledged_alerts,
+--     COUNT(DISTINCT a.id) FILTER (WHERE a.status = 'resolved') AS resolved_alerts,
+--     COUNT(DISTINCT a.id) FILTER (WHERE a.status = 'false_positive') AS false_positives,
+--
+--     -- Risk level breakdown
+--     COUNT(DISTINCT la.id) FILTER (WHERE ra.risk_level = 'low') AS low_risk_count,
+--     COUNT(DISTINCT la.id) FILTER (WHERE ra.risk_level = 'medium') AS medium_risk_count,
+--     COUNT(DISTINCT la.id) FILTER (WHERE ra.risk_level = 'high') AS high_risk_count,
+--     COUNT(DISTINCT la.id) FILTER (WHERE ra.risk_level = 'critical') AS critical_risk_count,
+--
+--     -- Login statistics
+--     COUNT(DISTINCT la.id) AS total_logins,
+--     COUNT(DISTINCT la.id) FILTER (WHERE la.outcome = 'success') AS successful_logins,
+--     COUNT(DISTINCT la.id) FILTER (WHERE la.outcome = 'failure') AS failed_logins,
+--     COUNT(DISTINCT la.id) FILTER (WHERE la.outcome = 'blocked') AS blocked_logins,
+--     COUNT(DISTINCT la.id) FILTER (WHERE la.outcome IN ('mfa_required', 'mfa_success', 'mfa_failed')) AS mfa_logins,
+--
+--     -- ML anomaly statistics (from ml-service-db itself)
+--     (SELECT COUNT(*) FROM inference_logs il
+--      WHERE il.is_anomaly = TRUE
+--        AND DATE_TRUNC('day', il.created_at) = DATE_TRUNC('day', la.timestamp)
+--     ) AS ml_anomalies_detected,
+--
+--     -- Average risk score
+--     AVG(ra.combined_score) AS avg_risk_score,
+--
+--     -- Top risk users (would need separate query)
+--     NULL::JSONB AS top_risk_users
+-- FROM login_attempts la
+-- LEFT JOIN alerts a ON a.login_attempt_id = la.id
+-- LEFT JOIN risk_assessments ra ON ra.login_attempt_id = la.id
+-- GROUP BY DATE_TRUNC('day', la.timestamp);
+--
+-- In practice, this aggregation happens in the ml-service Python code
+-- by calling detection-engine's REST API: GET /internal/dashboard/overview
+
+-- Local fallback view: aggregates only data within ml-service-db
+CREATE OR REPLACE VIEW local_ml_stats AS
+SELECT
+    DATE_TRUNC('day', created_at) AS day,
+    COUNT(*) AS total_inferences,
+    COUNT(*) FILTER (WHERE is_anomaly = TRUE) AS anomalies_detected,
+    COUNT(*) FILTER (WHERE model_status = 'ready') AS successful_inferences,
+    COUNT(*) FILTER (WHERE model_status = 'degraded') AS degraded_inferences,
+    COUNT(*) FILTER (WHERE model_status = 'error') AS error_inferences,
+    AVG(processing_time_ms)::NUMERIC(10,2) AS avg_processing_ms,
+    AVG(normalized_score)::NUMERIC(5,4) AS avg_anomaly_score
+FROM inference_logs
+GROUP BY DATE_TRUNC('day', created_at);
+
+COMMENT ON VIEW local_ml_stats IS 'Local stats from inference_logs only. Cross-DB manager dashboard uses HTTP API.';
+
+-- =============================================================================
 -- COMMENTS
 -- =============================================================================
 

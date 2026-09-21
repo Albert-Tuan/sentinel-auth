@@ -247,7 +247,7 @@ erDiagram
         timestamptz deactivated_at "nullable"
     }
 
-    login_attempts_de {
+    login_attempts {
         uuid id PK "gen_random_uuid()"
         uuid event_id "from core-app, for idempotency"
         uuid user_id "nullable, NULL if login failed"
@@ -427,17 +427,17 @@ erDiagram
     %% ============================================================================
 
     %% Core → Detection: LoginEvent triggers LoginAttempt
-    login_attempts_de ||--o{ detection_logs : "generates"
-    login_attempts_de ||--o{ alerts : "triggers"
+    login_attempts ||--o{ detection_logs : "generates"
+    login_attempts ||--o{ alerts : "triggers"
 
     %% Detection: Risk Assessment per Login (1:1) — UNIQUE constraint enforces 1:1
-    login_attempts_de ||--|| risk_assessments : "has"
+    login_attempts ||--|| risk_assessments : "has"
 
     %% Detection: Login → Primary Alert (1:1, OPTIONAL)
-    login_attempts_de ||--o| alerts : "primary_alert"
+    login_attempts ||--o| alerts : "primary_alert"
 
     %% Detection: Login → Policy (N:1, OPTIONAL)
-    login_attempts_de }o--|| policies : "evaluated with"
+    login_attempts }o--|| policies : "evaluated with"
 
     %% Detection: Risk Assessment → Policy (N:1, OPTIONAL)
     risk_assessments }o--|| policies : "evaluated with"
@@ -478,6 +478,26 @@ erDiagram
 ---
 
 ## Database Separation
+
+### Cross-Database Reference Strategy
+
+Since v3.3 splits data across 3 separate PostgreSQL databases, traditional
+foreign keys cannot enforce referential integrity across database boundaries.
+The following columns reference `users.id` in `core-db` but are stored in other
+databases. These references **MUST** be validated at the application layer.
+
+| Column | Location | References | Validation |
+|--------|----------|-----------|------------|
+| `policies.created_by` | detection-db | `users.id` | API checks user exists via core-app |
+| `soc_analysts.user_id` | detection-db | `users.id` | API checks user exists via core-app |
+| `alert_timeline.actor_id` | detection-db | `users.id` | API checks user exists via core-app |
+| `model_versions.trained_by` | ml-service-db | `users.id` | API checks user exists via core-app |
+
+**Rules:**
+1. Never insert orphan references at the application layer
+2. Use soft deletes (`status='archived'`) instead of `ON DELETE CASCADE` for cross-DB refs
+3. Run periodic reconciliation jobs to detect orphaned references
+4. If a user is deleted in core-db, downstream rows keep the UUID but mark them stale via a separate flag
 
 ### Core DB Schema
 
