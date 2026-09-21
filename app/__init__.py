@@ -1,1 +1,0 @@
-"""Sentinel Auth Application Package."""
