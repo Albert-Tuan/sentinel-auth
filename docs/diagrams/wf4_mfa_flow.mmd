@@ -1,0 +1,102 @@
+# WF-4: MFA Flow - Chi tiết
+
+## Mermaid Source
+
+```mermaid
+sequenceDiagram
+    participant U as User
+    participant A as Auth API
+    participant N as MFA Notification
+    participant DB as PostgreSQL
+
+    Note over U,A: MFA được trigger khi:<br/>1. Login với MFA enabled<br/>2. Risk level HIGH/CRITICAL<br/>3. Sensitive operation
+
+    == MFA Types ==
+
+    alt MFA via EMAIL OTP
+        A->>N: Send OTP via Email
+        N-->>A: notification_id
+        A->>DB: INSERT mfa_notification (channel=email)
+        A-->>U: 200 {mfa_type: "email_otp", expires_in: 300}
+        U->>A: POST /mfa/verify (code: "123456")
+
+    else MFA via SMS OTP
+        A->>N: Send OTP via SMS
+        N-->>A: notification_id
+        A->>DB: INSERT mfa_notification (channel=sms)
+        A-->>U: 200 {mfa_type: "sms_otp", expires_in: 300}
+        U->>A: POST /mfa/verify (code: "123456")
+
+    else MFA via TOTP (Authenticator)
+        A-->>U: 200 {mfa_type: "totp", setup_url: "otpauth://..."}
+        Note over U: User nhập code từ<br/>Google Authenticator
+        U->>A: POST /mfa/verify (code: "123456")
+
+    else MFA via PUSH Notification
+        A->>N: Send Push Notification
+        N-->>A: notification_id
+        A-->>U: 200 {mfa_type: "push", expires_in: 120}
+        Note over U: User approve trên mobile app
+        U->>A: POST /mfa/verify (action: "approve")
+    end
+
+    == Verification ==
+
+    A->>DB: SELECT mfa_transaction WHERE id=session_id
+    DB-->>A: transaction record
+
+    alt Invalid / Expired / IP Mismatch
+        A->>DB: UPDATE mfa_transaction (status=failed, fail_count+1)
+        alt fail_count >= 3
+            A->>DB: UPDATE user (status=locked)
+            A-->>U: 403 ACCOUNT_LOCKED
+        else fail_count < 3
+            A-->>U: 401 MFA_FAILED (attempts_remaining: 2)
+        end
+    else Valid / Approved
+        A->>DB: UPDATE mfa_transaction (status=completed)
+        A->>DB: INSERT session
+        A-->>U: 200 OK {access_token, mfa_verified: true}
+    end
+
+    == Trusted Device (Persistent MFA) ==
+
+    alt User selects "Trust this device"
+        U->>A: POST /mfa/trust-device (device_fingerprint)
+        A->>DB: INSERT user_trusted_devices
+        A-->>U: 200 {trusted: true, expires_at: "+30 days"}
+    end
+
+    Note over U: Lần đăng nhập sau với<br/>trusted device → Không cần OTP
+```
+
+## MFA Types
+
+| Type | Channel | Code Format | Expiry | Fail Limit |
+|------|---------|-------------|--------|-----------|
+| EMAIL_OTP | Email | 6 digits | 5 min | 3 attempts |
+| SMS_OTP | SMS | 6 digits | 5 min | 3 attempts |
+| TOTP | Authenticator App | 6 digits (30s) | Rolling | 3 attempts |
+| PUSH | Mobile App | Approve/Reject | 2 min | 3 attempts |
+
+## API Endpoints
+
+| Method | Endpoint | Mô tả |
+|--------|----------|--------|
+| POST | `/api/v1/auth/mfa/initiate` | Bắt đầu MFA challenge |
+| POST | `/api/v1/auth/mfa/verify` | Verify MFA code |
+| POST | `/api/v1/auth/mfa/trust-device` | Thêm thiết bị tin cậy |
+| DELETE | `/api/v1/auth/mfa/trust-device/{id}` | Xóa thiết bị tin cậy |
+
+## MFA States
+
+```mermaid
+stateDiagram-v2
+    [*] --> Pending: initiate()
+    Pending --> Completed: verify() valid
+    Pending --> Failed: verify() invalid
+    Pending --> Expired: timeout
+    Failed --> [*]
+    Completed --> [*]
+    Expired --> [*]
+```

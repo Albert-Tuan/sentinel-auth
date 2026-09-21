@@ -1,0 +1,201 @@
+<mxfile>
+  <diagram name="Architecture Overview">
+    <mxGraphModel dx="1200" dy="800" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1200" pageHeight="900" math="0" shadow="0">
+      <root>
+        <mxCell id="0"/>
+        <mxCell id="1" parent="0"/>
+
+        <!-- Title -->
+        <mxCell id="title" value="Sentinel Auth — 3 Workflow Architecture" style="text;html=1;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;whiteSpace=wrap;rounded=0;fontSize=20;fontStyle=1;fontColor=#2C3E50;" vertex="1" parent="1">
+          <mxGeometry x="350" y="10" width="500" height="40" as="geometry"/>
+        </mxCell>
+
+        <!-- WF-1 Box -->
+        <mxCell id="wf1_box" value="WF-1: Auth" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#D5E8D4;strokeColor=#82B366;strokeWidth=2;align=center;fontSize=14;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="20" y="80" width="220" height="340" as="geometry"/>
+        </mxCell>
+
+        <!-- WF-1 Nodes -->
+        <mxCell id="wf1_u" value="User&#xa;(Browser)" style="shape=umlActor;verticalLabelPosition=bottom;verticalAlign=top;html=1;outlineConnect=0;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="80" y="100" width="30" height="40" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="wf1_login" value="POST /auth/login&#xa;(username, password, ip)" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#FFF2CC;strokeColor=#D6A656;align=center;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="50" y="160" width="160" height="50" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="wf1_auth" value="Auth API&#xa;(Argon2id verify)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#DAE8FC;strokeColor=#6C8EBF;align=center;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="50" y="230" width="160" height="50" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="wf1_db" value="PostgreSQL&#xa;(users, sessions,&#xa;pre_auth_tx)" style="shape=cylinder3;whiteSpace=wrap;html=1;boundedLbl=1;backgroundOutline=1;size=10;fillColor=#F5F5F5;strokeColor=#666666;align=center;fontSize=10;" vertex="1" parent="1">
+          <mxGeometry x="50" y="300" width="160" height="80" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="wf1_mfa" value="MFA?&#xa;(optional)" style="rhombus;whiteSpace=wrap;html=1;fillColor=#FFE6CC;strokeColor=#D79B00;align=center;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="65" y="355" width="80" height="60" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="wf1_token" value="access_token&#xa;refresh_token" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#D5E8D4;strokeColor=#82B366;align=center;fontSize=10;" vertex="1" parent="1">
+          <mxGeometry x="50" y="250" width="80" height="40" as="geometry"/>
+        </mxCell>
+
+        <!-- WF-1 Arrows -->
+        <mxCell id="wf1_a1" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeWidth=1.5;strokeColor=#333;" edge="1" parent="1" source="wf1_u" target="wf1_login">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="wf1_a2" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeWidth=1.5;strokeColor=#333;" edge="1" parent="1" source="wf1_login" target="wf1_auth">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="wf1_a3" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeWidth=1.5;strokeColor=#333;dashed=1;" edge="1" parent="1" source="wf1_auth" target="wf1_db">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="wf1_a4" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeWidth=1.5;strokeColor=#333;" edge="1" parent="1" source="wf1_auth" target="wf1_mfa">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="wf1_a5" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeWidth=1.5;strokeColor=#82B366;" edge="1" parent="1" source="wf1_auth" target="wf1_token">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="wf1_a6" value="deny / allow" style="edgeLabel;html=1;align=center;verticalAlign=middle;fontSize=9;fontColor=#666;" vertex="1" parent="1">
+          <mxGeometry x="-40" y="240" relative="1" as="geometry"/>
+        </mxCell>
+
+        <!-- WF-2 Box -->
+        <mxCell id="wf2_box" value="WF-2: Detection (Inline)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFF2CC;strokeColor=#D6A656;strokeWidth=2;align=center;fontSize=14;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="270" y="80" width="220" height="340" as="geometry"/>
+        </mxCell>
+
+        <!-- WF-2 Nodes -->
+        <mxCell id="wf2_auth" value="Auth API&#xa;(gọi sau login)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#DAE8FC;strokeColor=#6C8EBF;align=center;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="300" y="100" width="160" height="50" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="wf2_detect" value="POST /internal/v1/detect&#xa;(features: IP, fail_count,&#xa;device, time...)" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#FFF2CC;strokeColor=#D6A656;align=center;fontSize=10;" vertex="1" parent="1">
+          <mxGeometry x="300" y="170" width="160" height="55" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="wf2_ml" value="ML Scoring&#xa;(Isolation Forest)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#E1D5E7;strokeColor=#9673A6;align=center;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="300" y="245" width="160" height="50" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="wf2_score" value="anomaly_score&#xa;(0..1)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#E1D5E7;strokeColor=#9673A6;align=center;fontSize=10;" vertex="1" parent="1">
+          <mxGeometry x="380" y="295" width="100" height="40" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="wf2_db2" value="risk_assessments&#xa;+ alerts" style="shape=cylinder3;whiteSpace=wrap;html=1;boundedLbl=1;backgroundOutline=1;size=10;fillColor=#F5F5F5;strokeColor=#666666;align=center;fontSize=10;" vertex="1" parent="1">
+          <mxGeometry x="300" y="340" width="160" height="60" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="wf2_risk" value="HIGH/CRITICAL&#xa;→ tạo alert?" style="rhombus;whiteSpace=wrap;html=1;fillColor=#FFE6CC;strokeColor=#D79B00;align=center;fontSize=9;" vertex="1" parent="1">
+          <mxGeometry x="310" y="295" width="70" height="50" as="geometry"/>
+        </mxCell>
+
+        <!-- WF-2 Arrows -->
+        <mxCell id="wf2_a1" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeWidth=1.5;strokeColor=#333;" edge="1" parent="1" source="wf2_auth" target="wf2_detect">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="wf2_a2" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeWidth=1.5;strokeColor=#333;" edge="1" parent="1" source="wf2_detect" target="wf2_ml">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="wf2_a3" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeWidth=1.5;strokeColor=#9673A6;" edge="1" parent="1" source="wf2_ml" target="wf2_risk">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="wf2_a4" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeWidth=1.5;strokeColor=#333;" edge="1" parent="1" source="wf2_risk" target="wf2_db2">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="wf2_a5" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeWidth=1.5;dashed=1;strokeColor=#666;" edge="1" parent="1" source="wf2_ml" target="wf2_score">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+
+        <!-- WF-3 Box -->
+        <mxCell id="wf3_box" value="WF-3: SOC Alerts" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#CCE5FF;strokeColor=#17A2B8;strokeWidth=2;align=center;fontSize=14;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="520" y="80" width="220" height="340" as="geometry"/>
+        </mxCell>
+
+        <!-- WF-3 Nodes -->
+        <mxCell id="wf3_soc" value="SOC Analyst&#xa;(Browser)" style="shape=umlActor;verticalLabelPosition=bottom;verticalAlign=top;html=1;outlineConnect=0;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="585" y="100" width="30" height="40" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="wf3_get" value="GET /api/v1/alerts&#xa;(filter: status, risk)" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#FFF2CC;strokeColor=#D6A656;align=center;fontSize=10;" vertex="1" parent="1">
+          <mxGeometry x="550" y="160" width="160" height="50" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="wf3_api" value="Auth API" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#DAE8FC;strokeColor=#6C8EBF;align=center;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="550" y="230" width="160" height="40" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="wf3_patch" value="PATCH /alerts/{id}&#xa;(acknowledge/resolve)" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#FFF2CC;strokeColor=#D6A656;align=center;fontSize=10;" vertex="1" parent="1">
+          <mxGeometry x="550" y="290" width="160" height="50" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="wf3_db3" value="alerts&#xa;(status, notes)" style="shape=cylinder3;whiteSpace=wrap;html=1;boundedLbl=1;backgroundOutline=1;size=10;fillColor=#F5F5F5;strokeColor=#666666;align=center;fontSize=10;" vertex="1" parent="1">
+          <mxGeometry x="550" y="355" width="160" height="50" as="geometry"/>
+        </mxCell>
+
+        <!-- WF-3 Arrows -->
+        <mxCell id="wf3_a1" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeWidth=1.5;strokeColor=#333;" edge="1" parent="1" source="wf3_soc" target="wf3_get">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="wf3_a2" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeWidth=1.5;strokeColor=#333;dashed=1;" edge="1" parent="1" source="wf3_api" target="wf3_db3">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="wf3_a3" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeWidth=1.5;strokeColor=#333;" edge="1" parent="1" source="wf3_get" target="wf3_api">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="wf3_a4" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeWidth=1.5;strokeColor=#333;" edge="1" parent="1" source="wf3_patch" target="wf3_api">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="wf3_a5" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeWidth=1.5;strokeColor=#333;" edge="1" parent="1" source="wf3_api" target="wf3_patch">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+
+        <!-- Inter-workflow arrows -->
+        <mxCell id="i1" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeWidth=2;strokeColor=#82B366;dashed=1;endArrow=classic;endFill=1;" edge="1" parent="1" source="wf1_token" target="wf2_auth">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="i1_label" value="access_token" style="edgeLabel;html=1;align=center;verticalAlign=middle;fontSize=9;fontColor=#82B366;fontStyle=2;" vertex="1" connectable="0" parent="i1">
+          <mxGeometry x="0.3" y="-10" relative="1" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="i2" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeWidth=2;strokeColor=#D6A656;dashed=1;endArrow=classic;endFill=1;" edge="1" parent="1" source="wf2_db2" target="wf3_db3">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="i2_label" value="alert" style="edgeLabel;html=1;align=center;verticalAlign=middle;fontSize=9;fontColor=#D6A656;fontStyle=2;" vertex="1" connectable="0" parent="i2">
+          <mxGeometry x="0.5" y="-10" relative="1" as="geometry"/>
+        </mxCell>
+
+        <!-- Legend -->
+        <mxCell id="leg_box" value="Legend" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#F5F5F5;strokeColor=#999;align=center;fontSize=11;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="760" y="80" width="100" height="30" as="geometry"/>
+        </mxCell>
+        <mxCell id="leg1" value="HTTP Request" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#FFF2CC;strokeColor=#D6A656;align=center;fontSize=10;" vertex="1" parent="1">
+          <mxGeometry x="760" y="120" width="100" height="25" as="geometry"/>
+        </mxCell>
+        <mxCell id="leg2" value="API / Service" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#DAE8FC;strokeColor=#6C8EBF;align=center;fontSize=10;" vertex="1" parent="1">
+          <mxGeometry x="760" y="150" width="100" height="25" as="geometry"/>
+        </mxCell>
+        <mxCell id="leg3" value="ML Component" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#E1D5E7;strokeColor=#9673A6;align=center;fontSize=10;" vertex="1" parent="1">
+          <mxGeometry x="760" y="180" width="100" height="25" as="geometry"/>
+        </mxCell>
+        <mxCell id="leg4" value="Database" style="shape=cylinder3;whiteSpace=wrap;html=1;boundedLbl=1;backgroundOutline=1;size=8;fillColor=#F5F5F5;strokeColor=#666;align=center;fontSize=10;" vertex="1" parent="1">
+          <mxGeometry x="760" y="210" width="100" height="35" as="geometry"/>
+        </mxCell>
+        <mxCell id="leg5" value="Decision" style="rhombus;whiteSpace=wrap;html=1;fillColor=#FFE6CC;strokeColor=#D79B00;align=center;fontSize=10;" vertex="1" parent="1">
+          <mxGeometry x="785" y="255" width="50" height="35" as="geometry"/>
+        </mxCell>
+        <mxCell id="leg6" value="Data Flow" style="endArrow=classic;html=1;dashed=1;strokeColor=#82B366;strokeWidth=1.5;" edge="1" parent="1">
+          <mxGeometry x="760" y="315" relative="1" as="geometry">
+            <mxPoint x="830" y="300" as="sourcePoint"/>
+            <mxPoint x="830" y="330" as="targetPoint"/>
+          </mxGeometry>
+        </mxCell>
+
+        <!-- Tech stack note -->
+        <mxCell id="tech" value="Tech: FastAPI + PostgreSQL (1 schema) + Argon2id&#xa;No Redis, No background worker" style="text;html=1;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;whiteSpace=wrap;rounded=0;fontSize=11;fontColor=#888;italic=1;" vertex="1" parent="1">
+          <mxGeometry x="760" y="350" width="200" height="40" as="geometry"/>
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>
