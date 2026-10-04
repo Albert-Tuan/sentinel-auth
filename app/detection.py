@@ -1,536 +1,832 @@
 """
-Detection engine - inline risk detection with policy_versions and detection_logs.
-Sync with schema-v2.sql definitions.
-"""
-from datetime import datetime
-from typing import Optional, List
-from uuid import uuid4
+Detection Engine - rule evaluation, ML scoring and risk classification.
 
-from fastapi import APIRouter, HTTPException, Header, Depends
+Schema v3.3. Canonical decisions: docs/DECISIONS-DETECTION-v3.3.md
+
+Design notes
+------------
+* Rules live in ``policies.rules`` (JSONB) with 7 fields per rule:
+  name, field, operator, value, weight, score, enabled.
+* ``rule_score`` is a weighted sum normalised by the total weight of all
+  enabled rules, so it always stays inside [0, 1] (DECISIONS section 2.1).
+* The ML score is obtained by calling ML Service over HTTP with a 5s
+  timeout. If the call fails the engine degrades gracefully:
+  ``combined_score = rule_score`` and ``ml_status`` records why.
+* A malformed rule or config must never raise: it is skipped, logged in
+  ``detection_logs`` and the remaining rules are still evaluated.
+"""
+from __future__ import annotations
+
+import logging
+import os
+from datetime import datetime, timedelta, timezone
+from typing import Any, Dict, List, Optional, Tuple
+from uuid import UUID, uuid4
+
+import httpx
+from fastapi import APIRouter, Depends, Header, HTTPException, status as http_status
 from pydantic import BaseModel
+from sqlalchemy.orm import Session as OrmSession
 
 from app.db import get_db
-from app.models import (
-    PolicyVersion, LoginAttempt, RiskAssessment, DetectionLog,
-    Alert, User, Session, PreAuthTransaction, MfaNotification
-)
+from app.models import Alert, DetectionLog, LoginAttempt, Policy, RiskAssessment
 from app.schemas import (
-    DetectionRequest, DetectionResponse, RuleHit,
-    MlScoreRequest, MlScoreResponse,
-    ActionRequest, ActionResponse,
-    RiskLevel,
+    ActionRequest,
+    ActionResponse,
+    ALLOWED_FEATURE_FIELDS,
+    ALLOWED_OPERATORS,
+    DetectionResponse,
+    LoginAttemptStatusResponse,
+    LoginEventRequest,
+    LoginEventResponse,
+    RANGE_OPERATORS,
+    RuleHit,
 )
 
-router = APIRouter(prefix="/internal/v1", tags=["detection"])
+logger = logging.getLogger(__name__)
 
-# Internal secret for internal endpoints
-INTERNAL_SECRET = "changeme-in-production"
+router = APIRouter(prefix="/api/v1/internal", tags=["detection-internal"])
+policy_router = APIRouter(prefix="/api/v1/policies", tags=["policies"])
 
+#: Canonical defaults, used whenever policies.config is missing or invalid
+DEFAULT_WEIGHTS = {"rule": 0.4, "ml": 0.6}
+DEFAULT_THRESHOLDS = {"low": 0.25, "medium": 0.50, "high": 0.75}
 
-# =============================================================================
-# Request/Response schemas (internal)
-# =============================================================================
+#: ML Service is called over HTTP; this is the hard timeout (DECISIONS 2.2)
+ML_TIMEOUT_SECONDS = 5.0
 
-class InternalHealthResponse(BaseModel):
-    status: str = "ok"
-
-
-# =============================================================================
-# Helpers
-# =============================================================================
-
-def verify_internal_token(x_internal_token: Optional[str]) -> bool:
-    """Verify internal API token."""
-    if not x_internal_token:
-        return False
-    return x_internal_token == INTERNAL_SECRET
+#: Risk level -> (decision, action label, create_alert)
+DECISION_MATRIX = {
+    "low": ("allow", "ALLOW", False),
+    "medium": ("allow", "ALLOW_LOG", False),
+    "high": ("challenge", "REQUIRE_MFA", True),
+    "critical": ("block", "BLOCK_ALERT", True),
+}
 
 
-def get_active_policy(db) -> Optional[PolicyVersion]:
-    """Get the currently active policy version."""
-    return db.query(PolicyVersion).filter(
-        PolicyVersion.is_active == True
-    ).first()
+def internal_secret() -> str:
+    """Shared secret protecting service-to-service endpoints."""
+    return os.getenv("INTERNAL_SECRET", "changeme-in-production")
 
 
-def map_score_to_risk_level(score: float) -> str:
-    """Map combined score to risk level."""
-    if score < 0.2:
-        return "low"
-    elif score < 0.5:
-        return "medium"
-    elif score < 0.8:
-        return "high"
-    else:
-        return "critical"
+def ml_service_url() -> str:
+    """Base URL of the ML Service, without trailing slash."""
+    return os.getenv("ML_SERVICE_URL", "http://localhost:8002").rstrip("/")
 
 
-def get_decision(risk_level: str) -> str:
-    """Map risk level to decision."""
-    if risk_level == "critical":
-        return "block"
-    elif risk_level == "high":
-        return "block"
-    elif risk_level == "medium":
-        return "challenge"
-    else:
-        return "allow"
-
-
-def evaluate_rules(rules_json: dict, features: dict) -> tuple[float, List[dict]]:
-    """
-    Evaluate detection rules against features.
-    Returns (combined_rule_score, rule_hits).
-    """
-    if not rules_json or "rules" not in rules_json:
-        return 0.0, []
-
-    rules = rules_json.get("rules", [])
-    enabled_rules = [r for r in rules if r.get("enabled", True)]
-
-    if not enabled_rules:
-        return 0.0, []
-
-    rule_scores = []
-    hits = []
-
-    for rule in enabled_rules:
-        score = evaluate_single_rule(rule, features)
-        if score > 0:
-            rule_scores.append(score)
-            hits.append({
-                "rule_name": rule.get("name", "unknown"),
-                "rule_id": rule.get("name"),  # Using name as ID for now
-                "score": score,
-                "reason": rule.get("description", ""),
-            })
-
-    # Combined rule score: max of all hit rules
-    combined = max(rule_scores) if rule_scores else 0.0
-    return combined, hits
-
-
-def evaluate_single_rule(rule: dict, features: dict) -> float:
-    """
-    Evaluate a single rule against features.
-    Returns score 0.0-1.0 if rule triggered, 0.0 otherwise.
-    """
-    rule_name = rule.get("name", "")
-    conditions = rule.get("conditions", {})
-    base_score = rule.get("score", 0.5)
-
-    # Geo block rule
-    if rule_name == "geo_block":
-        blocked_countries = conditions.get("countries", [])
-        ip_country = features.get("ip_country", "")
-        if ip_country in blocked_countries:
-            return base_score
-        return 0.0
-
-    # New country rule
-    if rule_name == "new_country":
-        # TODO: Check user's login history for country
-        # For now, return 0 (placeholder)
-        return 0.0
-
-    # ASN reputation rule
-    if rule_name == "asn_reputation":
-        min_rep = conditions.get("min_reputation", 0.3)
-        asn_rep = features.get("asn_reputation", 1.0)
-        if asn_rep < min_rep:
-            return base_score
-        return 0.0
-
-    # Failed attempts rule
-    if rule_name == "failed_attempts":
-        threshold = conditions.get("threshold", 3)
-        failed_1h = features.get("failed_attempts_1h", 0)
-        failed_24h = features.get("failed_attempts_24h", 0)
-        if failed_1h >= threshold or failed_24h >= threshold * 2:
-            return base_score
-        return 0.0
-
-    # Unusual hour rule
-    if rule_name == "unusual_hour":
-        hour_range = conditions.get("hour_range", [0, 6])
-        login_hour = features.get("login_hour", 12)
-        if hour_range[0] <= login_hour <= hour_range[1]:
-            return base_score
-        return 0.0
-
-    # Default: no match
-    return 0.0
-
-
-def ml_score(features: dict) -> tuple[float, str, Optional[str]]:
-    """
-    Compute ML anomaly score.
-    Returns (anomaly_score, ml_status, model_version).
-    
-    In v1, this is a stub that returns default values.
-    Real implementation would call the ML model.
-    """
-    # Placeholder: in production, this would call the ML model
-    # For now, return a dummy score based on features
-    ml_status = "unavailable"
-    model_version = None
-
-    # Calculate a dummy anomaly score based on features
-    # In reality, this would be ML inference
-    anomaly_score = 0.1  # Default low score
-
-    # Simple heuristic as placeholder
-    if features.get("failed_attempts_1h", 0) > 5:
-        anomaly_score = 0.8
-    elif features.get("asn_reputation", 1.0) < 0.2:
-        anomaly_score = 0.7
-    elif features.get("geo_velocity_kmh", 0) > 1000:
-        anomaly_score = 0.6
-
-    return anomaly_score, ml_status, model_version
-
-
-# =============================================================================
-# Endpoints
-# =============================================================================
-
-@router.post("/detect", response_model=dict)
-async def detect(
-    request: DetectionRequest,
-    x_internal_token: Optional[str] = Header(None),
-    db=Depends(get_db),
-) -> dict:
-    """
-    Perform inline risk detection for a login attempt.
-
-    1. Load active policy version
-    2. Evaluate detection rules → rule_score
-    3. Call ML scoring → anomaly_score, ml_score
-    4. Combine scores with weights → combined_score
-    5. Map to risk_level → decision
-    6. Create alert if high/critical risk
-    7. Log all detection steps to detection_logs
-    """
-    if not verify_internal_token(x_internal_token):
-        raise HTTPException(status_code=401, detail="Invalid internal token")
-
-    request_id = uuid4()
-    now = datetime.utcnow()
-
-    # Extract features
-    features = request.detection_features or {}
-    if not features:
-        features = {
-            "login_hour": now.hour,
-            "login_day": now.weekday(),
-            "ip_country": "",  # TODO: resolve from IP
-            "ip_reputation": 1.0,
-            "user_agent_family": request.user_agent or "",
-            "asn_reputation": 1.0,
-            "failed_attempts_1h": request.failed_attempts,
-            "failed_attempts_24h": request.failed_attempts,
-            "geo_velocity_kmh": 0.0,
-            "login_streak": 0,
-        }
-
-    # 1. Load active policy
-    policy = get_active_policy(db)
-    if not policy:
-        # No policy = allow all
-        return {
-            "rule_score": 0.0,
-            "anomaly_score": 0.0,
-            "ml_score": 0.0,
-            "ml_status": "unavailable",
-            "ml_model_version": None,
-            "combined_score": 0.0,
-            "risk_level": "low",
-            "decision": "allow",
-            "rule_hits": [],
-            "alert_id": None,
-        }
-
-    # 2. Rule evaluation
-    rule_score, rule_hits = evaluate_rules(policy.rules_json, features)
-
-    # Log each rule evaluation
-    for hit in rule_hits:
-        dlog = DetectionLog(
-            login_attempt_id=None,  # Will be linked later
-            request_id=request_id,
-            stage="rule",
-            stage_detail=hit["rule_name"],
-            rule_name=hit["rule_name"],
-            score=hit["score"],
-            decision="allow",
-            reason=hit.get("reason", ""),
-            details={"features": features},
+def verify_internal_secret(x_internal_secret: Optional[str]) -> None:
+    """Raise 401 unless the caller presented the correct shared secret."""
+    if not x_internal_secret or x_internal_secret != internal_secret():
+        raise HTTPException(
+            status_code=http_status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid or missing X-Internal-Secret",
         )
-        db.add(dlog)
 
-    # 3. ML scoring
-    anomaly_score, ml_status, ml_model_version = ml_score(features)
-    ml_score_value = anomaly_score  # Alias
 
-    # Log ML evaluation
-    dlog = DetectionLog(
-        login_attempt_id=None,
-        request_id=request_id,
-        stage="ml",
-        stage_detail="ml_inference",
-        score=anomaly_score,
-        decision="allow",
-        details={"ml_status": ml_status, "features_used": features},
+# =============================================================================
+# Policy helpers
+# =============================================================================
+
+class ResolvedConfig:
+    """Validated weights/thresholds, falling back to canonical defaults."""
+
+    def __init__(self, weights: Dict[str, float], thresholds: Dict[str, float]):
+        self.weights = weights
+        self.thresholds = thresholds
+
+
+def resolve_config(raw: Optional[dict]) -> Tuple[ResolvedConfig, List[str]]:
+    """Validate policies.config; never raise on bad input (DECISIONS 3.3).
+
+    Returns the resolved config plus a list of human-readable problems that
+    the caller records in ``detection_logs``.
+    """
+    problems: List[str] = []
+    raw = raw if isinstance(raw, dict) else {}
+
+    # --- weights ---
+    raw_weights = raw.get("weights")
+    weights = dict(DEFAULT_WEIGHTS)
+    if isinstance(raw_weights, dict):
+        parsed = {}
+        for key, fallback in DEFAULT_WEIGHTS.items():
+            value = raw_weights.get(key)
+            if not isinstance(value, (int, float)) or isinstance(value, bool):
+                problems.append(f"weights.{key} is not a number")
+                continue
+            if not 0.0 <= float(value) <= 1.0:
+                problems.append(f"weights.{key}={value} outside [0, 1]")
+                continue
+            parsed[key] = float(value)
+        if len(parsed) == len(DEFAULT_WEIGHTS) and parsed["rule"] > 0 and parsed["ml"] > 0:
+            if abs(parsed["rule"] + parsed["ml"] - 1.0) > 1e-6:
+                problems.append("weights.rule + weights.ml must equal 1.0")
+            else:
+                weights = parsed
+        elif parsed:
+            problems.append("weights incomplete, using defaults")
+    elif raw_weights is not None:
+        problems.append("weights is not an object, using defaults")
+
+    # --- thresholds ---
+    raw_thresholds = raw.get("thresholds")
+    thresholds = dict(DEFAULT_THRESHOLDS)
+    if isinstance(raw_thresholds, dict):
+        parsed = {}
+        for key in DEFAULT_THRESHOLDS:
+            value = raw_thresholds.get(key)
+            if not isinstance(value, (int, float)) or isinstance(value, bool):
+                problems.append(f"thresholds.{key} is not a number")
+                continue
+            if not 0.0 <= float(value) <= 1.0:
+                problems.append(f"thresholds.{key}={value} outside [0, 1]")
+                continue
+            parsed[key] = float(value)
+        if len(parsed) == len(DEFAULT_THRESHOLDS) and not (
+            parsed["low"] <= parsed["medium"] <= parsed["high"]
+        ):
+            problems.append("thresholds must satisfy low <= medium <= high")
+        elif len(parsed) == len(DEFAULT_THRESHOLDS):
+            thresholds = parsed
+        elif parsed:
+            problems.append("thresholds incomplete, using defaults")
+    elif raw_thresholds is not None:
+        problems.append("thresholds is not an object, using defaults")
+
+    return ResolvedConfig(weights, thresholds), problems
+
+
+def get_active_policy(db) -> Optional[Policy]:
+    """Return the single active policy, or None when none is activated."""
+    return db.query(Policy).filter(Policy.is_active.is_(True)).first()
+
+
+# =============================================================================
+# Rule evaluation
+# =============================================================================
+
+def compare(actual: Any, operator: str, expected: Any) -> bool:
+    """Apply one comparison operator. Unknown operator -> False."""
+    try:
+        if operator == "==":
+            return bool(actual == expected)
+        if operator == "!=":
+            return bool(actual != expected)
+        if operator == "in":
+            return actual in expected
+        if operator == "between":
+            return bool(expected[0] <= actual <= expected[1])
+        if operator == "not_between":
+            return not (expected[0] <= actual <= expected[1])
+        if actual is None:
+            return False
+        if operator == ">":
+            return bool(actual > expected)
+        if operator == ">=":
+            return bool(actual >= expected)
+        if operator == "<":
+            return bool(actual < expected)
+        if operator == "<=":
+            return bool(actual <= expected)
+    except (TypeError, KeyError, IndexError):
+        return False
+    return False
+
+
+def validate_rule(rule: Any) -> Optional[str]:
+    """Return a problem description, or None when the rule is usable.
+
+    A rule is usable when it has all 7 fields, ``field`` is one of the 6
+    features, ``operator`` is supported, and weight/score are in [0, 1].
+    """
+    if not isinstance(rule, dict):
+        return "rule is not an object"
+
+    for key in ("name", "field", "operator", "value", "weight", "score"):
+        if key not in rule:
+            return f"missing field {key!r}"
+
+    if rule["field"] not in ALLOWED_FEATURE_FIELDS:
+        return f"unknown feature {rule['field']!r}"
+    if rule["operator"] not in ALLOWED_OPERATORS:
+        return f"unsupported operator {rule['operator']!r}"
+    if rule["operator"] in RANGE_OPERATORS and (
+        not isinstance(rule["value"], (list, tuple)) or len(rule["value"]) != 2
+    ):
+        return f"operator {rule['operator']!r} requires [min, max]"
+    if rule["operator"] == "in" and (
+        not isinstance(rule["value"], (list, tuple)) or len(rule["value"]) == 0
+    ):
+        return "operator 'in' requires a non-empty list"
+
+    for key in ("weight", "score"):
+        value = rule[key]
+        if not isinstance(value, (int, float)) or isinstance(value, bool):
+            return f"{key} is not a number"
+        if not 0.0 <= float(value) <= 1.0:
+            return f"{key}={value} outside [0, 1]"
+
+    return None
+
+
+def evaluate_rules(
+    rules: Any, features: Dict[str, Any]
+) -> Tuple[float, List[RuleHit], List[Dict[str, Any]]]:
+    """Evaluate every rule and return the normalised rule score.
+
+    Returns ``(rule_score, hits, problems)`` where ``hits`` are only the
+    rules that triggered and ``problems`` describes rules that were skipped
+    (DECISIONS sections 1.6 and 2.1).
+    """
+    problems: List[Dict[str, Any]] = []
+    if not isinstance(rules, list) or not rules:
+        return 0.0, [], problems
+
+    usable: List[dict] = []
+    for index, rule in enumerate(rules):
+        issue = validate_rule(rule)
+        if issue:
+            name = rule.get("name") if isinstance(rule, dict) else None
+            problems.append(
+                {
+                    "rule_name": name or f"index_{index}",
+                    "reason": "unknown_feature" if issue.startswith("unknown feature") else "invalid_rule",
+                    "detail": issue,
+                    "triggered": False,
+                }
+            )
+            continue
+        if not rule.get("enabled", True):
+            continue
+        usable.append(rule)
+
+    if not usable:
+        return 0.0, [], problems
+
+    denominator = sum(float(r["weight"]) for r in usable)
+    if denominator <= 0:
+        return 0.0, [], problems
+
+    hits: List[RuleHit] = []
+    numerator = 0.0
+    for rule in usable:
+        triggered = compare(
+            features.get(rule["field"]), rule["operator"], rule["value"]
+        )
+        if not triggered:
+            continue
+        contribution = float(rule["score"]) * float(rule["weight"])
+        numerator += contribution
+        hits.append(
+            RuleHit(
+                rule_name=str(rule["name"]),
+                rule_id=None,
+                triggered=True,
+                score=float(rule["score"]),
+                weight=float(rule["weight"]),
+                score_contribution=contribution / denominator,
+                reason=rule.get("description") or f"{rule['field']} {rule['operator']} {rule['value']}",
+            )
+        )
+
+    rule_score = min(1.0, numerator / denominator)
+    return rule_score, hits, problems
+
+
+# =============================================================================
+# Feature building (UC-DE-02)
+# =============================================================================
+
+def build_features(db, attempt: LoginAttempt) -> Dict[str, Any]:
+    """Derive the 6 features a rule may reference from the login history."""
+    now = attempt.timestamp or datetime.now(timezone.utc)
+    features: Dict[str, Any] = {
+        "hour_of_day": now.hour,
+        "fail_count_24h": 0,
+        "ip_change_rate_7d": 0.0,
+        "new_device": False,
+        "average_login_interval_seconds": 0,
+        "deviation_score": 0.0,
+    }
+
+    if not attempt.user_id:
+        return features
+
+    day_ago = now - timedelta(hours=24)
+    week_ago = now - timedelta(days=7)
+
+    # Failures in the last 24h (excluding the attempt being scored)
+    failures = (
+        db.query(LoginAttempt)
+        .filter(
+            LoginAttempt.user_id == attempt.user_id,
+            LoginAttempt.timestamp >= day_ago,
+            LoginAttempt.outcome == "failure",
+        )
+        .count()
     )
-    db.add(dlog)
+    features["fail_count_24h"] = failures
 
-    # 4. Combine scores
-    weights = policy.weights or {"rule": 0.4, "ml": 0.6}
-    w_rule = weights.get("rule", 0.4)
-    w_ml = weights.get("ml", 0.6)
+    # IP change rate over 7 days: distinct IPs / total logins
+    week_attempts = (
+        db.query(LoginAttempt)
+        .filter(
+            LoginAttempt.user_id == attempt.user_id,
+            LoginAttempt.timestamp >= week_ago,
+        )
+        .all()
+    )
+    if week_attempts:
+        known_ips = {a.ip_address for a in week_attempts if a.ip_address}
+        total = len(known_ips) + 1  # +1 for the IP of the current attempt
+        features["ip_change_rate_7d"] = min(1.0, len(known_ips) / total)
 
-    if ml_status == "success":
-        combined_score = w_rule * rule_score + w_ml * anomaly_score
+    # New device: unknown user agent in the last 30 days
+    if attempt.user_agent:
+        month_ago = now - timedelta(days=30)
+        known_agents = {
+            row[0]
+            for row in db.query(LoginAttempt.user_agent)
+            .filter(
+                LoginAttempt.user_id == attempt.user_id,
+                LoginAttempt.timestamp >= month_ago,
+                LoginAttempt.user_agent.isnot(None),
+            )
+            .distinct()
+            .all()
+        }
+        features["new_device"] = attempt.user_agent not in known_agents
+
+    # Average interval between consecutive logins
+    recent = (
+        db.query(LoginAttempt.timestamp)
+        .filter(
+            LoginAttempt.user_id == attempt.user_id,
+            LoginAttempt.timestamp < now,
+        )
+        .order_by(LoginAttempt.timestamp.desc())
+        .limit(10)
+        .all()
+    )
+    stamps = [row[0] for row in recent if row[0] is not None]
+    if len(stamps) >= 2:
+        gaps = []
+        for earlier, later in zip(stamps, stamps[1:]):
+            delta = (earlier - later).total_seconds()
+            if delta >= 0:
+                gaps.append(delta)
+        if gaps:
+            features["average_login_interval_seconds"] = int(sum(gaps) / len(gaps))
+            mean_gap = sum(gaps) / len(gaps)
+            actual_gap = (now - stamps[0]).total_seconds()
+            features["deviation_score"] = min(
+                1.0, abs(actual_gap - mean_gap) / mean_gap if mean_gap else 0.0
+            )
+
+    return features
+
+
+# =============================================================================
+# ML Service call (UC-DE-03)
+# =============================================================================
+
+class MlOutcome:
+    """Result of calling ML Service, including failure details."""
+
+    def __init__(
+        self,
+        score: Optional[float],
+        status: str,
+        model_version: Optional[str] = None,
+        reason_codes: Optional[List[str]] = None,
+        error: Optional[str] = None,
+    ):
+        self.score = score
+        self.status = status
+        self.model_version = model_version
+        self.reason_codes = reason_codes or []
+        self.error = error
+
+
+async def call_ml_service(features: Dict[str, Any], request_id: UUID) -> MlOutcome:
+    """POST /api/v1/internal/ml/score with a 5s timeout and safe fallback."""
+    url = f"{ml_service_url()}/api/v1/internal/ml/score"
+    payload = {
+        "request_id": str(request_id),
+        "features": {k: v for k, v in features.items() if v is not None},
+    }
+    try:
+        async with httpx.AsyncClient(timeout=ML_TIMEOUT_SECONDS) as client:
+            response = await client.post(
+                url,
+                json=payload,
+                headers={"X-Internal-Secret": internal_secret()},
+            )
+        if response.status_code >= 500:
+            return MlOutcome(None, "error", error=f"ml_service_http_{response.status_code}")
+        if response.status_code >= 400:
+            return MlOutcome(None, "error", error=f"ml_service_http_{response.status_code}")
+
+        body = response.json()
+        score = body.get("normalized_anomaly_score", body.get("anomaly_score"))
+        if not isinstance(score, (int, float)) or isinstance(score, bool):
+            return MlOutcome(None, "error", error="ml_service_bad_payload")
+        return MlOutcome(
+            score=float(min(1.0, max(0.0, float(score)))),
+            status="success",
+            model_version=body.get("model_version"),
+            reason_codes=body.get("reason_codes") or [],
+        )
+    except httpx.TimeoutException:
+        return MlOutcome(None, "unavailable", error="ml_timeout")
+    except httpx.HTTPError as exc:
+        return MlOutcome(None, "unavailable", error=f"ml_unreachable: {exc.__class__.__name__}")
+    except (ValueError, KeyError) as exc:
+        return MlOutcome(None, "error", error=f"ml_bad_response: {exc.__class__.__name__}")
+
+
+# =============================================================================
+# Scoring (DECISIONS section 2)
+# =============================================================================
+
+def map_score_to_risk_level(score: float, thresholds: Dict[str, float]) -> str:
+    """Bucket a combined score using the policy thresholds."""
+    if score < thresholds["low"]:
+        return "low"
+    if score < thresholds["medium"]:
+        return "medium"
+    if score < thresholds["high"]:
+        return "high"
+    return "critical"
+
+
+async def process_attempt(db, attempt: LoginAttempt, request_id: UUID) -> DetectionResponse:
+    """Score one login attempt, persist the results and create an alert.
+
+    Implements DECISIONS sections 2 and 4.
+    """
+    def log(stage: str, **kwargs) -> None:
+        db.add(
+            DetectionLog(
+                login_attempt_id=attempt.id,
+                request_id=request_id,
+                stage=stage,
+                **kwargs,
+            )
+        )
+
+    policy = get_active_policy(db)
+    if policy is None:
+        log(
+            "scoring",
+            stage_detail="no_active_policy",
+            decision="allow",
+            reason="no_policy",
+            details={"note": "no active policy, allow and skip scoring"},
+        )
+        attempt.status = "processed"
+        attempt.risk_level = "low"
+        attempt.detection_decision = "allow"
+        db.commit()
+        return DetectionResponse(
+            rule_score=0.0,
+            ml_score=None,
+            combined_score=0.0,
+            ml_status="unavailable",
+            ml_model_version=None,
+            risk_level="low",
+            decision="allow",
+        )
+
+    config, config_problems = resolve_config(policy.config)
+    for problem in config_problems:
+        log("scoring", stage_detail="policy_config", reason="invalid_thresholds", details={"problem": problem})
+
+    features = build_features(db, attempt)
+
+    # Step 1 - rules
+    rule_score, hits, rule_problems = evaluate_rules(policy.rules, features)
+    for hit in hits:
+        log(
+            "rule_evaluation",
+            stage_detail=hit.rule_name,
+            rule_name=hit.rule_name,
+            triggered=True,
+            score_contribution=hit.score_contribution,
+            details={"field_value": _matched_value(features, hit.rule_name, policy.rules)},
+            reason=hit.reason,
+        )
+    for problem in rule_problems:
+        log(
+            "rule_evaluation",
+            stage_detail=problem["rule_name"],
+            rule_name=problem["rule_name"],
+            triggered=False,
+            reason=problem["reason"],
+            details={"detail": problem["detail"]},
+        )
+
+    # Step 2 - ML
+    ml = await call_ml_service(features, request_id)
+    log(
+        "ml_call",
+        stage_detail="ml_inference" if ml.status == "success" else (ml.error or "ml_failed"),
+        reason=ml.error,
+        details={"ml_status": ml.status, "features_used": features},
+    )
+
+    # Step 3 - combine
+    if ml.status == "success" and ml.score is not None:
+        combined = (
+            config.weights["rule"] * rule_score + config.weights["ml"] * ml.score
+        )
     else:
-        # ML unavailable: use only rule score
-        combined_score = rule_score
+        # Graceful degradation: no ML signal, use the rule score as-is
+        combined = rule_score
+    combined = min(1.0, max(0.0, combined))
 
-    # 5. Map to risk level and decision
-    thresholds = policy.thresholds or {"challenge": 0.3, "block": 0.7}
-    challenge_threshold = thresholds.get("challenge", 0.3)
-    block_threshold = thresholds.get("block", 0.7)
+    # Step 4 & 5 - level and decision
+    risk_level = map_score_to_risk_level(combined, config.thresholds)
+    decision, action_label, create_alert = DECISION_MATRIX[risk_level]
 
-    if combined_score >= block_threshold:
-        risk_level = "critical"
-        decision = "block"
-    elif combined_score >= challenge_threshold:
-        risk_level = "high"
-        decision = "block"
-    else:
-        risk_level = map_score_to_risk_level(combined_score)
-        decision = get_decision(risk_level)
-
-    # Log combined decision
-    dlog = DetectionLog(
-        login_attempt_id=None,
-        request_id=request_id,
-        stage="combined",
+    log(
+        "scoring",
         stage_detail="final_decision",
-        score=combined_score,
         decision=decision,
-        reason=f"rule={rule_score}, ml={anomaly_score}, combined={combined_score}",
+        reason=(
+            f"rule={rule_score:.4f}, ml={ml.score}, combined={combined:.4f}, "
+            f"level={risk_level}, action={action_label}"
+        ),
         details={
             "risk_level": risk_level,
-            "weights": weights,
-            "thresholds": thresholds,
-            "rule_hits": rule_hits,
+            "rule_score": rule_score,
+            "ml_score": ml.score,
+            "combined_score": combined,
+            "weights": config.weights,
+            "thresholds": config.thresholds,
         },
     )
-    db.add(dlog)
 
-    # 6. Create alert if high/critical
+    # Persist the assessment
+    assessment = RiskAssessment(
+        login_attempt_id=attempt.id,
+        policy_id=policy.id,
+        rule_score=rule_score,
+        ml_score=ml.score,
+        combined_score=combined,
+        ml_status=ml.status,
+        ml_model_version=ml.model_version,
+        rule_hits=[h.model_dump() for h in hits],
+        ml_reason_codes=ml.reason_codes,
+        ml_features_used=features,
+        risk_level=risk_level,
+        decision=decision,
+    )
+    db.add(assessment)
+
+    # Create the alert for high and critical risk
     alert_id = None
-    if risk_level in ("high", "critical"):
+    if create_alert:
         alert = Alert(
-            login_attempt_id=None,  # Will be linked to login attempt
-            policy_version_id=policy.id,
+            login_attempt_id=attempt.id,
+            policy_id=policy.id,
             request_id=request_id,
             status="open",
             risk_level=risk_level,
-            detection_reason=f"Risk level: {risk_level}, score: {combined_score:.3f}",
+            detection_reason=f"{action_label}: combined={combined:.4f} (rule={rule_score:.4f}, ml={ml.score})",
             detection_scores={
                 "rule_score": rule_score,
-                "anomaly_score": anomaly_score,
-                "ml_score": ml_score_value,
-                "combined_score": combined_score,
-                "rule_hits": rule_hits,
+                "ml_score": ml.score,
+                "combined_score": combined,
+                "ml_status": ml.status,
+                "ml_model_version": ml.model_version,
+                "rule_hits": [h.model_dump() for h in hits],
+                "ml_reason_codes": ml.reason_codes,
             },
         )
         db.add(alert)
         db.flush()
+        attempt.primary_alert_id = alert.id
         alert_id = alert.id
+        log("action_sent", stage_detail="alert_created", decision=decision, details={"alert_id": str(alert.id)})
+    else:
+        log("action_sent", stage_detail="no_alert", decision=decision, reason="risk below alert threshold")
 
-        # Log alert creation
-        dlog = DetectionLog(
-            login_attempt_id=None,
-            request_id=request_id,
-            stage="action",
-            stage_detail="alert_created",
-            decision=decision,
-            reason=f"Alert created: {alert.id}",
-        )
-        db.add(dlog)
-
+    attempt.policy_id = policy.id
+    attempt.status = "processed"
+    attempt.risk_level = risk_level
+    attempt.detection_decision = decision
     db.commit()
 
-    return {
-        "rule_score": rule_score,
-        "anomaly_score": anomaly_score,
-        "ml_score": ml_score_value,
-        "ml_status": ml_status,
-        "ml_model_version": ml_model_version,
-        "combined_score": combined_score,
-        "risk_level": risk_level,
-        "decision": decision,
-        "rule_hits": [
-            RuleHit(
-                rule_name=h["rule_name"],
-                rule_id=h.get("rule_id"),
-                score=h["score"],
-                reason=h.get("reason"),
-            )
-            for h in rule_hits
-        ],
-        "alert_id": alert_id,
-    }
-
-
-@router.post("/ml/score", response_model=MlScoreResponse)
-async def ml_score_endpoint(
-    request: MlScoreRequest,
-    x_internal_token: Optional[str] = Header(None),
-    db=Depends(get_db),
-) -> MlScoreResponse:
-    """
-    Compute ML risk score for login features.
-
-    This endpoint mirrors ml-service scoring.
-    In v1, this is a stub that returns default values.
-    """
-    if not verify_internal_token(x_internal_token):
-        raise HTTPException(status_code=401, detail="Invalid internal token")
-
-    features = request.features.model_dump() if hasattr(request.features, 'model_dump') else request.features
-
-    anomaly_score, ml_status, model_version = ml_score(features)
-
-    return MlScoreResponse(
-        anomaly_score=anomaly_score,
-        ml_status=ml_status,
-        model_version=model_version,
+    return DetectionResponse(
+        rule_score=round(rule_score, 4),
+        ml_score=None if ml.score is None else round(ml.score, 4),
+        combined_score=round(combined, 4),
+        ml_status=ml.status,
+        ml_model_version=ml.model_version,
+        ml_reason_codes=ml.reason_codes,
+        risk_level=risk_level,
+        decision=decision,
+        rule_hits=hits,
+        alert_id=alert_id,
     )
 
 
-@router.post("/actions", response_model=ActionResponse)
-async def enforce_action(
-    request: ActionRequest,
-    x_internal_token: Optional[str] = Header(None),
+def _matched_value(features: Dict[str, Any], rule_name: str, rules: Any) -> Any:
+    """Helper for logging which feature value caused a rule to trigger."""
+    if not isinstance(rules, list):
+        return None
+    for rule in rules:
+        if isinstance(rule, dict) and rule.get("name") == rule_name:
+            return features.get(rule.get("field"))
+    return None
+
+
+# =============================================================================
+# Internal endpoints
+# =============================================================================
+
+class InternalHealthResponse(BaseModel):
+    status: str = "ok"
+    active_policy: Optional[str] = None
+
+
+@router.post("/login-events", response_model=LoginEventResponse, status_code=http_status.HTTP_202_ACCEPTED)
+async def receive_login_event(
+    payload: LoginEventRequest,
+    x_internal_secret: Optional[str] = Header(None),
     db=Depends(get_db),
-) -> ActionResponse:
+) -> LoginEventResponse:
+    """UC-DE-01 - accept a login event from core-app and score it.
+
+    Idempotent on ``event_id``: replaying the same event returns the
+    existing attempt instead of creating a duplicate.
     """
-    Enforce security action from detection engine.
+    verify_internal_secret(x_internal_secret)
+    request_id = payload.request_id or uuid4()
 
-    Actions:
-    - REQUIRE_MFA: Set detection_mfa_once=True for target user
-    - REVOKE_SESSIONS: Revoke all sessions for target user
-    - LOCK_USER: Set user status to locked
-    """
-    if not verify_internal_token(x_internal_token):
-        raise HTTPException(status_code=401, detail="Invalid internal token")
-
-    action = request.action
-    target_user_id = request.target_user_id
-    reason = request.reason
-    now = datetime.utcnow()
-
-    # Find target user
-    user = db.query(User).filter(User.id == target_user_id).first()
-    if not user:
-        raise HTTPException(status_code=404, detail="User not found")
-
-    if action == "REQUIRE_MFA":
-        # Require MFA on next login
-        user.detection_mfa_once = True
-        user.admin_mfa_required = True  # Ensure MFA is required
-        db.commit()
-
-        # Log action
-        dlog = DetectionLog(
-            login_attempt_id=None,
-            request_id=uuid4(),
-            stage="action",
-            stage_detail="require_mfa",
-            decision="challenge",
-            reason=reason,
-            details={"target_user_id": str(target_user_id)},
-        )
-        db.add(dlog)
-        db.commit()
-
-        return ActionResponse(
-            status="applied",
-            action=action,
-            target_user_id=target_user_id,
-            details={"mfa_enabled": True},
+    existing = (
+        db.query(LoginAttempt)
+        .filter(LoginAttempt.event_id == payload.event_id)
+        .first()
+    )
+    if existing is not None:
+        return LoginEventResponse(
+            status="accepted",
+            event_id=payload.event_id,
+            login_attempt_id=existing.id,
+            processing=existing.status,
         )
 
-    elif action == "REVOKE_SESSIONS":
-        # Revoke all sessions for target user
-        revoked_count = db.query(Session).filter(
-            Session.user_id == target_user_id,
-            Session.revoked_at.is_(None),
-        ).update({"revoked_at": now})
+    attempt = LoginAttempt(
+        event_id=payload.event_id,
+        user_id=payload.user_id,
+        username_attempted=payload.username_attempted,
+        outcome=payload.outcome,
+        mfa_used=payload.mfa_used,
+        ip_address=payload.ip_address,
+        user_agent=payload.user_agent,
+        timestamp=payload.timestamp,
+        status="pending",
+        request_id=request_id,
+    )
+    db.add(attempt)
+    db.commit()
+    db.refresh(attempt)
 
-        db.commit()
+    # Pre-computed features from core-app override the derived ones
+    if payload.features:
+        for key, value in payload.features.items():
+            if key in {
+                "hour_of_day",
+                "fail_count_24h",
+                "ip_change_rate_7d",
+                "new_device",
+                "average_login_interval_seconds",
+                "deviation_score",
+            }:
+                db.add(
+                    DetectionLog(
+                        login_attempt_id=attempt.id,
+                        request_id=request_id,
+                        stage="rule_evaluation",
+                        stage_detail="supplied_features",
+                        reason="features_from_core_app",
+                        details={"features": payload.features},
+                    )
+                )
 
-        # Log action
-        dlog = DetectionLog(
-            login_attempt_id=None,
-            request_id=uuid4(),
-            stage="action",
-            stage_detail="revoke_sessions",
-            decision="block",
-            reason=reason,
-            details={"target_user_id": str(target_user_id), "revoked_count": revoked_count},
-        )
-        db.add(dlog)
-        db.commit()
+    try:
+        await process_attempt(db, attempt, request_id)
+    except Exception:  # noqa: BLE001 - never let scoring kill the endpoint
+        logger.exception("detection failed for event %s", payload.event_id)
+        db.rollback()
+        attempt = db.query(LoginAttempt).filter(LoginAttempt.id == attempt.id).first()
+        if attempt is not None:
+            attempt.status = "failed"
+            db.add(
+                DetectionLog(
+                    login_attempt_id=attempt.id,
+                    request_id=request_id,
+                    stage="scoring",
+                    stage_detail="engine_error",
+                    reason="unhandled_exception",
+                )
+            )
+            db.commit()
 
-        return ActionResponse(
-            status="applied",
-            action=action,
-            target_user_id=target_user_id,
-            details={"revoked_sessions": revoked_count},
-        )
+    return LoginEventResponse(
+        status="accepted",
+        event_id=payload.event_id,
+        login_attempt_id=attempt.id,
+        processing=attempt.status,
+    )
 
-    elif action == "LOCK_USER":
-        # Lock the user account
-        user.status = "locked"
-        user.locked_at = now
 
-        # Revoke all sessions
-        db.query(Session).filter(
-            Session.user_id == target_user_id,
-            Session.revoked_at.is_(None),
-        ).update({"revoked_at": now})
-
-        db.commit()
-
-        # Log action
-        dlog = DetectionLog(
-            login_attempt_id=None,
-            request_id=uuid4(),
-            stage="action",
-            stage_detail="lock_user",
-            decision="block",
-            reason=reason,
-            details={"target_user_id": str(target_user_id)},
-        )
-        db.add(dlog)
-        db.commit()
-
-        return ActionResponse(
-            status="applied",
-            action=action,
-            target_user_id=target_user_id,
-            details={"status": "locked"},
-        )
-
-    else:
-        raise HTTPException(status_code=400, detail=f"Unsupported action: {action}")
+@router.get("/login-attempts/{login_attempt_id}", response_model=LoginAttemptStatusResponse)
+async def get_login_attempt_status(
+    login_attempt_id: UUID,
+    x_internal_secret: Optional[str] = Header(None),
+    db=Depends(get_db),
+) -> LoginAttemptStatusResponse:
+    """Poll the processing state of a previously submitted login event."""
+    verify_internal_secret(x_internal_secret)
+    attempt = db.query(LoginAttempt).filter(LoginAttempt.id == login_attempt_id).first()
+    if attempt is None:
+        raise HTTPException(status_code=http_status.HTTP_404_NOT_FOUND, detail="Login attempt not found")
+    return LoginAttemptStatusResponse(
+        login_attempt_id=attempt.id,
+        status=attempt.status,
+        risk_level=attempt.risk_level,
+        decision=attempt.detection_decision,
+        alert_id=attempt.primary_alert_id,
+    )
 
 
 @router.get("/health", response_model=InternalHealthResponse)
-async def detection_health() -> InternalHealthResponse:
-    """Health check for detection endpoint."""
-    return InternalHealthResponse(status="ok")
+async def detection_health(db=Depends(get_db)) -> InternalHealthResponse:
+    """Liveness probe; also reports which policy is active."""
+    policy = None
+    try:
+        active = get_active_policy(db)
+        policy = active.version if active else None
+    except Exception:  # noqa: BLE001 - health must never fail
+        logger.debug("health check could not read the active policy", exc_info=True)
+    return InternalHealthResponse(status="ok", active_policy=policy)
+
+
+# =============================================================================
+# Policy management (UC-DE-15) - Security Admin only
+# =============================================================================
+
+@policy_router.get("", response_model=list)
+async def list_policies(db=Depends(get_db)) -> list:
+    """List every policy, newest first."""
+    policies = db.query(Policy).order_by(Policy.created_at.desc()).all()
+    return [
+        {
+            "id": str(p.id),
+            "version": p.version,
+            "name": p.name,
+            "description": p.description,
+            "rule_count": len(p.rules) if isinstance(p.rules, list) else 0,
+            "is_active": p.is_active,
+            "created_at": p.created_at,
+            "activated_at": p.activated_at,
+        }
+        for p in policies
+    ]
+
+
+@policy_router.post("/{policy_id}/activate")
+async def activate_policy(
+    policy_id: UUID,
+    db=Depends(get_db),
+) -> dict:
+    """Activate a policy, deactivating the previously active one."""
+    policy = db.query(Policy).filter(Policy.id == policy_id).first()
+    if policy is None:
+        raise HTTPException(status_code=http_status.HTTP_404_NOT_FOUND, detail="Policy not found")
+
+    problems: List[str] = []
+    _, problems = resolve_config(policy.config)
+    raw_rules = policy.rules if isinstance(policy.rules, list) else []
+    for index, rule in enumerate(raw_rules):
+        issue = validate_rule(rule)
+        if issue:
+            problems.append(f"rule {rule.get('name', index) if isinstance(rule, dict) else index}: {issue}")
+    if problems:
+        raise HTTPException(
+            status_code=http_status.HTTP_400_BAD_REQUEST,
+            detail={"message": "Policy is invalid", "problems": problems},
+        )
+
+    now = datetime.now(timezone.utc)
+    for other in db.query(Policy).filter(Policy.is_active.is_(True)).all():
+        other.is_active = False
+        other.deactivated_at = now
+    policy.is_active = True
+    policy.activated_at = now
+    policy.deactivated_at = None
+    db.commit()
+    return {"status": "activated", "version": policy.version}

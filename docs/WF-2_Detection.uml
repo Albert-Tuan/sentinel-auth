@@ -8,6 +8,7 @@ skinparam rectangle {
   BorderColor black
 }
 skinparam ArrowColor black
+skinparam ArrowThickness 1.2
 title WF-2  Detection Engine Flow
 
 rectangle "Core App" as sys_1 {
@@ -33,25 +34,46 @@ rectangle "Detection Engine" as sys_4 {
 rectangle "detection-db" as sys_5 {
   rectangle "Pending login attempt" as attempt
   rectangle "Risk assessment and alert" as assess
+  rectangle "Detection log trail" as dlog
 }
 
 rectangle "ML Service" as sys_6 {
   rectangle "ML anomaly score" as ml
 }
 
-event ..> outbox : INSERT outbox_events\n<<flow>>
-outbox ..> poll : pending events\n<<flow>>
-poll ..> receive : POST login-events\n<<flow>>
-receive ..> attempt : idempotent insert\n<<flow>>
-attempt ..> rules : worker fetches attempts\n<<flow>>
-rules ..> ml : HTTP score request\n<<flow>>
-ml ..> combine : anomaly score\n<<flow>>
-rules ..> combine : rule score\n<<flow>>
-combine ..> assess : risk level\n<<flow>>
-assess ..> action : HIGH / CRITICAL\n<<flow>>
-action ..> lock : critical action via HTTP\n<<flow>>
+' Core App -> outbox
+event --> outbox : INSERT outbox_events\n<<flow>>
+
+' Outbox poller
+outbox --> poll : pending events\n<<flow>>
+poll --> receive : POST /api/v1/internal/login-events\n<<flow>>
+
+' Detection Engine receives
+receive --> attempt : idempotent insert\n<<flow>>
+
+' Worker consumes attempts
+attempt --> rules : worker fetches attempts\n<<flow>>
+rules --> dlog : INSERT detection_logs\n(stage=rule_evaluation)\n<<flow>>
+
+' ML call
+rules --> ml : HTTP score request\n<<flow>>
+ml --> combine : anomaly score\n<<flow>>
+rules --> combine : rule score\n<<flow>>
+
+' Risk assessment + alert decision
+combine --> assess : INSERT risk_assessment\n<<flow>>
+combine --> dlog : INSERT detection_logs\n(stage=combine)\n<<flow>>
+assess --> dlog : INSERT detection_logs\n(stage=action_sent)\n<<flow>>
+
+' Optional action back to Core App
+assess --> action : risk_level in (high, critical)\n<<flow>>
+action --> lock : critical action via HTTP\n<<flow>>
 
 legend bottom
   The login response is independent of this background pipeline.
+  rule_score = min(1.0, SUM(score x weight) / SUM(weight of enabled rules))
+  Risk formula: combined = 0.4 x rule_score + 0.6 x ml_score
+  Fallback when ML is down or times out (>5s): combined = rule_score
+  Outbox pattern guarantees at-least-once delivery to Detection Engine.
 endlegend
 @enduml

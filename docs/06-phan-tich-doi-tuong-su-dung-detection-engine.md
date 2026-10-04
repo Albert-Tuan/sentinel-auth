@@ -195,33 +195,34 @@ Core App là service chính xử lý authentication. Nó giao tiếp với Detec
 
 #### 3.3.3 Giao tiếp
 
-**Gửi LoginEvent:**
+Mọi giao tiếp nội bộ dùng header `X-Internal-Secret: <shared_secret>`.
+Xem `docs/DECISIONS-DETECTION-v3.3.md` mục 5.
+
+**Gửi LoginEvent** → `POST /api/v1/internal/login-events`
+
 ```json
-POST /internal/login-events
 {
   "event_id": "UUID",
   "user_id": "UUID | null",
   "username_attempted": "string",
-  "outcome": "success | failed",
+  "outcome": "success | failure | locked | rate_limited | mfa_required | mfa_success | mfa_failure",
   "mfa_used": "boolean",
-  "ip_address": "string",
-  "user_agent": "string",
+  "ip_address": "string | null",
+  "user_agent": "string | null",
   "timestamp": "ISO 8601"
 }
 ```
 
-**Nhận Action:**
+**Nhận Action** → `POST /api/v1/internal/actions`
+
 ```json
-POST /internal/actions
 {
-  "action": "REQUIRE_MFA | REVOKE_SESSIONS | LOCK_USER | RATE_LIMIT_IP",
-  "target": {
-    "type": "user_id | ip_address",
-    "value": "UUID | string"
-  },
+  "action": "REQUIRE_MFA | REVOKE_SESSIONS | LOCK_USER | FORCE_LOGOUT",
+  "target_user_id": "UUID",
   "reason": "string",
-  "risk_level": "string",
-  "login_attempt_id": "UUID"
+  "alert_id": "UUID | null",
+  "severity": "low | medium | high | critical | null",
+  "idempotency_key": "string | null"
 }
 ```
 
@@ -250,7 +251,8 @@ ML Service cung cấp anomaly detection sử dụng Isolation Forest model. Dete
 
 **Gửi ML Request:**
 ```json
-POST /internal/score
+POST /api/v1/internal/ml/score
+X-Internal-Secret: <secret>
 {
   "request_id": "UUID",
   "features": {

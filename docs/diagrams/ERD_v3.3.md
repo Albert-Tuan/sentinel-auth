@@ -3,6 +3,10 @@
 > Dựa trên ERD v3.2, tích hợp đầy đủ Detection Engine
 > Detection Engine có database riêng, giao tiếp qua HTTP với Core-app
 
+> ⚠️ **Nguồn sự thật:** cấu trúc `policies.rules` (7 trường), tên cột
+> `ml_score`, công thức gộp điểm và đường dẫn API trong ERD này đều tuân theo
+> `docs/DECISIONS-DETECTION-v3.3.md`. Khi có mâu thuẫn, **file đó thắng**.
+
 ---
 
 ## Design Decisions từ Detection Engine
@@ -252,7 +256,7 @@ erDiagram
         uuid event_id "from core-app, for idempotency"
         uuid user_id "nullable, NULL if login failed"
         text username_attempted "nullable"
-        text outcome "success|failure|mfa_required|mfa_success|mfa_failed|blocked|locked|rate_limited"
+        text outcome "success|failure|locked|rate_limited|mfa_required|mfa_success|mfa_failure"
         bool mfa_used "default FALSE"
         inet ip_address "nullable"
         text user_agent "nullable"
@@ -563,7 +567,7 @@ databases. These references **MUST** be validated at the application layer.
   "event_id": "uuid",
   "user_id": "uuid | null",
   "username_attempted": "string",
-  "outcome": "success | failure | mfa_required | mfa_success | blocked | locked | rate_limited",
+  "outcome": "success | failure | locked | rate_limited | mfa_required | mfa_success | mfa_failure",
   "mfa_used": false,
   "ip_address": "x.x.x.x",
   "user_agent": "string",
@@ -597,7 +601,7 @@ databases. These references **MUST** be validated at the application layer.
 | SOC Analyst | `soc_analysts` table | **Giữ nguyên** (linked to users) |
 | Alert:Login | **1:N** | **Giữ nguyên** (1:N with primary_alert_id) |
 | Detection Logs | 4 stages | **Mở rộng** (rule_evaluation, ml_call, scoring, action_sent) |
-| Policy Storage | `policy_versions` (core-db) | `policies` (detection-db, JSONB) |
+| Policy Storage | `policies` (detection-db, JSONB `rules` + `config`) | `policies` (detection-db, JSONB `rules` + `config`) |
 | ML Service | Không có | **Tách riêng** với model registry |
 
 ---

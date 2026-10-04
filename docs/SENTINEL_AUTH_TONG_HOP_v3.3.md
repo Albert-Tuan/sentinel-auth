@@ -118,7 +118,7 @@
 │              [ML Service]                                                   │
 │                    │                                                        │
 │                    │ ML Response                                            │
-│                    │ (anomaly_score, reason_codes)                          │
+│                    │ (normalized_anomaly_score, reason_codes)              │
 │                    ▼                                                        │
 │         [Detection Engine]                                                  │
 │         Rule Score + ML Score ──► Risk Assessment ──► Alert?               │
@@ -598,24 +598,72 @@ erDiagram
 
 ### 6.3 Risk Scoring Formula
 
-```
-Risk_Score = w_rule × Rule_Score + w_ml × ML_Score
+> Nguồn sự thật: `docs/DECISIONS-DETECTION-v3.3.md` mục 2.
 
-Trong đó:
-- w_rule = 0.4 (configurable)
-- w_ml = 0.6 (configurable)
-- Rule_Score = Sum(triggered_rule.score × rule.weight)
-- ML_Score = normalized_anomaly_score
+**Bước 1 — `Rule_Score` (chuẩn hoá):**
+
+```
+Rule_Score = min( 1.0,
+                  Sum(triggered_rule.score × rule.weight)   ← chỉ rule ĐÃ CHẠY
+                  ───────────────────────────────────────────
+                  Sum(weight của TẤT CẢ rule đã bật)        ← mẫu số
+                )
+```
+
+Nếu không có rule nào được bật → `Rule_Score = 0.0`.
+
+**Bước 2 — `ML_Score`:**
+
+`ML_Score` = `normalized_anomaly_score` trả về từ ML Service.
+Nếu ML lỗi hoặc timeout (> 5s) → `ML_Score = NULL`, `ml_status` ghi lý do.
+
+**Bước 3 — `Risk_Score`:**
+
+```
+Nếu ML thành công:
+  Risk_Score = w_rule × Rule_Score + w_ml × ML_Score
+
+Nếu ML không thành công (suy giảm êm):
+  Risk_Score = Rule_Score
+```
+
+Trong đó (lưu trong `policies.config.weights`, có thể cấu hình):
+- `w_rule = 0.4`
+- `w_ml = 0.6`
+
+> **Vì sao chuẩn hoá mẫu số?** Nếu cộng thẳng `Sum(score × weight)`, nhiều rule
+> cùng chạy sẽ cho `Rule_Score > 1.0`, phá vỡ công thức bước 3 vốn giả định cả
+> hai vế nằm trong `[0, 1]`.
+>
+> **Vì sao ML lỗi thì dùng `Rule_Score` chứ không chia lại trọng số?** Vì như vậy
+> tổng điểm **không giảm** so với khi có ML — hệ thống thận trọng hơn khi thiếu
+> tín hiệu, đây là chủ ý thiết kế.
+
+**Ví dụ tính tay** (chính sách `v1.0`, tổng trọng số `= 1.20`):
+
+```
+unusual_hour       0.80 × 0.30 = 0.240   (chạy)
+multiple_failures  0.90 × 0.40 = 0.360   (chạy)
+new_device         0.50 × 0.20 = 0.100   (chạy)
+high_deviation     0.70 × 0.30 = 0.210   (chạy)
+────────────────────────────────────────
+Tổng = 0.910  ÷  1.20  =  Rule_Score 0.7583
+
+ML_Score = 0.72
+Risk_Score = 0.4 × 0.7583 + 0.6 × 0.72 = 0.7353
 ```
 
 ### 6.4 Risk Level Thresholds
 
-| Risk Level | Threshold | Action |
-|------------|-----------|--------|
-| LOW | < 0.25 | Allow |
-| MEDIUM | 0.25 - 0.50 | Allow (log) |
-| HIGH | 0.50 - 0.75 | Challenge (MFA) |
-| CRITICAL | > 0.75 | Block + Alert |
+| Risk Level | Điều kiện | Action | `decision` | Tạo alert? |
+|------------|----------|--------|------------|-----------|
+| `low` | `< 0.25` | Allow | `allow` | ❌ |
+| `medium` | `0.25 - 0.50` | Allow (log) | `allow` | ❌ |
+| `high` | `0.50 - 0.75` | Challenge (MFA) | `challenge` | ✅ |
+| `critical` | `≥ 0.75` | Block + Alert | `block` | ✅ |
+
+Biên `0.75` thuộc về **CRITICAL**. Mức `high` luôn sinh cảnh báo dù người dùng
+vẫn được vào sau bước MFA.
 
 ---
 
@@ -664,7 +712,9 @@ Trong đó:
 
 ### 8.1 Core → Detection Engine
 
-#### LoginEvent (POST /internal/login-events)
+#### LoginEvent (POST /api/v1/internal/login-events)
+
+Header: `X-Internal-Secret: <shared_secret>`
 
 ```json
 {
@@ -675,39 +725,63 @@ Trong đó:
   "mfa_used": false,
   "ip_address": "192.168.1.100",
   "user_agent": "Mozilla/5.0...",
-  "timestamp": "2026-09-13T14:30:00Z"
+  "timestamp": "2026-09-13T14:30:00Z",
+  "request_id": "uuid or null",
+  "features": null
 }
 ```
 
+Giá trị hợp lệ của `outcome`:
+`success` | `failure` | `locked` | `rate_limited` | `mfa_required` | `mfa_success` | `mfa_failure`
+
+**Response (HTTP 202 Accepted):**
+
+```json
+{
+  "status": "accepted",
+  "event_id": "550e8400-e29b-41d4-a716-446655440000",
+  "login_attempt_id": "uuid",
+  "processing": "pending"
+}
+```
+
+> `event_id` là khoá idempotency — gửi lại cùng `event_id` sẽ trả về
+> `login_attempt_id` cũ, không tạo bản ghi trùng.
+
 ### 8.2 Detection Engine → Core App
 
-#### Action (POST /internal/actions)
+#### Action (POST /api/v1/internal/actions)
+
+Header: `X-Internal-Secret: <shared_secret>`
 
 ```json
 {
   "action": "REQUIRE_MFA",
-  "target": {
-    "type": "user_id",
-    "value": "uuid"
-  },
-  "reason": "Risk score exceeded threshold",
-  "risk_level": "high",
-  "login_attempt_id": "uuid"
+  "target_user_id": "uuid",
+  "reason": "COMBINE: 0.7353 - rule 0.7583 + high_deviation",
+  "alert_id": "uuid",
+  "severity": "high",
+  "idempotency_key": "optional-string"
 }
 ```
 
 #### Action Types
 
-| Action | Mô tả |
-|--------|--------|
-| `REQUIRE_MFA` | Yêu cầu user thực hiện MFA |
-| `REVOKE_SESSIONS` | Thu hồi tất cả sessions của user |
-| `LOCK_USER` | Khóa tài khoản tạm thời |
-| `RATE_LIMIT_IP` | Rate limit IP address |
+| Action | Mô tả | Trigger |
+|--------|--------|---------|
+| `REQUIRE_MFA` | Yêu cầu user thực hiện MFA | `high` |
+| `REVOKE_SESSIONS` | Thu hồi tất cả sessions của user | `critical` |
+| `LOCK_USER` | Khóa tài khoản + thu hồi phiên | `critical` |
+| `FORCE_LOGOUT` | Đăng xuất cưỡng bức | do SOC yêu cầu |
+
+> Rate limiting **không** thuộc Detection Engine v3.3 — Core App tự xử lý và ghi
+> `login_attempts.outcome = 'rate_limited'`.
 
 ### 8.3 Detection Engine → ML Service
 
-#### ML Request (POST /internal/score)
+#### ML Request (POST /api/v1/internal/ml/score)
+
+Header: `X-Internal-Secret: <shared_secret>` — timeout 5 giây.
 
 ```json
 {

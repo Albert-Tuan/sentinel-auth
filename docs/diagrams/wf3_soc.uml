@@ -85,9 +85,7 @@ else Resolve Alert
     DDB --> DE : updated alert
     deactivate DDB
     
-    DE -> DDB : INSERT alert_timeline\n(event_type=resolved, actor_id,
-    resolved_by_id, old_value=acknowledged,
-    new_value=resolved, comment)
+    DE -> DDB : INSERT alert_timeline\n(event_type=resolved, actor_id,\nresolved_by_id, old_value=acknowledged,\nnew_value=resolved, comment)
     
     DE --> S : **200 OK**\n{alert: {status: "resolved"}}
     deactivate DE

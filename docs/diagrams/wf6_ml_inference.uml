@@ -28,7 +28,7 @@ end note
 
 == ML Service Health Check ==
 
-DE -> ML : **GET /api/v1/internal/health**
+DE -> ML : **GET /api/v1/internal/ml/health**
 activate ML
 ML --> DE : **200 OK**\n{model_status: "ready",\nactive_version: "v1.0-isolation-forest"}
 deactivate ML
@@ -55,7 +55,7 @@ DE -> ML : **POST /api/v1/internal/ml/score**\n(request_id, features: {6_feature
 activate ML
 
 ML -> ML : Validate features\n(type check, range check)
-ML -> ML : IsolationForest.predict(features)\n(timeout 500ms)
+ML -> ML : IsolationForest.predict(features)\n(timeout 5s)
 
 alt inference SUCCESS
     ML -> ML : raw_score = decision_function()
@@ -66,10 +66,10 @@ alt inference SUCCESS
     activate MDB
     deactivate MDB
     
-    ML --> DE : **200 OK**\n{anomaly_score: 0.85,\nnormalized_score: 0.85,\nis_anomaly: true,\nreason_codes: ["high_fail_count", "new_country"],\nmodel_version_used: "v1.0-isolation-forest",\nprocessing_time_ms: 23}
+    ML --> DE : **200 OK**\n{request_id,\nnormalized_anomaly_score: 0.85,\nis_anomaly: true,\nreason_codes: ["high_fail_count", "unusual_time"],\nmodel_version: "v1.0-isolation-forest",\nmodel_status: "ready",\nprocessing_time_ms: 23}
     deactivate ML
 
-else inference TIMEOUT (>500ms)
+else inference TIMEOUT (>5s)
     ML -> MDB : INSERT inference_logs\n(model_status='degraded',\nerror_message='timeout')
     
     ML --> DE : **408 Request Timeout**\n{ml_status: "timeout"}
@@ -118,7 +118,7 @@ legend right
   combined = 0.4 × rule_score + 0.6 × ml_score
   
   **Thresholds:**
-  LOW < 0.25 < MEDIUM < 0.5 < HIGH < 0.75 < CRITICAL
+  low < 0.25 ≤ medium < 0.50 ≤ high < 0.75 ≤ critical
 endlegend
 
 @enduml

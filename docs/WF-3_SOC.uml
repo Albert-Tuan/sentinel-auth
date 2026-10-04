@@ -8,6 +8,7 @@ skinparam rectangle {
   BorderColor black
 }
 skinparam ArrowColor black
+skinparam ArrowThickness 1.2
 title WF-3  SOC Alert Handling
 
 actor "SOC Analyst" as soc
@@ -34,19 +35,20 @@ rectangle "core-db" as sys_4 {
   rectangle "Validate analyst role" as validate
 }
 
-soc ..> login : credentials\n<<flow>>
-login ..> soc : JWT with SOC role\n<<flow>>
-soc ..> list : GET alerts + JWT\n<<flow>>
-list ..> alerts : filter and sort\n<<flow>>
-alerts ..> detail : selected alert\n<<flow>>
-detail ..> context : load details\n<<flow>>
-soc ..> action : PATCH alert\n<<flow>>
-action ..> validate : role lookup via HTTP\n<<flow>>
-action ..> timeline : status + history\n<<flow>>
-soc ..> stats : GET dashboard\n<<flow>>
-stats ..> counts : aggregate alerts\n<<flow>>
+soc --> login : credentials\n<<flow>>
+login --> soc : JWT with SOC role\n<<flow>>
+soc --> list : GET alerts + JWT\n<<flow>>
+list --> alerts : filter and sort\n<<flow>>
+alerts --> detail : selected alert\n<<flow>>
+detail --> context : load details\n<<flow>>
+soc --> action : PATCH alert\n<<flow>>
+action --> validate : role lookup via HTTP\n<<flow>>
+action --> timeline : status + history\n<<flow>>
+soc --> stats : GET dashboard\n<<flow>>
+stats --> counts : aggregate alerts\n<<flow>>
 
 legend bottom
   Alert states: open → acknowledged → resolved / false_positive; escalation is recorded.
+  Cross-DB refs (assigned_to, actor) are validated at app layer via core-db.
 endlegend
 @enduml

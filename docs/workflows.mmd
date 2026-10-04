@@ -45,7 +45,7 @@ sequenceDiagram
     participant CA as Core App
     participant CDB as core-db
 
-    U->>CA: POST /api/v1/auth/login<br/>(username, password, source_ip)
+    U->>CA: POST /api/v1/auth/login<br/>(username, password)
     CA->>CDB: SELECT user WHERE username
     CDB-->>CA: user record (hash, status, mfa settings)
 
@@ -312,7 +312,7 @@ sequenceDiagram
 
     Note over DE,ML: Trigger từ WF-2<br/>(trong detection pipeline)
 
-    DE->>ML: GET /api/v1/internal/health
+    DE->>ML: GET /api/v1/internal/ml/health
     ML-->>DE: 200 {model_status: ready, version}
 
     alt ML DOWN
@@ -326,8 +326,8 @@ sequenceDiagram
         alt inference SUCCESS
             ML->>ML: predict() → raw_score, is_anomaly
             ML->>MDB: INSERT inference_logs
-            ML-->>DE: 200 {anomaly_score, is_anomaly,<br/>reason_codes, processing_time_ms}
-        else TIMEOUT (>500ms)
+            ML-->>DE: 200 {normalized_anomaly_score, is_anomaly,<br/>reason_codes, model_version, model_status}
+        else TIMEOUT (>5s)
             ML->>MDB: INSERT inference_logs (status=degraded)
             ML-->>DE: 408 Timeout {ml_status: timeout}
         else ERROR

@@ -198,7 +198,7 @@ ON CONFLICT (version) DO NOTHING;
 -- Note: This view is a DEFERRABLE view placeholder.
 -- Since ml-service-db cannot directly query detection-db (different database),
 -- the implementation strategy is:
--- 1. ml-service calls detection-engine HTTP API: GET /internal/dashboard/stats
+-- 1. ml-service calls detection-engine HTTP API: GET /api/v1/soc/dashboard
 -- 2. detection-engine aggregates from login_attempts, risk_assessments, alerts
 -- 3. ml-service caches the result and exposes it as manager dashboard
 --
@@ -247,7 +247,7 @@ ON CONFLICT (version) DO NOTHING;
 -- GROUP BY DATE_TRUNC('day', la.timestamp);
 --
 -- In practice, this aggregation happens in the ml-service Python code
--- by calling detection-engine's REST API: GET /internal/dashboard/overview
+-- by calling detection-engine's REST API: GET /api/v1/soc/dashboard
 
 -- Local fallback view: aggregates only data within ml-service-db
 CREATE OR REPLACE VIEW local_ml_stats AS

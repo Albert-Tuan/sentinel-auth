@@ -45,10 +45,18 @@ docs/
 
 **CLI:**
 ```bash
-# Cần có Java + plantuml.jar
+# Cách 1 - dùng Kroki server (không cần cài Java)
+python3 scripts/render_diagrams.py
+# Output: docs/diagrams/*.png
+
+# Cách 2 - PlantUML CLI (cần có Java + plantuml.jar)
 java -jar plantuml.jar docs/diagrams/wf1_login.uml
 # Output: docs/diagrams/wf1_login.png
 ```
+
+> **Lưu ý cú pháp:** trong sequence/component diagram, khối ghi chú phải nằm *trong* phần
+> đang mở. `note ... end note` đặt **sau** `end` / `endlegend` sẽ khiến PlantUML báo
+> `Syntax Error`. Hãy dùng `legend ... endlegend` cho nội dung tổng kết ở cuối file.
 
 ### Mermaid (file `docs/workflows.mmd`)
 

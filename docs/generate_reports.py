@@ -306,7 +306,7 @@ def gen_requirement_report(out_path):
          'User đăng nhập bằng username/password. Hệ thống dùng Argon2id hash. '
          'Phân biệt phiên theo vai trò (user/soc/sysadm). '
          'MFA qua OTP email khi cần.'),
-        ('2', 'Phát hiện rủi ro tự động (Inline Detection)',
+        ('2', 'Phát hiện rủi ro tự động (Detection Engine)',
          'Sau mỗi đăng nhập, hệ thống tự động trích features và gọi ML scoring (Isolation Forest) '
          'trong cùng request. Tính rule_score + anomaly_score → risk_level.'),
         ('3', 'Cảnh báo rủi ro tự động (Automatic Alert)',
@@ -344,8 +344,9 @@ def gen_requirement_report(out_path):
 
     qual_reqs = [
         ('1', 'Tốc độ phản hồi đăng nhập', 'Hiệu quả',
-         'Thời gian phản hồi login endpoint ≤ 500ms (chưa tính ML timeout). '
-         'ML scoring có timeout 500ms — nếu quá → ml_status=error, risk_level fallback medium.'),
+         'Thời gian phản hồi login endpoint ≤ 1s (không bao gồm ML timeout vì ML chạy bất đồng bộ). '
+         'ML scoring có timeout 5s — nếu quá → ml_status=unavailable, '
+        'combined_score = rule_score (suy giảm êm).'),
         ('2', 'Xử lý MFA tức thì', 'Hiệu quả',
          'MFA verify phản hồi ≤ 300ms. Pre-auth transaction hết hạn sau 5 phút.'),
         ('3', 'Giao diện trực quan, dễ sử dụng', 'Tiện dụng',
@@ -385,9 +386,11 @@ def gen_requirement_report(out_path):
     doc.add_paragraph()
     add_para(doc, '5.2 Luồng WF-2: Detection Inline (Risk Assessment)', bold=True, size=11)
     add_para(doc,
-        'Mô tả: Sau khi login thành công → gọi /internal/v1/detect → trích features (IP, fail_count, '
-        'device, time…) → gọi ML scoring (Isolation Forest) → lưu risk_assessment → '
-        'nếu risk_level HIGH/CRITICAL → tạo alert.',
+        'Mô tả: Sau khi login → ghi outbox event → Detection Engine nhận POST /api/v1/internal/login-events → '
+        'trích 6 features (hour_of_day, fail_count_24h, ip_change_rate_7d, new_device, '
+        'average_login_interval_seconds, deviation_score) → gọi ML scoring '
+        '(POST /api/v1/internal/ml/score) → lưu risk_assessment → '
+        'nếu risk_level high/critical → tạo alert.',
         size=10)
     img_path2 = os.path.join(BASE, 'docs/diagrams/fig_wf2_detection.png')
     add_image(doc, img_path2, width=Cm(14))
@@ -486,7 +489,7 @@ def gen_object_analysis_report(out_path):
     add_bold_bullet(doc, 'Quản lý cấu hình hệ thống:', '')
     add_bullet(doc, 'Ngưỡng risk: low/medium/high/critical (thay đổi được mà không cần code).')
     add_bullet(doc, 'Thời gian hết hạn session và OTP.')
-    add_bullet(doc, 'Cấu hình ML timeout (mặc định 500ms).')
+    add_bullet(doc, 'Cấu hình ML timeout (mặc định 5s).')
 
     add_bold_bullet(doc, 'Theo dõi nhật ký hệ thống:', '')
     add_bullet(doc, 'Xem detection_logs: mỗi detection ghi: login_attempt_id, rule_score, anomaly_score, ml_status, risk_level, decision, thời gian.')
@@ -514,8 +517,9 @@ def gen_object_analysis_report(out_path):
     doc.add_paragraph()
     add_para(doc, '2.2 Luồng WF-2: Detection Inline (Risk Assessment)', bold=True, size=11)
     add_para(doc,
-        'Mô tả: Sau login thành công → gọi /internal/v1/detect → trích features → '
-        'gọi ML scoring (Isolation Forest) → lưu risk_assessment → tạo alert nếu risk HIGH/CRITICAL.',
+        'Mô tả: Sau login → ghi outbox event → Detection Engine nhận POST /api/v1/internal/login-events → '
+        'trích 6 features → gọi ML scoring (Isolation Forest) → lưu risk_assessment → '
+        'tạo alert nếu risk_level high/critical.',
         size=10)
     add_image(doc, os.path.join(BASE, 'docs/diagrams/fig_wf2_detection.png'), width=Cm(14))
 

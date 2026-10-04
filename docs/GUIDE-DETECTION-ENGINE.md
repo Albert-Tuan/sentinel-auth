@@ -288,58 +288,112 @@ Trước khi gửi sang ML Service, Detection Engine kiểm tra:
 
 ### 5.2. Quy tắc lưu ở đâu
 
-Bảng `policies`, cột `rules` kiểu **JSONB** — cấu trúc mẫu từ schema:
+Bảng `policies`, cột `rules` kiểu **JSONB**. Mỗi quy tắc có **7 trường bắt buộc**
+(nguồn sự thật: `docs/DECISIONS-DETECTION-v3.3.md` mục 1):
 
 ```json
 [
     {
-        "name": "fail_count",
+        "name": "unusual_hour",
+        "field": "hour_of_day",
+        "operator": "not_between",
+        "value": [7, 22],
+        "weight": 0.30,
+        "score": 0.80,
+        "enabled": true,
+        "description": "Login outside 07:00-22:59 local time"
+    },
+    {
+        "name": "multiple_failures",
         "field": "fail_count_24h",
-        "operator": ">",
+        "operator": ">=",
         "value": 3,
-        "weight": 0.3,
-        "enabled": true
+        "weight": 0.40,
+        "score": 0.90,
+        "enabled": true,
+        "description": "3 or more failed attempts in the last 24h"
     },
     {
         "name": "new_device",
         "field": "new_device",
         "operator": "==",
         "value": true,
-        "weight": 0.2,
-        "enabled": true
+        "weight": 0.20,
+        "score": 0.50,
+        "enabled": true,
+        "description": "Login from a device not seen before"
+    },
+    {
+        "name": "high_deviation",
+        "field": "deviation_score",
+        "operator": ">=",
+        "value": 0.70,
+        "weight": 0.30,
+        "score": 0.70,
+        "enabled": true,
+        "description": "Behaviour deviates strongly from the user baseline"
     }
 ]
 ```
 
-Tài liệu đặc tả mô tả dạng đầy đủ hơn (có `condition` dạng biểu thức, `score` thay vì chỉ có `weight`):
+| Trường | Ý nghĩa |
+|--------|---------|
+| `name` | Tên quy tắc, duy nhất trong policy |
+| `field` | **Tên đặc trưng** được đối chiếu — chỉ được là 1 trong 6 đặc trưng |
+| `operator` | Phép so sánh: `==` `!=` `>` `>=` `<` `<=` `in` `between` `not_between` |
+| `value` | Giá trị so sánh — `[min, max]` với `between`/`not_between` |
+| `weight` | Quy tắc đó **đáng tin** cỡ nào (0–1) |
+| `score` | Quy tắc đó **nghiêm trọng** cỡ nào khi chạy (0–1) |
+| `enabled` | Có dùng quy tắc này không |
 
-```json
-{
-    "id": "R001",
-    "name": "Unusual Hour Login",
-    "condition": "hour_of_day >= 23 OR hour_of_day <= 5",
-    "weight": 0.3,
-    "score": 0.8
-}
-```
+**Sáu `field` hợp lệ** (đúng bằng 6 đặc trưng mà ML Service nhận):
 
-> **Ghi chú cho nhóm phát triển:** hai dạng trên đang tồn tại song song trong tài liệu (schema SQL dùng `field/operator/value`; đặc tả use case dùng `condition/score`). **Cần thống nhất trước khi viết code** — đây là điểm có thể gây hiểu lầm khi tích hợp.
+`hour_of_day`, `fail_count_24h`, `ip_change_rate_7d`, `new_device`,
+`average_login_interval_seconds`, `deviation_score`
+
+> **Vì sao dùng `field`/`operator`/`value` thay vì `condition` dạng text?**
+> Biểu thức text như `"hour_of_day >= 23 OR hour_of_day <= 5"` **phải parse**,
+> dễ lỗi cú pháp, khó kiểm tra ràng buộc, và tấn công có thể chèn biểu thức độc hại.
+> Tách thành 3 trường riêng thì so sánh được bằng code, kiểm tra được kiểu dữ liệu
+> và độ tin cậy, và vẫn biểu đạt được "hoặc" bằng nhiều rule.
+
+**Quy tắc sai cấu hình** (ví dụ `field` không tồn tại) sẽ bị **bỏ qua**, không tính
+vào mẫu số, và ghi cảnh báo `detection_logs` với `reason = 'unknown_feature'`.
+Một quy tắc hỏng không được làm hỏng toàn bộ chấm điểm.
 
 ### 5.3. Công thức
 
-**Theo đặc tả (mục 3.4 file 04):**
 ```
-rule_score = Σ (rule.score × rule.weight)   cho các quy tắc đã chạy (triggered)
+rule_score = min( 1.0,
+                  Σ (rule.score × rule.weight)      ← chỉ rule ĐÃ CHẠY
+                  ─────────────────────────────────
+                  Σ rule.weight                     ← TẤT CẢ rule ĐÃ BẬT
+                )
 ```
 
-**Ví dụ tính tay:**
+**Ví dụ tính tay** (chính sách `v1.0`, tổng trọng số của các rule đã bật = `1.20`):
 
-| Quy tắc | Chạy? | `score` | `weight` | Đóng góp |
-|---------|------|---------|----------|----------|
-| R001 Giờ bất thường (2h sáng) | ✓ | 0.8 | 0.3 | 0.24 |
-| R002 Nhiều lần sai (5 lần/24h) | ✓ | 0.9 | 0.4 | 0.36 |
-| R003 Thiết bị mới | ✗ | 0.5 | 0.2 | 0 |
-| **Tổng `rule_score`** | | | | **0.60** |
+| Quy tắc | Chạy? | `score` | `weight` | Tử số |
+|---------|------|---------|----------|-------|
+| `unusual_hour` (2h sáng) | ✓ | 0.80 | 0.30 | 0.240 |
+| `multiple_failures` (5 lần/24h) | ✓ | 0.90 | 0.40 | 0.360 |
+| `new_device` | ✓ | 0.50 | 0.20 | 0.100 |
+| `high_deviation` (0.8) | ✓ | 0.70 | 0.30 | 0.210 |
+| **Tổng** | | | **1.20** | **0.910** |
+
+```
+rule_score = 0.910 / 1.20 = 0.7583
+```
+
+> **Vì sao phải chia mẫu số?** Nếu cộng thẳng `0.240 + 0.360 + 0.100 + 0.210`
+> thì khi nhiều rule cùng chạy, `rule_score` có thể vượt quá `1.0`. Điều đó phá vỡ
+> công thức `0.4 × rule_score + 0.6 × ml_score` vốn giả định cả hai vế nằm trong
+> `[0, 1]`. Chia theo tổng trọng số giữ được bất biến đó.
+>
+> **Mẫu số dùng tất cả rule đang bật** (kể cả rule không chạy). Nhờ vậy, bật hay
+> tắt một rule chỉ tác động tới những rule còn lại một cách nhất quán — nếu dùng
+> mẫu số chỉ gồm rule đã chạy, việc thêm một rule mới sẽ làm điểm của các rule
+> cũ tăng vọt lên.
 
 ### 5.4. Vì sao có cả `score` lẫn `weight`?
 
@@ -349,6 +403,11 @@ rule_score = Σ (rule.score × rule.weight)   cho các quy tắc đã chạy (tr
 | `weight` (trọng số) | Quy tắc đó **đáng tin** cỡ nào trong tổng thể | "Nhiều lần sai" = 0.4 tin cậy hơn "Giờ bất thường" = 0.3 |
 
 Nhân hai lại → đóng góp thực tế của quy tắc vào tổng điểm.
+
+> **SOC có thể tự kiểm chứng:** cột `detection_logs.score_contribution` lưu giá trị
+> `(score × weight) / Σ weight` — tức là đóng góp **sau khi đã chia mẫu số**.
+> Cộng lại các `score_contribution` sẽ ra đúng `rule_score` mà không cần biết
+> công thức bên trong.
 
 ### 5.5. Vì sao cần cả Rule **và** ML?
 
@@ -387,10 +446,36 @@ Quy trình **kích hoạt** (activate) chính sách — UC-DE-15:
 
 ![Gộp điểm và phân loại](diagrams/v3.3-detect/05-gop-diem-phan-loai.png)
 
+**Bước 1 — `rule_score` (chuẩn hoá để luôn nằm trong `[0, 1]`):**
+
 ```
-Risk_Score = w_rule × Rule_Score + w_ml × ML_Score
-           = 0.4 × Rule_Score + 0.6 × ML_Score
+rule_score = min( 1.0,
+                  Σ (rule.score × rule.weight)      ← chỉ rule ĐÃ CHẠY
+                  ─────────────────────────────────
+                  Σ rule.weight                     ← TẤT CẢ rule ĐÃ BẬT
+                )
 ```
+
+> Nếu cộng thẳng `Σ (score × weight)`, 5 rule cùng chạy có thể cho `1.80` —
+> vượt quá `1.0` và phá vỡ công thức bước 2. **Chia mẫu số là bắt buộc.**
+> Chi tiết: `docs/DECISIONS-DETECTION-v3.3.md` mục 2.1.
+
+**Bước 2 — `combined_score`:**
+
+```
+Nếu ML thành công:
+  Risk_Score = w_rule × rule_score + w_ml × ml_score
+             = 0.4 × rule_score + 0.6 × ml_score
+
+Nếu ML lỗi hoặc timeout:
+  Risk_Score = rule_score          (suy giảm êm — không chia lại trọng số)
+```
+
+**Bước 3 — `ml_score`:**
+
+`ml_score` = giá trị `normalized_anomaly_score` trả về từ ML Service
+(`POST /api/v1/internal/ml/score`). Nếu lỗi → `ml_score = NULL` và
+`ml_status` ghi lý do (`unavailable` hoặc `error`).
 
 **Trọng số không nằm cứng trong code** mà lưu trong `policies.config`:
 
@@ -414,23 +499,49 @@ Risk_Score = w_rule × Rule_Score + w_ml × ML_Score
 
 | Mức rủi ro | Khoảng điểm | Hành động (Action) | Mô tả |
 |------------|-------------|---------------------|--------|
-| **LOW** (thấp) | < 0.25 | `ALLOW` | Đăng nhập bình thường |
-| **MEDIUM** (trung bình) | 0.25 – 0.50 | `ALLOW_LOG` | Cho phép, ghi log cảnh báo |
-| **HIGH** (cao) | 0.50 – 0.75 | `REQUIRE_MFA` | Yêu cầu xác thực MFA bổ sung |
-| **CRITICAL** (nghiêm trọng) | > 0.75 | `BLOCK_ALERT` | Chặn và tạo cảnh báo |
+| `low` (thấp) | `< 0.25` | `ALLOW` | `allow` | ❌ |
+| `medium` (trung bình) | `0.25 ≤ x < 0.50` | `ALLOW_LOG` | `allow` | ❌ |
+| `high` (cao) | `0.50 ≤ x < 0.75` | `REQUIRE_MFA` | `challenge` | ✅ |
+| `critical` (nghiêm trọng) | `x ≥ 0.75` | `BLOCK_ALERT` | `block` | ✅ |
+
+> **Biên `0.75` thuộc về CRITICAL**, không phải HIGH. Và mức `high` **luôn** sinh cảnh
+> báo, kể cả khi người dùng vẫn được vào sau bước MFA — SOC cần theo dõi xu hướng.
 
 ### 6.3. Ví dụ tính tay
 
-```
-rule_score = 0.45
-ml_score   = 0.72
+Dùng chính sách mặc định `v1.0` (`Σ weight = 0.30+0.40+0.20+0.30 = 1.20`):
 
-Risk_Score = 0.4 × 0.45 + 0.6 × 0.72
-          = 0.18 + 0.432
-          = 0.612
-
-0.50 ≤ 0.612 < 0.75  →  mức CAO  →  yêu cầu MFA + tạo cảnh báo
 ```
+Đặc trưng: hour_of_day=2, fail_count_24h=5, new_device=true, deviation_score=0.8
+
+  unusual_hour       0.80 × 0.30 = 0.240   ← chạy  (2 ngoài [7,22])
+  multiple_failures  0.90 × 0.40 = 0.360   ← chạy  (5 ≥ 3)
+  new_device         0.50 × 0.20 = 0.100   ← chạy  (true == true)
+  high_deviation     0.70 × 0.30 = 0.210   ← chạy  (0.8 ≥ 0.7)
+  ──────────────────────────────────────
+  Tử số  = 0.910
+  Mẫu số = 1.20
+  rule_score = 0.910 / 1.20 = 0.7583
+
+ml_score = 0.72  (ML thành công)
+
+Risk_Score = 0.4 × 0.7583 + 0.6 × 0.72
+          = 0.3033 + 0.432
+          = 0.7353
+
+0.50 ≤ 0.7353 < 0.75  →  mức CAO  →  yêu cầu MFA + tạo cảnh báo
+```
+
+**Nếu ML Service lỗi trong cùng tình huống đó:**
+
+```
+Risk_Score = rule_score = 0.7583
+
+0.7583 ≥ 0.75  →  mức NGHIÊM TRỌNG  →  chặn + thu hồi phiên + khoá tài khoản
+```
+
+> Chính sách **nghiêm hơn** khi không có tín hiệu ML. Đây là chủ ý thiết kế,
+> không phải lỗi: thiếu dữ liệu thì hệ thống phải thận trọng hơn.
 
 ### 6.4. Quan hệ 1–1 với lần đăng nhập
 
@@ -475,28 +586,35 @@ Một quy trình (policy) khác nhau có thể cùng một `risk_level` nhưng `
 
 | Hành động | Đích | Khi nào | Tác động |
 |-----------|------|---------|----------|
-| `REQUIRE_MFA` | `user_id` | HIGH | Lần đăng nhập kế tiếp bắt buộc có MFA |
-| `REVOKE_SESSIONS` | `user_id` | CRITICAL | Thu hồi **tất cả** phiên đang hoạt động |
-| `LOCK_USER` | `user_id` | CRITICAL | Khoá tài khoản + thu hồi phiên |
-| `RATE_LIMIT_IP` | `ip_address` | HIGH | Giới hạn tần suất theo địa chỉ IP |
+| `REQUIRE_MFA` | `user_id` | `high` | Lần đăng nhập kế tiếp bắt buộc có MFA |
+| `REVOKE_SESSIONS` | `user_id` | `critical` | Thu hồi **tất cả** phiên đang hoạt động |
+| `LOCK_USER` | `user_id` | `critical` | Khoá tài khoản + thu hồi phiên |
+| `FORCE_LOGOUT` | `user_id` | do SOC yêu cầu | Đăng xuất cưỡng bức |
+
+> Rate limiting **không** nằm trong phạm vi v3.3 — Core App tự xử lý và ghi
+> `login_attempts.outcome = 'rate_limited'`.
 
 ### 7.2. Giao thức (contract)
 
-```json
+```http
 POST /api/v1/internal/actions
 X-Internal-Secret: <shared_secret>
+Content-Type: application/json
+```
 
+```json
 {
     "action": "LOCK_USER",
-    "target": {
-        "type": "user_id",         // hoặc "ip_address"
-        "value": "uuid-cua-user"
-    },
-    "reason": "Risk score exceeded threshold: 0.82 (CRITICAL)",
-    "risk_level": "critical",
-    "login_attempt_id": "uuid-lan-dang-nhap"
+    "target_user_id": "uuid-cua-user",
+    "reason": "COMBINE: 0.8125 - rule 0.7583 + high_deviation",
+    "alert_id": "uuid-canh-bao",
+    "severity": "critical",
+    "idempotency_key": "optional-string"
 }
 ```
+
+> `target_user_id` là UUID phẳng, **không** phải object `{type, value}`.
+> `idempotency_key` giúp Core App không thực hiện trùng khi outbox retry.
 
 ### 7.3. Vòng lặp đóng băng — điểm then chốt
 
@@ -1139,18 +1257,71 @@ DE-16 (gửi hành động bảo vệ về lõi)
 
 ---
 
-## Phụ lục B — Điểm cần thống nhất trước khi viết code
+## Phụ lục B — Các điểm đã thống nhất
 
-Khi đọc tài liệu, có 4 điểm chưa thống nhất giữa các file. Đây là danh sách nên trao đổi với cả nhóm:
+Khi đọc tài liệu, có **7 điểm** chưa thống nhất giữa các file. Tất cả đã được
+giải quyết và ghi lại trong **`docs/DECISIONS-DETECTION-v3.3.md`** — đây là
+nguồn sự thật duy nhất.
 
-| # | Điểm | Khác biệt | Gợi ý |
-|---|------|-----------|--------|
-| 1 | **Cấu trúc quy tắc** | Schema SQL dùng `field`/`operator`/`value`/`weight`; đặc tả use case dùng `condition`/`score`/`weight` | Chọn một dạng, ghi vào hợp đồng API |
-| 2 | **Ngưỡng mức rủi ro** | Đặc tả: `0.25/0.50/0.75`; code mẫu `app/detection.py`: `0.2/0.5/0.8` | Lấy theo đặc tả v3.3 (0.25/0.50/0.75) |
-| 3 | **Cách gộp điểm** | Đặc tả: **cộng** từng quy tắc (`Σ`); code mẫu: lấy **max** | Xác nhận, cần ghi rõ trong đặc tả |
-| 4 | **Đường dẫn endpoint** | Tài liệu dùng `/api/v1/internal/login-events`; code mẫu dùng `/internal/v1/detect` | Thống nhất theo `docs/diagrams/README.md` |
+| # | Điểm | Khác biệt trước đây | Quyết định cuối cùng |
+|---|------|----------------------|----------------------|
+| 1 | **Cấu trúc quy tắc** | Schema SQL dùng `field`/`operator`/`value`; đặc tả use case dùng `condition` dạng text | **7 trường**: `name`, `field`, `operator`, `value`, `weight`, `score`, `enabled` — bỏ `condition` |
+| 2 | **Ngưỡng mức rủi ro** | ~~Đặc tả `0.25/0.50/0.75`; code mẫu `0.2/0.5/0.8`~~ | **`0.25 / 0.50 / 0.75`** trong `policy.config.thresholds` |
+| 3 | **Cách gộp điểm** | Đặc tả: cộng `Σ`; code mẫu: lấy `max` | **`min(1.0, Σ(score×weight) / Σ weight_của_rule_đã_bật)`** — có chuẩn hoá |
+| 4 | **Đường dẫn endpoint** | ~~Tài liệu `/api/v1/internal/*`; code mẫu `/internal/v1/detect`~~ | **`/api/v1/internal/*`** cho mọi giao tiếp service-to-service — đã được sửa cả hai bên |
+| 5 | **Tên cột điểm ML** | Tồn tại cả `anomaly_score` và `ml_score` | **`ml_score`** duy nhất trong DB; `normalized_anomaly_score` chỉ tồn tại trong HTTP response của ML Service |
+| 6 | **Bảng chính sách** | ~~Code mẫu dùng `policy_versions` (v2)~~ | **`policies`** (v3.3) với `rules` + `config` gộp trong JSONB |
+| 7 | **Cách lấy điểm ML** | Heuristic tự tính trong Detection | **Gọi HTTP** `POST /api/v1/internal/ml/score`, timeout 5s, suy giảm êm khi lỗi |
 
-> **Ghi chú:** các file trong `app/` (do ai đó viết để thử nghiệm) dùng cấu trúc bảng `policy_versions` (v2) thay vì `policies` (v3.3), và tính điểm ML bằng heuristic thay vì gọi ML Service. Khi triển khai, cần theo đúng schema v3.3 trong `infra/postgres/schema-detection-v3.3.sql`.
+### Tóm tắt quyết định quan trọng nhất
+
+**Vì sao chia mẫu số khi gộp điểm?**
+
+```
+Cách cũ (cộng thẳng):
+  5 rule cùng chạy, mỗi rule score 0.9, weight 0.4
+  → rule_score = 5 × 0.9 × 0.4 = 1.80   ← VƯỢT QUÁ 1.0
+
+Cách chuẩn (chia mẫu số):
+  rule_score = Σ(score×weight) / Σ weight_của_rule_đã_bật
+             = 1.80 / 2.00 = 0.90        ← luôn nằm trong [0, 1]
+```
+
+Nếu `rule_score` vượt quá `1.0`, công thức `0.4 × rule_score + 0.6 × ml_score`
+sẽ cho kết quả vô nghĩa. Vì vậy chuẩn hoá là **bắt buộc**, không phải tuỳ chọn.
+
+**Vì sao ML lỗi thì dùng `rule_score` chứ không chia lại trọng số?**
+
+```
+Có ML:    combined = 0.4 × 0.7583 + 0.6 × 0.72   = 0.7353  → HIGH
+ML lỗi:   combined = rule_score                    = 0.7583  → CRITICAL
+```
+
+Chính sách **nghiêm hơn** khi không có tín hiệu ML. Đây là chủ ý thiết kế:
+thiếu dữ liệu thì hệ thống phải thận trọng hơn, không phải lạc quan hơn.
+
+**Vì sao bỏ cột `anomaly_score`?**
+
+Hai cột chứa cùng một giá trị là công thức cho việc ghi nhầm và đọc nhầm.
+Giữ một tên gọi duy nhất là `ml_score`. Tên `normalized_anomaly_score` vẫn xuất
+hiện trong HTTP response vì đó là tên trường trong hợp đồng API do nhóm ML
+Service sở hữu.
+
+### Trạng thái sau khi thống nhất
+
+| Nhóm | Trạng thái |
+|------|-----------|
+| Tài liệu quyết định | ✅ `docs/DECISIONS-DETECTION-v3.3.md` |
+| Schema SQL | ✅ `infra/postgres/schema-detection-v3.3.sql` |
+| Code (`app/`) | ✅ `models.py`, `schemas.py`, `detection.py`, `ml.py`, `alerts.py`, `db.py` |
+| Đặc tả chức năng | ✅ `docs/04-...-detection-engine.md` |
+| Đặc tả use case | ✅ `docs/05-dac-ta-use-case-detection-engine.md` |
+| ERD | ✅ `docs/diagrams/ERD_v3.3.md` |
+| Test | ✅ `tests/test_detection.py`, `tests/test_ml.py` (51 test) |
+
+> **Ghi chú:** `app/db.py` trước đây có `get_db()` và `init_db()` rỗng (chỉ có
+> `pass`), nên app không thể chạy được. Đã triển khai đầy đủ theo biến môi
+> trường `DATABASE_URL`.
 
 ---
 

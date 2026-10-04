@@ -8,41 +8,79 @@ skinparam rectangle {
   BorderColor black
 }
 skinparam ArrowColor black
-title WF-4  MFA Flow
+skinparam ArrowThickness 1.2
+title WF-4  MFA Flow - Chi tiết các kênh
 
 actor "User" as user
 
 rectangle "Core App" as sys_1 {
   rectangle "Initiate MFA transaction" as trigger
-  rectangle "Choose Email / SMS / TOTP / Push" as channel
+  rectangle "Email OTP channel" as email
+  rectangle "SMS OTP channel" as sms
+  rectangle "TOTP channel" as totp
+  rectangle "Push notification channel" as push
   rectangle "Verify code, expiry and IP" as verify
   rectangle "Trust this device (optional)" as trust
 }
 
 rectangle "MFA Notification Service" as sys_2 {
-  rectangle "Send OTP or push" as send
+  rectangle "Email delivery" as send_email
+  rectangle "SMS delivery" as send_sms
+  rectangle "Push delivery" as send_push
 }
 
 rectangle "core-db" as sys_3 {
   rectangle "Store pending challenge" as pending
-  rectangle "Notification record / OTP hash" as notification
+  rectangle "Email notif + OTP hash" as notif_email
+  rectangle "SMS notif + OTP hash" as notif_sms
+  rectangle "Push notif record" as notif_push
+  rectangle "TOTP secret cached" as notif_totp
   rectangle "Complete or fail challenge" as update
   rectangle "Lock after 3 failures" as lock
   rectangle "Trusted device expires in 30 days" as device
 }
 
-trigger ..> pending : INSERT mfa_transaction\n<<flow>>
-trigger ..> channel : MFA required\n<<flow>>
-channel ..> send : Email / SMS / Push\n<<flow>>
-send ..> notification : delivery + hash\n<<flow>>
-channel ..> user : MFA_REQUIRED / TOTP\n<<flow>>
-user ..> verify : OTP or push approval\n<<flow>>
-verify ..> update : check transaction\n<<flow>>
-update ..> lock : fail_count ≥ 3\n<<flow>>
-verify ..> trust : verified\n<<flow>>
-trust ..> device : save fingerprint\n<<flow>>
+' Trigger MFA
+trigger --> pending : INSERT mfa_transaction\n<<flow>>
+
+' Branch into 4 channels
+pending --> email : channel EMAIL\n<<flow>>
+pending --> sms   : channel SMS\n<<flow>>
+pending --> totp  : channel TOTP\n<<flow>>
+pending --> push  : channel PUSH\n<<flow>>
+
+' Email path
+email --> send_email : via SMTP\n<<flow>>
+send_email --> notif_email : delivered + hash\n<<flow>>
+email --> user : 200 MFA_REQUIRED\n<<flow>>
+
+' SMS path
+sms --> send_sms : via Twilio\n<<flow>>
+send_sms --> notif_sms : delivered + hash\n<<flow>>
+sms --> user : 200 MFA_REQUIRED\n<<flow>>
+
+' TOTP path
+totp --> notif_totp : load secret\n<<flow>>
+totp --> user : 200 MFA_REQUIRED + setup_url\n<<flow>>
+
+' Push path
+push --> send_push : via FCM/APNS\n<<flow>>
+send_push --> notif_push : delivery + hash\n<<flow>>
+push --> user : 200 MFA_REQUIRED\n<<flow>>
+
+' User submits code/approval
+user --> verify : OTP / push approval\n<<flow>>
+verify --> update : check transaction\n<<flow>>
+
+' Failure handling
+update --> lock : fail_count >= 3\n<<flow>>
+
+' Success + optional trust device
+verify --> trust : verified\n<<flow>>
+trust --> device : save fingerprint\n<<flow>>
 
 legend bottom
   A valid trusted device can complete MFA on the next login without a new OTP.
+  Each channel stores notification record + (email/sms: OTP hash; totp: encrypted secret).
 endlegend
 @enduml

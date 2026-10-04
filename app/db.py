@@ -1,4 +1,7 @@
 """Database module with SQLAlchemy engine and session."""
+import os
+from typing import Iterator
+
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker, declarative_base
 
@@ -24,11 +27,31 @@ def get_session_maker(engine):
     return _SessionLocal
 
 
-def get_db():
+def get_db() -> Iterator:
     """Dependency that yields a DB session."""
-    pass
+    global _SessionLocal
+    if _SessionLocal is None:
+        database_url = os.getenv(
+            "DATABASE_URL",
+            "postgresql://sentinel:sentinel@localhost:5432/sentinel",
+        )
+        get_session_maker(get_engine(database_url))
+    db = _SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
 
 
 def init_db():
-    """Initialize all tables in public schema."""
-    pass
+    """Create all tables declared on Base in the public schema."""
+    from app import models  # noqa: F401  (ensure models are registered)
+
+    global _SessionLocal
+    if _SessionLocal is None:
+        database_url = os.getenv(
+            "DATABASE_URL",
+            "postgresql://sentinel:sentinel@localhost:5432/sentinel",
+        )
+        get_session_maker(get_engine(database_url))
+    Base.metadata.create_all(bind=_SessionLocal.kw["bind"])

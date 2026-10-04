@@ -253,21 +253,66 @@ app/services/tuananh/
 - [ ] `tests/test_tuananh/test_risk_scoring.py`
 - [ ] `tests/test_tuananh/test_soc_workflow.py`
 - [ ] `tests/test_tuananh/conftest.py`
-- [ ] HTTP client gọi sang Khang: `POST /internal/score`
+- [ ] HTTP client gọi sang Khang: `POST /api/v1/internal/ml/score`
+      (header `X-Internal-Secret`, timeout 5 giây)
 
 ### Risk Scoring Formula
+
+> ⚠️ **Đọc trước:** `docs/DECISIONS-DETECTION-v3.3.md` — nguồn sự thật duy nhất.
+
+**Bước 1 — Rule_Score (chuẩn hoá, luôn trong [0, 1]):**
+
 ```
-Risk_Score = 0.4 × Rule_Score + 0.6 × ML_Score
+Rule_Score = min( 1.0,
+                  Sum(triggered_rule.score × rule.weight)   ← chỉ rule ĐÃ CHẠY
+                  ───────────────────────────────────────────
+                  Sum(weight của TẤT CẢ rule đã bật)        ← mẫu số
+                )
 ```
 
-| Risk Level | Threshold | Action |
-|-----------|-----------|--------|
-| LOW | < 0.25 | Allow |
-| MEDIUM | 0.25 - 0.50 | Allow (log) |
-| HIGH | 0.50 - 0.75 | Challenge (MFA) |
-| CRITICAL | > 0.75 | Block + Alert |
+Không có rule nào bật → `Rule_Score = 0.0`.
+
+**Bước 2 — ML_Score:** = `normalized_anomaly_score` từ ML Service.
+Lỗi/timeout → `NULL` + `ml_status = 'unavailable'|'error'`.
+
+**Bước 3 — Risk_Score:**
+
+```
+ML thành công : Risk_Score = 0.4 × Rule_Score + 0.6 × ML_Score
+ML thất bại   : Risk_Score = Rule_Score        (suy giảm êm, KHÔNG chia lại trọng số)
+```
+
+**Ví dụ** (chính sách `v1.0`, tổng trọng số `1.20`):
+tử số `0.240+0.360+0.100+0.210 = 0.910` → `Rule_Score = 0.910/1.20 = 0.7583`
+→ `Risk_Score = 0.4×0.7583 + 0.6×0.72 = 0.7353` → **HIGH**.
+
+| Risk Level | Điều kiện | Action | `decision` | Tạo alert? |
+|------------|----------|--------|------------|-----------|
+| `low` | `< 0.25` | Allow | `allow` | ❌ |
+| `medium` | `0.25 - 0.50` | Allow (log) | `allow` | ❌ |
+| `high` | `0.50 - 0.75` | Challenge (MFA) | `challenge` | ✅ |
+| `critical` | `≥ 0.75` | Block + Alert | `block` | ✅ |
+
+### Cấu trúc rule (7 trường bắt buộc)
+
+```json
+{
+  "name": "unusual_hour",
+  "field": "hour_of_day",
+  "operator": "not_between",
+  "value": [7, 22],
+  "weight": 0.30,
+  "score": 0.80,
+  "enabled": true
+}
+```
+
+`field` chỉ được là 1 trong 6 đặc trưng: `hour_of_day`, `fail_count_24h`,
+`ip_change_rate_7d`, `new_device`, `average_login_interval_seconds`, `deviation_score`.
+`operator` ∈ `==` `!=` `>` `>=` `<` `<=` `in` `between` `not_between`.
 
 ### Tài liệu tham chiếu
+- **`docs/DECISIONS-DETECTION-v3.3.md`** ← đọc đầu tiên, nguồn sự thật duy nhất
 - `docs/04-bang-yeu-cau-chuc-nang-nghiep-vu-detection-engine.md`
 - `docs/05-dac-ta-use-case-detection-engine.md` → UC-DE-*, UC-SOC-*
 - `docs/06-phan-tich-doi-tuong-su-dung-detection-engine.md`

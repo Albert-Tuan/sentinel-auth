@@ -78,28 +78,29 @@ loop for each pending attempt
     DE -> DDB : INSERT detection_logs\n(stage=rule_evaluation,\nrule_name, triggered, score_contribution)
     
     == ML Scoring (Xem WF-6 chi tiết) ==
-    DE -> ML : **POST /api/v1/internal/ml/score**\n(features_vector)
+    DE -> ML : **POST /api/v1/internal/ml/score**\n(request_id, features: {6 features})\n+ Internal-Secret, timeout 5s
     activate ML
-    ML --> DE : {anomaly_score, is_anomaly,\nreason_codes, model_version}
+    ML --> DE : {normalized_anomaly_score, is_anomaly,\nreason_codes, model_version, model_status}
     deactivate ML
     
     == Combine Scores ==
-    DE -> DE : combined_score =\n0.4 × rule_score + 0.6 × ml_score
-    DE -> DE : risk_level =\nLOW < 0.25 < MEDIUM < 0.5 < HIGH < 0.75 < CRITICAL
+    DE -> DE : rule_score = min(1.0, Σ(score×weight) / Σ weight_cua_rule_da_bat)
+    DE -> DE : combined_score =\n0.4 × rule_score + 0.6 × ml_score\n(neu ML that cong: combined = rule_score)
+    DE -> DE : risk_level =\nlow < 0.25 ≤ medium < 0.50 ≤ high < 0.75 ≤ critical
     
-    DE -> DDB : INSERT risk_assessments\n(login_attempt_id, rule_score, ml_score,\ncombined_score, risk_level, decision)
+    DE -> DDB : INSERT risk_assessments\n(login_attempt_id, policy_id, rule_score, ml_score,\ncombined_score, ml_status, ml_model_version,\nrule_hits, ml_reason_codes, ml_features_used,\nrisk_level, decision)
     
     == Action Decision ==
-    alt risk_level IN (HIGH, CRITICAL)
+    alt risk_level IN (high, critical)
         DE -> DDB : INSERT alerts\n(login_attempt_id, status=open,\nrisk_level, detection_reason,\ndetection_scores)
-        DE -> DDB : INSERT detection_logs\n(stage=action_sent,\ndetails={action: ALERT_CREATED})
-    else risk_level IN (LOW, MEDIUM)
-        DE -> DDB : INSERT detection_logs\n(stage=action_sent,\ndetails={action: NO_ALERT})
+        DE -> DDB : INSERT detection_logs\n(stage=action_sent, stage_detail=alert_created)
+    else risk_level IN (low, medium)
+        DE -> DDB : INSERT detection_logs\n(stage=action_sent, stage_detail=no_alert)
     end
     
     == Optional: Send Action back to Core ==
-    alt risk_level = CRITICAL + LOCK_USER action
-        DE -> CA : **POST /api/v1/internal/actions**\n(action=LOCK_USER, target=user_id,\nreason, login_attempt_id)\n+ Internal-Secret
+    alt risk_level = critical (block)
+        DE -> CA : **POST /api/v1/internal/actions**\n(action=LOCK_USER, target_user_id,\nreason, alert_id, severity)\n+ Internal-Secret
         activate CA
         CA -> CDB : UPDATE users SET status=locked
         CA --> DE : **200 OK**

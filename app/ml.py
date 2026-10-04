@@ -1,407 +1,219 @@
 """
-ML Service integration - score endpoint.
-Implements anomaly detection for login attempts.
+ML Service - anomaly scoring endpoint.
 
-Feature Contract v2 aligned with:
-- DetectionFeatureVector from app/schemas.py
-- Bảng Yêu Cầu ML Service v2
+Serves POST /api/v1/internal/ml/score, called by the Detection Engine
+over HTTP (UC-DE-03). Canonical decisions: docs/DECISIONS-DETECTION-v3.3.md
 
-Features aligned:
-- login_hour, login_day: temporal features
-- failed_attempts_1h, failed_attempts_24h: failure patterns
-- is_known_device, is_known_ip: device/IP history
-- asn_reputation, ip_reputation: reputation scores
-- geo_velocity_kmh: travel speed
-- login_streak: behavioral pattern
-- mfa_used_recently: authentication pattern
+    The feature contract is the 6 features of UC-DE-02, which are exactly the
+values a detection rule may reference:
+
+    hour_of_day, fail_count_24h, ip_change_rate_7d, new_device,
+    average_login_interval_seconds, deviation_score
+
+Until a trained model is available, scoring uses a documented heuristic
+baseline. The response shape already matches the production contract so
+the Detection Engine needs no change when a real model lands.
+
+Routes (Detection Engine calls this service over HTTP):
+    POST /api/v1/internal/ml/score     UC-DE-03
+    GET  /api/v1/internal/ml/health    liveness + model version
+    GET  /api/v1/internal/ml/features  feature contract
 """
-from typing import Optional, Dict, Any, List
-from uuid import uuid4
+from __future__ import annotations
 
-from fastapi import APIRouter, HTTPException, Header, Depends
+import logging
+import os
+from typing import Any, Dict, List, Optional
+from uuid import UUID, uuid4
+
+from fastapi import APIRouter, Header, HTTPException, status as http_status
 from pydantic import BaseModel, Field
 
-from app.db import get_db
+from app.schemas import DetectionFeatureVector
 
-router = APIRouter(prefix="/internal/v1/ml", tags=["ml"])
+logger = logging.getLogger(__name__)
 
+router = APIRouter(prefix="/api/v1/internal", tags=["ml-internal"])
 
-# =============================================================================
-# Request/Response schemas - Aligned with ML Service v2 Document
-# =============================================================================
+#: Anomaly decision boundary
+ANOMALY_THRESHOLD = 0.5
 
-class ScoreRequest(BaseModel):
-    """ML Score Request with aligned feature vector."""
-    features: Dict[str, Any] = Field(
-        ...,
-        description="Feature vector matching DetectionFeatureVector schema"
-    )
-
-
-class ScoreResponse(BaseModel):
-    """ML Score Response per Feature Contract v2."""
-    anomaly_score: float = Field(
-        ...,
-        ge=0.0,
-        le=1.0,
-        description="Normalized anomaly score (0-1). Higher = more anomalous."
-    )
-    ml_status: str = Field(
-        ...,
-        description="success | unavailable | error"
-    )
-    model_version: Optional[str] = Field(
-        None,
-        description="Version of model used for inference"
-    )
-    reason_codes: Optional[List[str]] = Field(
-        default=None,
-        description="Reason codes: unusual_time, new_device, high_velocity, etc."
-    )
+#: The 6 features, in the order the Detection Engine sends them
+FEATURE_FIELDS = (
+    "hour_of_day",
+    "fail_count_24h",
+    "ip_change_rate_7d",
+    "new_device",
+    "average_login_interval_seconds",
+    "deviation_score",
+)
 
 
-class FeatureValidationResult(BaseModel):
-    """Result of feature validation."""
-    valid: bool
-    missing_required: List[str] = []
-    invalid_type: Dict[str, str] = {}
+def internal_secret() -> str:
+    return os.getenv("INTERNAL_SECRET", "changeme-in-production")
+
+
+def verify_internal_secret(x_internal_secret: Optional[str]) -> None:
+    if not x_internal_secret or x_internal_secret != internal_secret():
+        raise HTTPException(
+            status_code=http_status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid or missing X-Internal-Secret",
+        )
 
 
 # =============================================================================
-# Feature Contract v2 - Required and Optional Features
+# Request / response contract
 # =============================================================================
 
-REQUIRED_FEATURES = [
-    "login_hour",
-    "failed_attempts_1h",
-    "failed_attempts_24h",
-    "is_known_device",
-]
+class MlScoreRequest(BaseModel):
+    """Body of POST /api/v1/internal/ml/score."""
 
-OPTIONAL_FEATURES = [
-    "login_day",
-    "ip_country",
-    "ip_reputation",
-    "user_agent_family",
-    "asn_reputation",
-    "geo_velocity_kmh",
-    "login_streak",
-    "is_known_ip",
-    "mfa_used_recently",
-]
-
-ALL_FEATURES = REQUIRED_FEATURES + OPTIONAL_FEATURES
+    request_id: Optional[UUID] = None
+    features: DetectionFeatureVector
 
 
-# =============================================================================
-# Feature Validation
-# =============================================================================
+class MlScoreResponse(BaseModel):
+    """Response of POST /api/v1/internal/ml/score.
 
-def validate_features(features: Dict[str, Any]) -> FeatureValidationResult:
+    ``normalized_anomaly_score`` keeps the name from the ML team API
+    contract. The Detection Engine stores it as ``ml_score``.
     """
-    Validate feature vector against Feature Contract v2.
-    Returns validation result with missing/invalid fields.
-    """
-    missing = []
-    for feat in REQUIRED_FEATURES:
-        if feat not in features:
-            missing.append(feat)
 
-    return FeatureValidationResult(
-        valid=len(missing) == 0,
-        missing_required=missing,
-        invalid_type={}
-    )
-
-
-def preprocess_features(features: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    Preprocess features: fill defaults, normalize ranges.
-    Matches DetectionFeatureVector schema defaults.
-    """
-    processed = features.copy()
-
-    # Fill defaults for optional features
-    defaults = {
-        "login_day": 0,
-        "ip_reputation": 1.0,
-        "asn_reputation": 1.0,
-        "geo_velocity_kmh": 0.0,
-        "login_streak": 0,
-        "is_known_ip": True,
-        "mfa_used_recently": False,
-    }
-
-    for key, default in defaults.items():
-        if key not in processed:
-            processed[key] = default
-
-    # Ensure boolean conversion
-    for key in ["is_known_device", "is_known_ip", "mfa_used_recently"]:
-        if key in processed:
-            processed[key] = bool(processed[key])
-
-    # Ensure integer conversion for numeric features
-    int_features = ["login_hour", "login_day", "failed_attempts_1h", "failed_attempts_24h", "login_streak"]
-    for key in int_features:
-        if key in processed and processed[key] is not None:
-            try:
-                processed[key] = int(processed[key])
-            except (ValueError, TypeError):
-                pass
-
-    return processed
-
-
-def generate_reason_codes(features: Dict[str, Any], anomaly_score: float) -> List[str]:
-    """
-    Generate reason codes based on features and score.
-    Supports explainability for SOC investigation.
-    """
-    reasons = []
-
-    # Unusual time check (hours outside 8am-8pm)
-    login_hour = features.get("login_hour", 12)
-    if login_hour < 6 or login_hour > 22:
-        reasons.append("unusual_time")
-
-    # New device
-    if not features.get("is_known_device", True):
-        reasons.append("new_device")
-
-    # New IP
-    if not features.get("is_known_ip", True):
-        reasons.append("new_ip")
-
-    # High geo velocity (impossible travel)
-    geo_vel = features.get("geo_velocity_kmh", 0)
-    if geo_vel > 1000:
-        reasons.append("high_velocity")
-
-    # Failed attempts
-    failed_1h = features.get("failed_attempts_1h", 0)
-    if failed_1h >= 3:
-        reasons.append("multiple_failures")
-
-    # Low ASN reputation
-    asn_rep = features.get("asn_reputation", 1.0)
-    if asn_rep < 0.3:
-        reasons.append("low_asn_reputation")
-
-    # Low IP reputation
-    ip_rep = features.get("ip_reputation", 1.0)
-    if ip_rep < 0.3:
-        reasons.append("low_ip_reputation")
-
-    return reasons
+    request_id: Optional[UUID] = None
+    normalized_anomaly_score: float = Field(..., ge=0.0, le=1.0)
+    is_anomaly: bool
+    model_version: str
+    reason_codes: List[str] = []
+    model_status: str = "ready"
+    processing_time_ms: Optional[int] = None
 
 
 # =============================================================================
-# ML Model (placeholder - v2)
+# Heuristic baseline model
 # =============================================================================
 
-class DummyMLModel:
-    """
-    Placeholder ML model for v1.
-    Algorithm: Heuristic-based scoring (Isolation Forest baseline).
+class HeuristicAnomalyModel:
+    """Documented baseline used until a trained model is registered."""
 
-    In production, this would load a real model from model_registry.
-    """
-    MODEL_NAME = "sentinel-anomaly-v1"
-    MODEL_VERSION = "1.0.0"
+    MODEL_NAME = "sentinel-heuristic-baseline"
+    MODEL_VERSION = "v0.1-heuristic"
 
-    # Default threshold for is_anomaly (from ML Service v2 doc)
-    DEFAULT_THRESHOLD = 0.5
+    def predict(self, features: Dict[str, Any]) -> tuple[float, List[str]]:
+        """Return (normalized_anomaly_score, reason_codes)."""
+        score = 0.05
+        reasons: List[str] = []
 
-    def predict(self, features: Dict[str, Any]) -> tuple[float, str, List[str]]:
-        """
-        Predict anomaly score from features.
-        Returns (anomaly_score, status, reason_codes).
+        def bump(candidate: float, reason: str) -> None:
+            nonlocal score
+            if candidate > score:
+                score = candidate
+            if reason not in reasons:
+                reasons.append(reason)
 
-        Score semantics (per ML Service v2 doc):
-        - 0.0-0.2: Normal behavior (low risk)
-        - 0.2-0.5: Slight anomaly (medium risk)
-        - 0.5-0.8: Significant anomaly (high risk)
-        - 0.8-1.0: Very anomalous (critical risk)
-        """
-        score = 0.1  # Default low score
-        reasons = []
+        hour = features.get("hour_of_day")
+        if hour is not None and (hour < 6 or hour >= 23):
+            bump(0.45, "unusual_time")
 
-        # Failed attempts heuristic (strong signal)
-        failed_1h = features.get("failed_attempts_1h", 0)
-        if failed_1h >= 5:
-            score = max(score, 0.85)
-            reasons.append("multiple_failures")
-        elif failed_1h >= 3:
-            score = max(score, 0.55)
+        failures = features.get("fail_count_24h")
+        if failures is not None:
+            if failures >= 5:
+                bump(0.85, "high_fail_count")
+            elif failures >= 3:
+                bump(0.55, "multiple_failures")
 
-        # ASN reputation heuristic
-        asn_rep = features.get("asn_reputation", 1.0)
-        if asn_rep < 0.2:
-            score = max(score, 0.75)
-            reasons.append("low_asn_reputation")
-        elif asn_rep < 0.5:
-            score = max(score, 0.35)
+        ip_change = features.get("ip_change_rate_7d")
+        if ip_change is not None and ip_change > 0.5:
+            bump(0.40, "frequent_ip_change")
 
-        # Geo velocity heuristic (impossible travel)
-        geo_vel = features.get("geo_velocity_kmh", 0)
-        if geo_vel > 1000:
-            score = max(score, 0.7)
-            reasons.append("high_velocity")
-        elif geo_vel > 500:
-            score = max(score, 0.4)
+        if features.get("new_device"):
+            bump(0.30, "new_device")
 
-        # New device
-        if not features.get("is_known_device", True):
-            score = max(score, 0.25)
-            reasons.append("new_device")
+        interval = features.get("average_login_interval_seconds")
+        deviation = features.get("deviation_score")
+        if deviation is not None:
+            if deviation >= 0.70:
+                bump(0.65, "high_deviation")
+            elif deviation >= 0.40:
+                bump(0.35, "moderate_deviation")
+        if interval is not None and interval == 0:
+            bump(0.15, "first_login")
 
-        # New IP
-        if not features.get("is_known_ip", True):
-            score = max(score, 0.2)
-            reasons.append("new_ip")
-
-        # Unusual hour
-        login_hour = features.get("login_hour", 12)
-        if login_hour < 3 or login_hour > 23:
-            if login_hour < 2 or login_hour > 24:
-                score = max(score, 0.3)
-                reasons.append("unusual_time")
-
-        # IP reputation
-        ip_rep = features.get("ip_reputation", 1.0)
-        if ip_rep < 0.3:
-            score = max(score, 0.65)
-
-        # Low login streak (irregular pattern)
-        streak = features.get("login_streak", 0)
-        if streak == 0 and features.get("is_known_device", False):
-            score = max(score, 0.15)
-
-        # Ensure score is in 0-1 range
-        score = min(1.0, max(0.0, score))
-
-        return score, "success", reasons
-
-    def is_anomaly(self, score: float) -> bool:
-        """Determine if score indicates anomaly based on threshold."""
-        return score >= self.DEFAULT_THRESHOLD
+        return min(1.0, max(0.0, score)), reasons
 
     def get_version(self) -> str:
         return self.MODEL_VERSION
 
 
-# Global model instance
-_ml_model: Optional[DummyMLModel] = None
+_model: Optional[HeuristicAnomalyModel] = None
 
 
-def get_ml_model() -> DummyMLModel:
-    """Get or create ML model instance."""
-    global _ml_model
-    if _ml_model is None:
-        _ml_model = DummyMLModel()
-    return _ml_model
+def get_ml_model() -> HeuristicAnomalyModel:
+    global _model
+    if _model is None:
+        _model = HeuristicAnomalyModel()
+    return _model
 
 
 # =============================================================================
-# Endpoints - ML Service v2 aligned
+# Endpoints
 # =============================================================================
 
-@router.post("/score", response_model=ScoreResponse)
+@router.post("/ml/score", response_model=MlScoreResponse)
 async def score(
-    request: ScoreRequest,
-    x_internal_token: Optional[str] = Header(None),
-    db=Depends(get_db),
-) -> ScoreResponse:
-    """
-    Compute ML anomaly score for login features.
+    payload: MlScoreRequest,
+    x_internal_secret: Optional[str] = Header(None),
+) -> MlScoreResponse:
+    """UC-DE-03 - score a login event for anomaly likelihood."""
+    verify_internal_secret(x_internal_secret)
+    import time
 
-    Implements Feature Contract v2:
-    1. Validate feature vector
-    2. Preprocess features
-    3. Run inference
-    4. Generate reason codes
-    5. Return aligned response
+    started = time.perf_counter()
+    features = payload.features.model_dump(exclude_none=True)
+    score_value, reason_codes = get_ml_model().predict(features)
+    elapsed_ms = int((time.perf_counter() - started) * 1000)
 
-    Feature Contract v2 aligned with:
-    - 13 features total (4 required, 9 optional)
-    - Returns anomaly_score, ml_status, model_version, reason_codes
-    """
-    # Verify internal token
-    internal_secret = "changeme-in-production"
-    if not x_internal_token or x_internal_token != internal_secret:
-        raise HTTPException(status_code=401, detail="Invalid internal token")
-
-    features = request.features
-
-    # Step 1: Validate features
-    validation = validate_features(features)
-    if not validation.valid:
-        # Still process with defaults filled, but log warning
-        pass  # Continue processing with defaults
-
-    # Step 2: Preprocess features
-    processed_features = preprocess_features(features)
-
-    try:
-        model = get_ml_model()
-
-        # Step 3: Run inference
-        anomaly_score, status, reasons = model.predict(processed_features)
-
-        # Step 4: Generate reason codes (enhance with model output)
-        reason_codes = generate_reason_codes(processed_features, anomaly_score)
-
-        # Step 5: Return aligned response
-        return ScoreResponse(
-            anomaly_score=anomaly_score,
-            ml_status=status,
-            model_version=model.get_version(),
-            reason_codes=reason_codes if reason_codes else None,
-        )
-
-    except Exception as e:
-        return ScoreResponse(
-            anomaly_score=0.0,
-            ml_status="error",
-            model_version=None,
-            reason_codes=None,
-        )
+    return MlScoreResponse(
+        request_id=payload.request_id or uuid4(),
+        normalized_anomaly_score=score_value,
+        is_anomaly=score_value >= ANOMALY_THRESHOLD,
+        model_version=get_ml_model().get_version(),
+        reason_codes=reason_codes,
+        model_status="ready",
+        processing_time_ms=elapsed_ms,
+    )
 
 
-@router.get("/health", response_model=dict)
+@router.get("/ml/health")
 async def ml_health() -> dict:
-    """
-    Health check for ML endpoint.
-    Returns model status for Detection Engine monitoring.
-    """
+    """Liveness probe reporting which model is loaded."""
     try:
         model = get_ml_model()
         return {
             "status": "ok",
             "model_name": model.MODEL_NAME,
             "model_version": model.get_version(),
-            "threshold": model.DEFAULT_THRESHOLD,
+            "anomaly_threshold": ANOMALY_THRESHOLD,
         }
-    except Exception:
+    except Exception:  # noqa: BLE001 - health must never fail
+        logger.exception("ml health check failed")
         return {
             "status": "degraded",
             "model_name": None,
             "model_version": None,
-            "threshold": None,
+            "anomaly_threshold": None,
         }
 
 
-@router.get("/features", response_model=dict)
-async def get_feature_contract() -> dict:
-    """
-    Get ML Feature Contract definition.
-    Useful for Feature Builder alignment.
-    """
+@router.get("/ml/features")
+async def feature_contract() -> dict:
+    """Publish the feature contract so the Detection Engine can align."""
     return {
-        "version": "2.0",
-        "required_features": REQUIRED_FEATURES,
-        "optional_features": OPTIONAL_FEATURES,
-        "all_features": ALL_FEATURES,
-        "description": "Feature Contract v2 - Aligned with DetectionFeatureVector"
+        "version": "3.3",
+        "features": list(FEATURE_FIELDS),
+        "anomaly_threshold": ANOMALY_THRESHOLD,
+        "response_field": "normalized_anomaly_score",
+        "description": (
+            "UC-DE-02 feature contract. Rules in policies.rules may only "
+            "reference these 6 fields."
+        ),
     }

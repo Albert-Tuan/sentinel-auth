@@ -12,7 +12,7 @@ title WF-6  ML Inference Flow
 
 rectangle "Detection Engine" as sys_1 {
   rectangle "Build six input features" as features
-  rectangle "POST internal ML score" as request
+  rectangle "POST /api/v1/internal/ml/score" as request
   rectangle "Risk score returned" as result
   rectangle "Rule-only fallback on error / timeout" as fallback
 }
@@ -20,7 +20,7 @@ rectangle "Detection Engine" as sys_1 {
 rectangle "ML Service" as sys_2 {
   rectangle "Health check" as health
   rectangle "Load active IsolationForest" as model
-  rectangle "Validate features + infer (<500 ms)" as predict
+  rectangle "Validate 6 features + infer (<5s)" as predict
   rectangle "Hourly feature statistics / drift" as stats
 }
 
@@ -48,5 +48,6 @@ fallback ..> dlog : ml_unavailable\n<<flow>>
 
 legend bottom
   Detection combines 0.4 × rule score + 0.6 × ML score when inference succeeds.
+  If ML times out (>5s) or errors, Detection falls back to combined = rule score.
 endlegend
 @enduml

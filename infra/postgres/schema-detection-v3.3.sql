@@ -4,7 +4,9 @@
 --
 -- Version: 3.3
 -- Date: 2026-09-13
+-- Updated: 2026-10-04 (canonical rules + score aggregation)
 -- Based on: v3.2 and Detection Engine documentation
+-- Canonical decisions: docs/DECISIONS-DETECTION-v3.3.md
 -- =============================================================================
 
 -- =============================================================================
@@ -36,33 +38,48 @@ CREATE TABLE IF NOT EXISTS policies (
     description         TEXT,
     rules               JSONB NOT NULL DEFAULT '[]',
     /*
-    JSONB structure:
+    CANONICAL rule structure - see docs/DECISIONS-DETECTION-v3.3.md section 1
+    7 required fields per rule: name, field, operator, value, weight, score, enabled
+
     [
         {
-            "name": "fail_count",
-            "field": "fail_count_24h",
-            "operator": ">",
-            "value": 3,
-            "weight": 0.3,
-            "enabled": true
+            "name": "unusual_hour",          // unique within policy
+            "field": "hour_of_day",          // one of the 6 features (UC-DE-02)
+            "operator": "not_between",       // == != > >= < <= in between not_between
+            "value": [7, 22],                // number | bool | [min,max] | [allowed...]
+            "weight": 0.30,                  // 0..1, confidence of the rule
+            "score": 0.80,                   // 0..1, severity when triggered
+            "enabled": true,
+            "description": "Login outside 07:00-22:59 local time"
         },
         {
-            "name": "new_device",
-            "field": "new_device",
-            "operator": "==",
-            "value": true,
-            "weight": 0.2,
-            "enabled": true
+            "name": "multiple_failures",
+            "field": "fail_count_24h",
+            "operator": ">=",
+            "value": 3,
+            "weight": 0.40,
+            "score": 0.90,
+            "enabled": true,
+            "description": "3 or more failed attempts in the last 24h"
         }
     ]
+
+    Valid "field" values (exactly these 6):
+      hour_of_day, fail_count_24h, ip_change_rate_7d,
+      new_device, average_login_interval_seconds, deviation_score
+
+    An unknown "field" must NOT raise: skip the rule, exclude it from the
+    normalization denominator, and log reason="unknown_feature".
     */
     config              JSONB NOT NULL DEFAULT '{}',
     /*
-    JSONB structure:
+    CANONICAL config structure - see docs/DECISIONS-DETECTION-v3.3.md section 3
     {
-        "weights": {"rule": 0.4, "ml": 0.6},
-        "thresholds": {"low": 0.25, "medium": 0.5, "high": 0.75}
+        "weights": {"rule": 0.4, "ml": 0.6},        // rule + ml must sum to 1.0
+        "thresholds": {"low": 0.25, "medium": 0.5, "high": 0.75}  // must be non-decreasing
     }
+    Invalid config must NOT raise: log reason="invalid_thresholds" and
+    fall back to these defaults.
     */
     is_active           BOOLEAN NOT NULL DEFAULT FALSE,
     created_by          UUID,  -- Reference to users.id in core-db
@@ -273,7 +290,10 @@ CREATE INDEX idx_alert_timeline_actor ON alert_timeline(actor_id);
 CREATE INDEX idx_alert_timeline_event_type ON alert_timeline(event_type);
 
 -- =============================================================================
--- SEED DATA: Default Policy
+-- SEED DATA: Default Policy v1.0
+-- CANONICAL - must match docs/DECISIONS-DETECTION-v3.3.md section 1.5
+-- Every rule has all 7 required fields: name, field, operator, value, weight, score, enabled
+-- Sum of enabled weights = 0.30 + 0.40 + 0.20 + 0.30 = 1.20 (used as normalization denominator)
 -- =============================================================================
 
 INSERT INTO policies (version, name, description, rules, config, is_active, created_at) VALUES
@@ -283,49 +303,44 @@ INSERT INTO policies (version, name, description, rules, config, is_active, crea
         'Default policy for v1.0 with basic rules',
         '[
             {
-                "name": "fail_count_24h",
-                "field": "fail_count_24h",
-                "operator": ">",
-                "value": 3,
-                "weight": 0.3,
+                "name": "unusual_hour",
+                "field": "hour_of_day",
+                "operator": "not_between",
+                "value": [7, 22],
+                "weight": 0.30,
+                "score": 0.80,
                 "enabled": true,
-                "description": "Multiple failed login attempts in 24h"
+                "description": "Login outside 07:00-22:59 local time"
+            },
+            {
+                "name": "multiple_failures",
+                "field": "fail_count_24h",
+                "operator": ">=",
+                "value": 3,
+                "weight": 0.40,
+                "score": 0.90,
+                "enabled": true,
+                "description": "3 or more failed attempts in the last 24h"
             },
             {
                 "name": "new_device",
                 "field": "new_device",
                 "operator": "==",
                 "value": true,
-                "weight": 0.2,
+                "weight": 0.20,
+                "score": 0.50,
                 "enabled": true,
-                "description": "Login from new/unknown device"
+                "description": "Login from a device not seen before"
             },
             {
-                "name": "unusual_hour",
-                "field": "hour_of_day",
-                "operator": "not_between",
-                "value": [7, 22],
-                "weight": 0.2,
+                "name": "high_deviation",
+                "field": "deviation_score",
+                "operator": ">=",
+                "value": 0.70,
+                "weight": 0.30,
+                "score": 0.70,
                 "enabled": true,
-                "description": "Login outside usual business hours"
-            },
-            {
-                "name": "new_country",
-                "field": "is_new_country",
-                "operator": "==",
-                "value": true,
-                "weight": 0.4,
-                "enabled": true,
-                "description": "Login from country not seen before"
-            },
-            {
-                "name": "suspicious_ip",
-                "field": "is_vpn_or_tor",
-                "operator": "==",
-                "value": true,
-                "weight": 0.3,
-                "enabled": true,
-                "description": "Login from VPN or Tor exit node"
+                "description": "Behaviour deviates strongly from the user baseline"
             }
         ]'::jsonb,
         '{
@@ -354,6 +369,45 @@ COMMENT ON TABLE alert_timeline IS 'Immutable audit trail for SOC analyst action
 -- =============================================================================
 
 -- rule_evaluation: Each rule is evaluated (rule_name, triggered, score_contribution)
+--   score_contribution = (rule.score * rule.weight) / SUM(weight of all enabled rules)
+--   so contributions sum exactly to rule_score (see DECISIONS section 4.5)
 -- ml_call: ML Service is called (success/failed/skipped)
 -- scoring: Scores are combined (rule_score, ml_score, combined_score)
 -- action_sent: Action is sent to core-app (action_type, target)
+
+-- =============================================================================
+-- CANONICAL SCORING FORMULAS
+-- See docs/DECISIONS-DETECTION-v3.3.md section 2 for the full specification
+-- =============================================================================
+--
+-- STEP 1 - rule_score (0..1)
+--   contribution(rule) = rule.score * rule.weight        for enabled+triggered rules
+--   rule_score = min(1.0, SUM(contribution) / SUM(weight of ALL enabled rules))
+--   If no rules enabled -> rule_score = 0.0
+--
+-- STEP 2 - ml_score (0..1, NULL when ML unavailable)
+--   ml_score = normalized_anomaly_score from ML Service
+--   ml_status = 'success' | 'unavailable' (timeout > 5s) | 'error'
+--
+-- STEP 3 - combined_score (0..1)
+--   if ml_status = 'success':  combined = w_rule * rule_score + w_ml * ml_score
+--   otherwise:                 combined = rule_score        (graceful degradation)
+--
+-- STEP 4 - risk_level from config.thresholds (low/medium/high)
+--   combined < low                          -> low
+--   low <= combined < medium                -> medium
+--   medium <= combined < high               -> high
+--   combined >= high                        -> critical
+--
+-- STEP 5 - decision
+--   low, medium  -> 'allow'     (no alert)
+--   high         -> 'challenge' (REQUIRE_MFA, alert created)
+--   critical     -> 'block'     (LOCK_USER/REVOKE_SESSIONS, alert created)
+--
+-- Worked example with the seeded v1.0 policy:
+--   features: hour=2, fail_24h=5, new_device=true, deviation=0.8
+--   contributions: 0.80*0.30=0.240  0.90*0.40=0.360  0.50*0.20=0.100  0.70*0.30=0.210
+--   numerator=0.910  denominator=1.20  -> rule_score = 0.7583
+--   ml_score=0.72 (success)
+--   combined = 0.4*0.7583 + 0.6*0.72 = 0.7353  -> HIGH -> REQUIRE_MFA + alert
+--   If ML had timed out: combined = 0.7583 -> CRITICAL (stricter, by design)

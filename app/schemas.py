@@ -1,13 +1,14 @@
 """
-Pydantic schemas for Sentinel Auth API v2.
-Sync with schema-v2.sql definitions.
+Pydantic schemas for Sentinel Auth API v3.3.
+Sync with infra/postgres/schema-*-v3.3.sql definitions.
+Canonical decisions: docs/DECISIONS-DETECTION-v3.3.md
 """
 from datetime import datetime
-from typing import Optional, List, Any
+from typing import Any, Dict, List, Optional
 from uuid import UUID
 from enum import Enum
 
-from pydantic import BaseModel, EmailStr, Field, field_validator
+from pydantic import BaseModel, EmailStr, Field, field_validator, model_validator
 
 
 # =============================================================================
@@ -65,7 +66,8 @@ class UserRegisterResponse(BaseModel):
 class LoginRequest(BaseModel):
     username: str
     password: str
-    source_ip: Optional[str] = None
+    # Client IP is derived server-side from X-Forwarded-For / request.client
+    # (see app.auth.get_client_ip), never trusted from the request body.
 
 
 class LoginResponse(BaseModel):
@@ -196,52 +198,142 @@ class AuditLogFilter(BaseModel):
 
 
 # =============================================================================
-# Policy / Rule versioning schemas
+# Policy schemas (schema v3.3 - rules + config JSONB)
+# Canonical structure: docs/DECISIONS-DETECTION-v3.3.md section 1
 # =============================================================================
 
+#: The 6 features every rule may reference (UC-DE-02)
+ALLOWED_FEATURE_FIELDS = frozenset({
+    "hour_of_day",
+    "fail_count_24h",
+    "ip_change_rate_7d",
+    "new_device",
+    "average_login_interval_seconds",
+    "deviation_score",
+})
+
+#: Comparison operators a rule may use
+ALLOWED_OPERATORS = frozenset({
+    "==", "!=", ">", ">=", "<", "<=", "in", "between", "not_between",
+})
+
+#: Operators that require a 2-element [min, max] array
+RANGE_OPERATORS = frozenset({"between", "not_between"})
+
+
 class RuleDefinition(BaseModel):
-    name: str
-    description: Optional[str] = None
-    conditions: dict = {}
-    score: float = Field(..., ge=0.0, le=1.0)
+    """One detection rule. All 7 fields are required - see DECISIONS section 1.2."""
+
+    name: str = Field(..., min_length=1, max_length=100)
+    field: str = Field(..., description="Must be one of the 6 features (UC-DE-02)")
+    operator: str = Field(..., description="One of: == != > >= < <= in between not_between")
+    value: Any = Field(..., description="number | bool | [min,max] | [allowed...]")
+    weight: float = Field(..., ge=0.0, le=1.0, description="Rule confidence, 0..1")
+    score: float = Field(..., ge=0.0, le=1.0, description="Severity when triggered, 0..1")
     enabled: bool = True
+    description: Optional[str] = None
+
+    @field_validator("operator")
+    @classmethod
+    def validate_operator(cls, v: str) -> str:
+        if v not in ALLOWED_OPERATORS:
+            raise ValueError(
+                f"operator must be one of {sorted(ALLOWED_OPERATORS)}, got {v!r}"
+            )
+        return v
+
+    @model_validator(mode="after")
+    def check_field_and_value(self) -> "RuleDefinition":
+        if self.field not in ALLOWED_FEATURE_FIELDS:
+            raise ValueError(
+                f"field must be one of {sorted(ALLOWED_FEATURE_FIELDS)}, got {self.field!r}"
+            )
+        if self.operator in RANGE_OPERATORS:
+            if not isinstance(self.value, (list, tuple)) or len(self.value) != 2:
+                raise ValueError(
+                    f"operator {self.operator!r} requires value as [min, max]"
+                )
+        elif self.operator == "in":
+            if not isinstance(self.value, (list, tuple)) or len(self.value) == 0:
+                raise ValueError("operator 'in' requires a non-empty list of values")
+        elif isinstance(self.value, (list, tuple)):
+            raise ValueError(
+                f"operator {self.operator!r} requires a single value, not a list"
+            )
+        return self
 
 
-class PolicyRulesJson(BaseModel):
-    rules: List[RuleDefinition]
-    weights: dict = {"rule": 0.4, "ml": 0.6}
-    thresholds: dict = {"challenge": 0.3, "block": 0.7}
+class PolicyWeights(BaseModel):
+    """Weight of each scoring component. rule + ml must sum to 1.0."""
+
+    rule: float = Field(default=0.4, ge=0.0, le=1.0)
+    ml: float = Field(default=0.6, ge=0.0, le=1.0)
+
+    @model_validator(mode="after")
+    def check_sum(self) -> "PolicyWeights":
+        if self.rule > 0 and self.ml > 0:
+            if abs(self.rule + self.ml - 1.0) > 1e-6:
+                raise ValueError("weights.rule + weights.ml must equal 1.0")
+        return self
 
 
-class PolicyVersionItem(BaseModel):
+class PolicyThresholds(BaseModel):
+    """Risk level boundaries. Must be non-decreasing within 0..1."""
+
+    low: float = Field(default=0.25, ge=0.0, le=1.0)
+    medium: float = Field(default=0.50, ge=0.0, le=1.0)
+    high: float = Field(default=0.75, ge=0.0, le=1.0)
+
+    @model_validator(mode="after")
+    def check_ordering(self) -> "PolicyThresholds":
+        if not (self.low <= self.medium <= self.high):
+            raise ValueError("thresholds must satisfy low <= medium <= high")
+        return self
+
+
+class PolicyConfig(BaseModel):
+    """contents of policies.config JSONB."""
+
+    weights: PolicyWeights = Field(default_factory=PolicyWeights)
+    thresholds: PolicyThresholds = Field(default_factory=PolicyThresholds)
+
+
+class PolicyCreate(BaseModel):
+    """Body of POST /api/v1/policies (UC-DE-15)."""
+
+    version: str = Field(..., pattern=r"^v\d+(\.\d+)*$", examples=["v1.0"])
+    name: Optional[str] = None
+    description: Optional[str] = None
+    rules: List[RuleDefinition] = Field(..., min_length=1)
+    config: PolicyConfig = Field(default_factory=PolicyConfig)
+
+    @field_validator("rules")
+    @classmethod
+    def check_unique_names(cls, rules: List[RuleDefinition]) -> List[RuleDefinition]:
+        names = [r.name for r in rules]
+        dupes = {n for n in names if names.count(n) > 1}
+        if dupes:
+            raise ValueError(f"duplicate rule names: {sorted(dupes)}")
+        return rules
+
+
+class PolicyItem(BaseModel):
     id: UUID
     version: str
+    name: Optional[str] = None
     description: Optional[str] = None
-    rules_json: dict
-    weights: dict
-    thresholds: dict
+    rules: List[RuleDefinition] = []
+    config: PolicyConfig = Field(default_factory=PolicyConfig)
     is_active: bool
-    created_by_user_id: Optional[UUID] = None
+    created_by: Optional[UUID] = None
     created_at: datetime
     activated_at: Optional[datetime] = None
     deactivated_at: Optional[datetime] = None
 
 
-class PolicyVersionList(BaseModel):
-    versions: List[PolicyVersionItem]
+class PolicyList(BaseModel):
+    policies: List[PolicyItem]
     total: int
-
-
-class PolicyVersionCreate(BaseModel):
-    version: str = Field(..., pattern=r"^v\d+(\.\d+)*$")
-    description: Optional[str] = None
-    rules_json: dict
-    weights: Optional[dict] = None
-    thresholds: Optional[dict] = None
-
-
-class PolicyVersionActivate(BaseModel):
-    version_id: UUID
 
 
 # =============================================================================
@@ -264,20 +356,22 @@ class RiskLevel(str, Enum):
 
 class LoginAttemptSummary(BaseModel):
     id: UUID
-    occurred_at: datetime
+    event_id: UUID
+    timestamp: datetime
     outcome: str
-    source_ip: Optional[str] = None
+    username_attempted: Optional[str] = None
+    ip_address: Optional[str] = None
     user_agent: Optional[str] = None
+    mfa_used: bool = False
     risk_level: Optional[RiskLevel] = None
 
 
 class RiskAssessmentSummary(BaseModel):
     rule_score: Optional[float] = None
-    anomaly_score: Optional[float] = None
     ml_score: Optional[float] = None
+    combined_score: Optional[float] = None
     ml_status: Optional[str] = None
     ml_model_version: Optional[str] = None
-    combined_score: Optional[float] = None
     risk_level: Optional[RiskLevel] = None
     decision: Optional[str] = None
 
@@ -289,9 +383,10 @@ class AlertItem(BaseModel):
     risk_level: Optional[RiskLevel] = None
     detection_reason: Optional[str] = None
     detection_scores: Optional[dict] = None
-    assigned_to: Optional[str] = None
-    resolved_by: Optional[str] = None
+    assigned_to_id: Optional[UUID] = None
+    resolved_by_id: Optional[UUID] = None
     resolved_at: Optional[datetime] = None
+    resolution: Optional[str] = None
     notes: Optional[str] = None
     created_at: datetime
     # Nested data
@@ -309,7 +404,34 @@ class AlertList(BaseModel):
 class AlertFilter(BaseModel):
     status: Optional[AlertStatus] = None
     risk_level: Optional[RiskLevel] = None
-    assigned_to: Optional[str] = None
+    assigned_to_id: Optional[UUID] = None
+
+
+class AlertTimelineItem(BaseModel):
+    id: UUID
+    alert_id: UUID
+    event_type: str
+    actor_id: Optional[UUID] = None
+    actor_type: str = "user"
+    old_value: Optional[str] = None
+    new_value: Optional[str] = None
+    comment: Optional[str] = None
+    ip_address: Optional[str] = None
+    created_at: datetime
+
+
+class AlertTimelineList(BaseModel):
+    timeline: List[AlertTimelineItem]
+    total: int
+
+
+class AlertNoteRequest(BaseModel):
+    comment: str = Field(..., min_length=1, max_length=2000)
+
+
+class AlertAssignRequest(BaseModel):
+    assigned_to_id: UUID
+    comment: Optional[str] = None
 
 
 class AlertAcknowledgeRequest(BaseModel):
@@ -317,81 +439,143 @@ class AlertAcknowledgeRequest(BaseModel):
 
 
 class AlertResolveRequest(BaseModel):
-    status: AlertStatus = Field(..., description="Must be 'resolved' or 'false_positive'")
+    resolution: str = Field(
+        ...,
+        pattern=r"^(true_attack|false_positive|benign_true_positive|insufficient_evidence)$",
+        description="One of: true_attack, false_positive, benign_true_positive, insufficient_evidence",
+    )
+    notes: Optional[str] = None
+
+
+class AlertEscalateRequest(BaseModel):
+    reason: str = Field(..., min_length=1)
+    escalate_to_id: Optional[UUID] = None
     notes: Optional[str] = None
 
 
 # =============================================================================
-# Detection engine schemas (internal)
+# Detection engine internal schemas
+# API paths: /api/v1/internal/*  (see DECISIONS section 5)
 # =============================================================================
 
-class DetectionFeatureVector(BaseModel):
-    login_hour: Optional[int] = None
-    login_day: Optional[int] = None
-    ip_country: Optional[str] = None
-    ip_reputation: Optional[float] = None
-    user_agent_family: Optional[str] = None
-    asn_reputation: Optional[float] = None
-    failed_attempts_1h: int = 0
-    failed_attempts_24h: int = 0
-    geo_velocity_kmh: Optional[float] = None
-    login_streak: int = 0
-    is_known_device: bool = False
-    is_known_ip: bool = False
-    mfa_used_recently: bool = False
+class LoginEventRequest(BaseModel):
+    """Body of POST /api/v1/internal/login-events (UC-DE-01).
 
+    Sent by core-app's outbox poller, originating from the core-db
+    outbox_events table.
+    """
 
-class DetectionRequest(BaseModel):
-    username: str
+    event_id: UUID = Field(..., description="Idempotency key from core-app")
+    username_attempted: str = Field(..., min_length=1, max_length=50)
     user_id: Optional[UUID] = None
-    source_ip: str
+    outcome: str = Field(
+        ...,
+        # Must stay in sync with the CHECK constraint on
+        # login_attempts.outcome in infra/postgres/schema-detection-v3.3.sql
+        pattern=r"^(success|failure|mfa_required|mfa_success|mfa_failed|blocked|locked|rate_limited)$",
+    )
+    ip_address: Optional[str] = None
     user_agent: Optional[str] = None
-    timestamp: Optional[datetime] = None
-    failed_attempts: int = 0
-    detection_features: Optional[dict] = None
-    risk_level_override: Optional[str] = None
+    mfa_used: bool = False
+    timestamp: datetime
+    request_id: Optional[UUID] = None
+    # Optional pre-computed features; if omitted the engine builds them
+    features: Optional[Dict[str, Any]] = None
+
+
+class LoginEventResponse(BaseModel):
+    """Response of POST /api/v1/internal/login-events - returns 202 Accepted."""
+
+    status: str = "accepted"
+    event_id: UUID
+    login_attempt_id: UUID
+    processing: str = "pending"
+
+
+class LoginAttemptStatusResponse(BaseModel):
+    """Response of GET /api/v1/internal/login-attempts/{id}."""
+
+    login_attempt_id: UUID
+    status: str = Field(..., description="pending | processed | failed")
+    risk_level: Optional[RiskLevel] = None
+    decision: Optional[str] = None
+    alert_id: Optional[UUID] = None
+
+
+class DetectionFeatureVector(BaseModel):
+    """The 6 features a rule may reference (UC-DE-02)."""
+
+    hour_of_day: Optional[int] = Field(default=None, ge=0, le=23)
+    fail_count_24h: Optional[int] = Field(default=None, ge=0)
+    ip_change_rate_7d: Optional[float] = Field(default=None, ge=0.0, le=1.0)
+    new_device: Optional[bool] = None
+    average_login_interval_seconds: Optional[int] = Field(default=None, ge=0)
+    deviation_score: Optional[float] = Field(default=None, ge=0.0, le=1.0)
 
 
 class RuleHit(BaseModel):
+    """One evaluated rule. score_contribution values sum to rule_score."""
+
     rule_name: str
-    rule_id: Optional[str] = None
-    score: float
+    rule_id: Optional[UUID] = None
+    triggered: bool
+    score: float = Field(..., ge=0.0, le=1.0, description="Rule's configured score")
+    weight: float = Field(..., ge=0.0, le=1.0, description="Rule's configured weight")
+    score_contribution: float = Field(
+        ..., ge=0.0, le=1.0,
+        description="score * weight / total_weight; sums exactly to rule_score",
+    )
     reason: Optional[str] = None
 
 
 class DetectionResponse(BaseModel):
-    rule_score: float
-    anomaly_score: Optional[float] = None
-    ml_score: Optional[float] = None
-    ml_status: str = "unavailable"
+    """Result of evaluating one login attempt (formula: DECISIONS section 2)."""
+
+    rule_score: float = Field(..., ge=0.0, le=1.0)
+    ml_score: Optional[float] = Field(default=None, ge=0.0, le=1.0)
+    combined_score: float = Field(..., ge=0.0, le=1.0)
+    ml_status: str = Field(default="unavailable", description="success | unavailable | error")
     ml_model_version: Optional[str] = None
-    combined_score: float
+    ml_reason_codes: List[str] = []
     risk_level: RiskLevel
-    decision: str  # 'allow' | 'challenge' | 'block'
+    decision: str = Field(..., description="allow | challenge | block")
     rule_hits: List[RuleHit] = []
     alert_id: Optional[UUID] = None
 
 
 class MlScoreRequest(BaseModel):
+    """Body of POST /api/v1/internal/ml/score sent to ML Service (UC-DE-03)."""
+
+    request_id: UUID
     features: DetectionFeatureVector
 
 
 class MlScoreResponse(BaseModel):
-    anomaly_score: float
-    ml_status: str = "success"  # 'success' | 'unavailable' | 'error'
+    """ML Service response. Field name is fixed by the ML team API contract."""
+
+    normalized_anomaly_score: float = Field(..., ge=0.0, le=1.0)
+    is_anomaly: bool = False
     model_version: Optional[str] = None
+    reason_codes: List[str] = []
+    model_status: str = "ready"
 
 
 class SecurityAction(str, Enum):
     REQUIRE_MFA = "REQUIRE_MFA"
     REVOKE_SESSIONS = "REVOKE_SESSIONS"
     LOCK_USER = "LOCK_USER"
+    FORCE_LOGOUT = "FORCE_LOGOUT"
 
 
 class ActionRequest(BaseModel):
+    """Body of POST /api/v1/internal/actions (UC-DE-07)."""
+
     action: SecurityAction
     target_user_id: UUID
-    reason: str
+    reason: str = Field(..., min_length=1)
+    alert_id: Optional[UUID] = None
+    severity: Optional[RiskLevel] = None
+    idempotency_key: Optional[str] = None
 
 
 class ActionResponse(BaseModel):

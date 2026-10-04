@@ -133,7 +133,7 @@ Sentinel Auth có **3 nhóm actor chính** trực tiếp sử dụng hệ thốn
 ### 5.4 Detection Engine (Internal)
 
 - Không phải actor con người.
-- Hoạt động tự động: sau mỗi login attempt, inline detection đánh giá risk.
+- Hoạt động tự động: sau mỗi login attempt, Core App ghi `outbox_events` → Detection Engine đánh giá risk (bất đồng bộ).
 - Khi risk cao → tạo alert (SOC xử lý).
 - Khi risk vừa → enforce action (REQUIRE_MFA, REVOKE_SESSIONS, LOCK_USER) → tác động lên User.
 
@@ -142,7 +142,7 @@ Sentinel Auth có **3 nhóm actor chính** trực tiếp sử dụng hệ thốn
 ## 6. Luồng dữ liệu giữa actors
 
 ```
-User ──login──▶ FastAPI (inline detection)
+User ──login──▶ FastAPI ──outbox──▶ Detection Engine
                    │
                    ├── rule_score + ml_score ──▶ Risk Level
                    │                                 │

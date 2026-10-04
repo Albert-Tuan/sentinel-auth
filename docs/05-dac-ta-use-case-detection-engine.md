@@ -49,12 +49,20 @@ Tài liệu này mô tả chi tiết các Use Case của **Detection Engine** tr
 
 #### Basic Flow
 ```
-1. Core App gửi POST /internal/login-events
-2. Detection Engine validate request
-3. Lưu LoginAttempt vào database
-4. Trigger async processing
-5. Trả về HTTP 202 Accepted
+1. Core App gửi POST /api/v1/internal/login-events
+   (Header: X-Internal-Secret)
+2. Detection Engine kiểm tra secret → 401 nếu sai
+3. Kiểm tra event_id đã tồn tại chưa (idempotency)
+   - Đã có → trả lại login_attempt_id cũ, HTTP 202
+4. Validate payload → 422 nếu sai định dạng
+5. Lưu LoginAttempt (status = 'pending')
+6. Chạy scoring pipeline (UC-DE-02 → 04 → 03 → 05 → 06)
+7. Trả về HTTP 202 Accepted
 ```
+
+> **Vì sao 202 chứ không phải 200?** Detection chạy **bất đồng bộ** để không làm
+> chậm đăng nhập. Core App không cần chờ kết quả — nó có thể poll
+> `GET /api/v1/internal/login-attempts/{id}` khi cần.
 
 #### Request Schema
 ```json
@@ -62,27 +70,34 @@ Tài liệu này mô tả chi tiết các Use Case của **Detection Engine** tr
   "event_id": "UUID",
   "user_id": "UUID | null",
   "username_attempted": "string",
-  "outcome": "success | failed",
+  "outcome": "success | failure | locked | rate_limited | mfa_required | mfa_success | mfa_failure",
   "mfa_used": "boolean",
-  "ip_address": "string",
-  "user_agent": "string",
-  "timestamp": "ISO 8601"
+  "ip_address": "string | null",
+  "user_agent": "string | null",
+  "timestamp": "ISO 8601",
+  "request_id": "UUID | null",
+  "features": { } // optional: 6 features nếu Core App đã tính sẵn
 }
 ```
 
 #### Response
 ```json
 {
-  "login_attempt_id": "UUID",
   "status": "accepted",
-  "processing_url": "/api/v1/login-attempts/{id}"
+  "event_id": "UUID",
+  "login_attempt_id": "UUID",
+  "processing": "pending"
 }
 ```
 
 #### Alternative Flows
-- **AF-01:** Invalid payload → HTTP 400 Bad Request
-- **AF-02:** Unauthorized source → HTTP 401 Unauthorized
-- **AF-03:** Duplicate event_id → HTTP 409 Conflict (return existing ID)
+- **AF-01:** Sai định dạng payload → HTTP 422 Unprocessable Entity
+- **AF-02:** Thiếu/sai `X-Internal-Secret` → HTTP 401 Unauthorized
+- **AF-03:** `event_id` trùng → HTTP 202 với `login_attempt_id` cũ (idempotent,
+  **không** tạo bản ghi trùng)
+- **AF-04:** Lỗi trong scoring → `login_attempts.status = 'failed'`, ghi
+  `detection_logs.reason = 'unhandled_exception'`, HTTP 202 vẫn trả về
+  (đăng nhập không bị chặn vì lỗi hệ thống)
 
 ---
 
@@ -115,7 +130,7 @@ Tài liệu này mô tả chi tiết các Use Case của **Detection Engine** tr
 | `fail_count_24h` | Integer | Database query |
 | `ip_change_rate_7d` | Float | Historical IP analysis |
 | `new_device` | Boolean | User agent comparison |
-| `avg_login_interval_seconds` | Integer | Historical timestamps |
+| `average_login_interval_seconds` | Integer | Historical timestamps |
 | `deviation_score` | Float | Baseline comparison |
 
 ---
@@ -135,10 +150,11 @@ Tài liệu này mô tả chi tiết các Use Case của **Detection Engine** tr
 ```
 1. Nhận features từ UC-DE-02
 2. Validate features schema
-3. POST /internal/score với request_id
-4. Đợi response (timeout: 5s)
+3. POST /api/v1/internal/ml/score với request_id
+   (Header: X-Internal-Secret)
+4. Đợi response (timeout: 5 giây)
 5. Parse normalized_anomaly_score
-6. Lưu vào risk_assessment
+6. Lưu vào risk_assessments.ml_score
 ```
 
 #### Request
@@ -169,8 +185,16 @@ Tài liệu này mô tả chi tiết các Use Case của **Detection Engine** tr
 ```
 
 #### Alternative Flows
-- **AF-01:** ML timeout → Use fallback (rule-only scoring)
-- **AF-02:** ML error → Log error, continue with default ML score = 0.5
+
+| Mã | Tình huống | `ml_status` | `ml_score` | Hành động |
+|-----|-----------|-------------|-----------|-----------|
+| **AF-01** | ML timeout (> 5s) | `unavailable` | `NULL` | `combined = rule_score` |
+| **AF-02** | ML trả 4xx/5xx | `error` | `NULL` | `combined = rule_score` |
+| **AF-03** | ML trả payload sai định dạng | `error` | `NULL` | `combined = rule_score` |
+
+> **Không** dùng giá trị ML mặc định `0.5` khi ML lỗi. Giá trị `0.5` là "bình thường
+> vừa phải" — nó sẽ **che mất** việc thiếu tín hiệu ML và làm giảm mức rủi ro.
+> Đặt `ml_score = NULL` khiến hệ thống dùng `rule_score` nguyên vẹn, thận trọng hơn.
 
 ---
 
@@ -186,31 +210,53 @@ Tài liệu này mô tả chi tiết các Use Case của **Detection Engine** tr
 
 #### Basic Flow
 ```
-1. Lấy active policy
-2. Parse rules từ policy.rules (JSONB)
-3. Với mỗi rule:
-   a. Evaluate condition với features
-   b. Nếu triggered → add score × weight
-4. Tính tổng rule_score
-5. Lưu vào risk_assessment
-6. Log detection_log entry
+1. Lấy active policy (is_active = true)
+2. Parse rules từ policies.rules (JSONB)
+3. Validate từng rule — rule sai bị BỎ QUA, ghi log, không làm hỏng phần còn lại
+4. Tính mẫu số = Σ weight của TẤT CẢ rule đã bật
+5. Với mừng rule đã bật:
+   a. Đọc features[rule.field]
+   b. Áp dụng rule.operator với rule.value
+   c. Nếu chạy → tử số += rule.score × rule.weight
+6. rule_score = min(1.0, tử số / mẫu số)
+7. Ghi mỗi rule vào detection_logs với score_contribution
+8. Lưu vào risk_assessments
 ```
 
 #### Rule Example
 ```json
 {
-  "id": "R001",
-  "name": "Unusual Hour Login",
-  "condition": "hour_of_day >= 23 OR hour_of_day <= 5",
-  "weight": 0.3,
-  "score": 0.8
+  "name": "unusual_hour",
+  "field": "hour_of_day",
+  "operator": "not_between",
+  "value": [7, 22],
+  "weight": 0.30,
+  "score": 0.80,
+  "enabled": true,
+  "description": "Login outside 07:00-22:59 local time"
 }
 ```
 
+| Trường | Ý nghĩa |
+|--------|---------|
+| `name` | Tên quy tắc, duy nhất trong policy |
+| `field` | Tên đặc trưng — 1 trong 6 đặc trưng của UC-DE-02 |
+| `operator` | `==` `!=` `>` `>=` `<` `<=` `in` `between` `not_between` |
+| `value` | Giá trị so sánh (`[min,max]` với `between`/`not_between`) |
+| `weight` | Độ tin cậy của rule, `0 ≤ weight ≤ 1` |
+| `score` | Mức nghiêm trọng khi rule chạy, `0 ≤ score ≤ 1` |
+| `enabled` | Có dùng rule này không |
+
 #### Rule Score Formula
 ```
-rule_score = Σ (triggered_rule.score × rule.weight)
+                   Σ (rule.score × rule.weight)     ← chỉ rule ĐÃ CHẠY
+rule_score = min( 1.0, ─────────────────────────────────────── )
+                              Σ rule.weight                 ← rule ĐÃ BẬT
 ```
+
+> **Công thức chuẩn:** `docs/DECISIONS-DETECTION-v3.3.md` mục 2.1.
+> Chia mẫu số là bắt buộc — nếu cộng thẳng, `rule_score` có thể vượt `1.0` và phá
+> vỡ công thức `0.4 × rule_score + 0.6 × ml_score`.
 
 ---
 
@@ -227,25 +273,42 @@ rule_score = Σ (triggered_rule.score × rule.weight)
 #### Basic Flow
 ```
 1. Lấy rule_score từ UC-DE-04
-2. Lấy ml_score từ UC-DE-03
-3. Lấy weights từ policy config
-4. Tính: risk_score = w_rule × rule_score + w_ml × ml_score
-5. Xác định risk_level từ thresholds
-6. Lưu vào risk_assessment
+2. Lấy ml_score + ml_status từ UC-DE-03
+3. Lấy weights + thresholds từ policy.config
+4. Validate config — sai thì log và dùng giá trị mặc định
+5. Nếu ml_status = 'success':
+      combined = w_rule × rule_score + w_ml × ml_score
+   Nếu ml_status = 'unavailable' hoặc 'error':
+      combined = rule_score          (suy giảm êm)
+6. Xác định risk_level từ thresholds
+7. Xác định decision theo DECISION_MATRIX
+8. Lưu vào risk_assessments
 ```
 
 #### Formula
 ```
-Risk_Score = 0.4 × Rule_Score + 0.6 × ML_Score
+Nếu ML thành công:
+  Combined_Score = 0.4 × Rule_Score + 0.6 × ML_Score
+
+Nếu ML không thành công:
+  Combined_Score = Rule_Score
 ```
 
+> **Không chia lại trọng số khi ML lỗi.** Nếu chia lại, `combined` sẽ bằng
+> `0.7583` — **cao hơn** so với khi có ML (`0.7353`). Hệ thống thận trọng hơn khi
+> thiếu tín hiệu ML, đây là chủ ý thiết kế.
+> Nguồn: `docs/DECISIONS-DETECTION-v3.3.md` mục 2.3.
+
 #### Risk Classification
-| Score Range | Risk Level | Action |
-|-------------|------------|--------|
-| < 0.25 | LOW | ALLOW |
-| 0.25 - 0.50 | MEDIUM | ALLOW_LOG |
-| 0.50 - 0.75 | HIGH | REQUIRE_MFA |
-| > 0.75 | CRITICAL | BLOCK_ALERT |
+| Điều kiện | `risk_level` | `decision` | Action | Tạo alert? |
+|----------|--------------|------------|--------|-----------|
+| `combined < 0.25` | `low` | `allow` | ALLOW | ❌ |
+| `0.25 ≤ combined < 0.50` | `medium` | `allow` | ALLOW_LOG | ❌ |
+| `0.50 ≤ combined < 0.75` | `high` | `challenge` | REQUIRE_MFA | ✅ |
+| `combined ≥ 0.75` | `critical` | `block` | BLOCK_ALERT | ✅ |
+
+> Ngưỡng lấy từ `policy.config.thresholds`, mặc định `0.25 / 0.50 / 0.75`.
+> Biên `0.75` thuộc về **CRITICAL** (không phải HIGH).
 
 ---
 
@@ -277,16 +340,33 @@ Risk_Score = 0.4 × Rule_Score + 0.6 × ML_Score
   "login_attempt_id": "UUID",
   "policy_id": "UUID",
   "status": "open",
-  "risk_level": "HIGH",
-  "detection_reason": "ML: unusual_time, new_device",
+  "risk_level": "high",
+  "detection_reason": "REQUIRE_MFA: combined=0.7353 (rule=0.7583, ml=0.72)",
   "detection_scores": {
-    "rule_score": 0.45,
+    "rule_score": 0.7583,
     "ml_score": 0.72,
-    "combined": 0.62
+    "combined_score": 0.7353,
+    "ml_status": "success",
+    "ml_model_version": "v1.0-isolation-forest",
+    "rule_hits": [
+      {
+        "rule_name": "multiple_failures",
+        "triggered": true,
+        "score": 0.90,
+        "weight": 0.40,
+        "score_contribution": 0.3000
+      }
+    ],
+    "ml_reason_codes": ["high_fail_count", "unusual_time"]
   },
-  "assigned_to_id": "UUID"
+  "assigned_to_id": null
 }
 ```
+
+> `risk_level` lưu bằng **chữ thường** (`high`, `critical`) — khớp với CHECK
+> constraint trong schema. `assigned_to_id` để `null` ngay khi tạo; phân phối
+> round-robin cho SOC analyst là bước tiếp theo của workflow, không chặn việc
+> tạo alert.
 
 ---
 
@@ -304,24 +384,26 @@ Risk_Score = 0.4 × Rule_Score + 0.6 × ML_Score
 #### Basic Flow
 ```
 1. Dựa trên risk_level từ UC-DE-05:
-   - HIGH → REQUIRE_MFA
-   - CRITICAL → BLOCK + Alert (UC-DE-06)
+   - high     → REQUIRE_MFA
+   - critical → REVOKE_SESSIONS + LOCK_USER
 2. Build action payload
-3. POST /internal/actions to Core App
-4. Log action sent
+3. POST /api/v1/internal/actions to Core App
+   (Header: X-Internal-Secret)
+4. Log vào detection_logs stage = 'action_sent'
 ```
+
+> Detection Engine **không** tự khoá tài khoản — nó **yêu cầu** Core App thực hiện.
+> Core App mới là nơi duy trì `users`, `sessions` nên mới có quyền thay đổi.
 
 #### Action Payload
 ```json
 {
   "action": "REQUIRE_MFA",
-  "target": {
-    "type": "user_id",
-    "value": "UUID"
-  },
-  "reason": "Risk score exceeded threshold",
-  "risk_level": "high",
-  "login_attempt_id": "UUID"
+  "target_user_id": "UUID",
+  "reason": "COMBINE: 0.7353 - rule 0.7583 + high_deviation",
+  "alert_id": "UUID",
+  "severity": "high",
+  "idempotency_key": "string (optional)"
 }
 ```
 
@@ -339,7 +421,7 @@ Risk_Score = 0.4 × Rule_Score + 0.6 × ML_Score
 
 #### Basic Flow
 ```
-1. SOC Analyst truy cập /api/v1/dashboard
+1. SOC Analyst truy cập `GET /api/v1/soc/dashboard`
 2. System lấy:
    - Alerts count by status
    - Alerts count by risk_level
@@ -444,32 +526,90 @@ Risk_Score = 0.4 × Rule_Score + 0.6 × ML_Score
 ```
 
 #### Evidence Response
+`GET /api/v1/alerts/{id}/evidence`
+
 ```json
 {
-  "login_attempt_id": "UUID",
-  "risk_assessment": {
-    "rule_score": 0.45,
-    "ml_score": 0.72,
-    "combined": 0.62
+  "alert": {
+    "id": "UUID",
+    "login_attempt_id": "UUID",
+    "status": "open",
+    "risk_level": "high",
+    "detection_reason": "REQUIRE_MFA: combined=0.7353 (rule=0.7583, ml=0.72)",
+    "detection_scores": { }
   },
-  "rule_evidence": [
+  "login_attempt": {
+    "id": "UUID",
+    "event_id": "UUID",
+    "timestamp": "2026-10-04T02:15:00Z",
+    "outcome": "failure",
+    "username_attempted": "alice",
+    "ip_address": "203.0.113.42",
+    "user_agent": "Mozilla/5.0 ...",
+    "mfa_used": false
+  },
+  "risk_assessment": {
+    "rule_score": 0.7583,
+    "ml_score": 0.72,
+    "combined_score": 0.7353,
+    "ml_status": "success",
+    "ml_model_version": "v1.0-isolation-forest",
+    "ml_reason_codes": ["high_fail_count", "unusual_time"],
+    "ml_features_used": {
+      "hour_of_day": 2,
+      "fail_count_24h": 5,
+      "ip_change_rate_7d": 0.40,
+      "new_device": true,
+      "average_login_interval_seconds": 900,
+      "deviation_score": 0.80
+    },
+    "rule_hits": [
+      {
+        "rule_name": "unusual_hour",
+        "triggered": true,
+        "score": 0.80,
+        "weight": 0.30,
+        "score_contribution": 0.2000
+      },
+      {
+        "rule_name": "multiple_failures",
+        "triggered": true,
+        "score": 0.90,
+        "weight": 0.40,
+        "score_contribution": 0.3000
+      }
+    ],
+    "risk_level": "high",
+    "decision": "challenge"
+  },
+  "detection_logs": [
     {
-      "rule_id": "R001",
-      "rule_name": "Unusual Hour Login",
+      "stage": "rule_evaluation",
+      "rule_name": "unusual_hour",
       "triggered": true,
-      "condition": "hour_of_day >= 23",
-      "actual_value": "3",
-      "score_contribution": 0.24
+      "score_contribution": 0.2000,
+      "reason": "Login outside 07:00-22:59 local time"
+    },
+    {
+      "stage": "ml_call",
+      "stage_detail": "ml_inference",
+      "reason": null
+    },
+    {
+      "stage": "scoring",
+      "stage_detail": "final_decision",
+      "decision": "challenge",
+      "reason": "rule=0.7583, ml=0.72, combined=0.7353, level=high, action=REQUIRE_MFA"
     }
   ],
-  "ml_evidence": {
-    "model_version": "v1.0-isolation-forest",
-    "normalized_score": 0.72,
-    "reason_codes": ["unusual_time", "new_device"],
-    "features": {...}
-  }
+  "timeline": []
 }
 ```
+
+> **SOC có thể tự kiểm chứng:** cộng các `rule_hits[].score_contribution` sẽ ra
+> đúng `rule_score` (0.2000 + 0.3000 + các rule khác = 0.7583). Nhờ định nghĩa
+> `score_contribution = (score × weight) / Σ weight` trong
+> `docs/DECISIONS-DETECTION-v3.3.md` mục 4.5.
 
 ---
 
@@ -602,32 +742,81 @@ Risk_Score = 0.4 × Rule_Score + 0.6 × ML_Score
 ```
 
 #### Policy Structure
+
+`POST /api/v1/policies` — body của request:
+
 ```json
 {
   "version": "v1.0",
   "name": "Default Detection Policy",
+  "description": "Default policy for v1.0 with basic rules",
   "rules": [
     {
-      "id": "R001",
-      "name": "Unusual Hour",
-      "condition": "hour_of_day >= 23 OR hour_of_day <= 5",
-      "weight": 0.3,
-      "score": 0.8
+      "name": "unusual_hour",
+      "field": "hour_of_day",
+      "operator": "not_between",
+      "value": [7, 22],
+      "weight": 0.30,
+      "score": 0.80,
+      "enabled": true,
+      "description": "Login outside 07:00-22:59 local time"
+    },
+    {
+      "name": "multiple_failures",
+      "field": "fail_count_24h",
+      "operator": ">=",
+      "value": 3,
+      "weight": 0.40,
+      "score": 0.90,
+      "enabled": true,
+      "description": "3 or more failed attempts in the last 24h"
+    },
+    {
+      "name": "new_device",
+      "field": "new_device",
+      "operator": "==",
+      "value": true,
+      "weight": 0.20,
+      "score": 0.50,
+      "enabled": true,
+      "description": "Login from a device not seen before"
+    },
+    {
+      "name": "high_deviation",
+      "field": "deviation_score",
+      "operator": ">=",
+      "value": 0.70,
+      "weight": 0.30,
+      "score": 0.70,
+      "enabled": true,
+      "description": "Behaviour deviates strongly from the user baseline"
     }
   ],
   "config": {
-    "weights": {
-      "rule": 0.4,
-      "ml": 0.6
-    },
-    "thresholds": {
-      "low": 0.25,
-      "medium": 0.50,
-      "high": 0.75
-    }
+    "weights": { "rule": 0.4, "ml": 0.6 },
+    "thresholds": { "low": 0.25, "medium": 0.50, "high": 0.75 }
   }
 }
 ```
+
+**Ràng buộc khi tạo policy:**
+
+| Đối tượng | Ràng buộc | Mã lỗi |
+|-----------|-----------|---------|
+| `version` | Khớp `^v\d+(\.\d+)*$`, duy nhất | 409 Conflict |
+| `rules[].name` | Duy nhất trong policy | 422 |
+| `rules[].field` | 1 trong 6 đặc trưng | 422 |
+| `rules[].operator` | 1 trong 9 phép so sánh | 422 |
+| `rules[].value` | Đúng kiểu theo `operator` | 422 |
+| `rules[].weight`, `score` | `0 ≤ x ≤ 1` | 422 |
+| `config.weights` | `rule + ml = 1.0` | 422 |
+| `config.thresholds` | `low ≤ medium ≤ high`, trong `[0, 1]` | 422 |
+
+**Khi kích hoạt** (`POST /api/v1/policies/{id}/activate`):
+- Validate lại toàn bộ rules + config
+- Nếu có vấn đề → HTTP 400 với danh sách `problems`
+- Nếu hợp lệ → deactivate policy đang active, activate policy mới
+- Trả `{"status": "activated", "version": "v1.0"}`
 
 ---
 

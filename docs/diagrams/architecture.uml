@@ -75,15 +75,13 @@ legend right
 | WF-4: MFA (chi tiết các loại) |
 | WF-5: Session (core-app) |
 | WF-6: ML Inference (ml-service) |
-endlegend
-
-note bottom of diagram
+legend bottom
   **v3.3 Tech Stack:**
   - FastAPI + PostgreSQL (3 schemas)
   - 3 separate databases (core + detection + ml-service)
   - HTTP communication between services
   - Outbox pattern for reliability
   - ML Service: stateless, model in memory
-end note
+endlegend
 
 @enduml

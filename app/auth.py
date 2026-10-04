@@ -1,7 +1,8 @@
 """
 Authentication endpoints - login, MFA, session management.
-Sync with schema-v2.sql definitions.
+Mirrors infra/postgres/schema-core-v3.3.sql.
 """
+import logging
 from datetime import datetime, timedelta
 from typing import Optional
 from uuid import uuid4
@@ -14,7 +15,17 @@ from argon2 import PasswordHasher
 from argon2.exceptions import VerifyMismatchError, InvalidHash
 
 from app.db import get_db
-from app.models import User, Session, PreAuthTransaction, MfaNotification, LoginAttempt, RiskAssessment, Role
+from app.models import (
+    IpAddress,
+    LoginAttempt,
+    MfaNotification,
+    MfaTransaction,
+    RateLimit,
+    RiskAssessment,
+    Role,
+    Session,
+    User,
+)
 from app.schemas import (
     UserRegisterRequest, UserRegisterResponse,
     LoginRequest, LoginResponse,
@@ -22,6 +33,8 @@ from app.schemas import (
     RefreshRequest, RefreshResponse,
     LogoutResponse, SessionItem, SessionList,
 )
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/v1/auth", tags=["auth"])
 ph = PasswordHasher()
@@ -47,11 +60,37 @@ def hash_ip(ip: str) -> str:
 
 
 def get_client_ip(request: Request) -> str:
-    """Extract client IP from request."""
+    """Extract client IP from request.
+
+    Never read the client IP from the request body - it would be spoofable.
+    """
     forwarded = request.headers.get("X-Forwarded-For")
     if forwarded:
         return forwarded.split(",")[0].strip()
     return request.client.host if request.client else "unknown"
+
+
+def resolve_ip_address(db, client_ip: str) -> Optional[str]:
+    """Return the ``ip_addresses.id`` for ``client_ip``, creating it on first sight.
+
+    The SQL normalises IPs into ``ip_addresses`` and ``sessions`` only stores
+    the FK, so every session insert must go through here. Returns ``None``
+    for unknown/unusable values so the session is still created.
+    """
+    if not client_ip or client_ip == "unknown":
+        return None
+    try:
+        row = db.query(IpAddress).filter(IpAddress.ip_address == client_ip).first()
+    except Exception:  # noqa: BLE001 - IP tracking must not block login
+        logger.warning("could not resolve ip_addresses row for %s", client_ip, exc_info=True)
+        return None
+    if row is None:
+        row = IpAddress(ip_address=client_ip)
+        db.add(row)
+        db.flush()
+    else:
+        row.last_seen_at = datetime.utcnow()
+    return row.id
 
 
 # =============================================================================
@@ -130,10 +169,8 @@ async def register(request: UserRegisterRequest, db=Depends(get_db)) -> UserRegi
     db.flush()
 
     # Assign role 'USER'
-    user_role = Role(id="USER", name="Người dùng")
-    # Note: 'USER' role should already exist from seed data
-    # If not, we need to handle it
-
+    # The 'USER' role is seeded by infra/postgres/schema-core-v3.3.sql;
+    # insert it here so registration still works against an empty database.
     from app.models import UserRole
     ur = UserRole(
         user_id=user.id,
@@ -165,7 +202,7 @@ async def login(
     1. Rate limit check (5 requests/minute/IP)
     2. Verify credentials
     3. Check account status
-    4. Inline detection (rule + ML scoring) - called from detection module
+    4. Record login event (detection is async: outbox -> Detection Engine)
     5. MFA check (persistent or one-time)
     6. Create session + JWT tokens
     """
@@ -185,12 +222,12 @@ async def login(
     if rate and rate.count >= rate.max_count:
         # Record rate-limited login attempt
         la = LoginAttempt(
+            event_id=uuid4(),
             request_id=request_id,
             username_attempted=request.username,
-            occurred_at=now,
+            timestamp=now,
             outcome="rate_limited",
-            source_ip=client_ip,
-            rate_limited=True,
+            ip_address=client_ip,
         )
         db.add(la)
         db.commit()
@@ -215,11 +252,12 @@ async def login(
     if not user:
         # Generic error - don't reveal account existence
         la = LoginAttempt(
+            event_id=uuid4(),
             request_id=request_id,
             username_attempted=request.username,
-            occurred_at=now,
+            timestamp=now,
             outcome="failure",
-            source_ip=client_ip,
+            ip_address=client_ip,
             user_agent=req.headers.get("User-Agent"),
         )
         db.add(la)
@@ -232,12 +270,13 @@ async def login(
         # Wrong password
         user.failed_login_count += 1
         la = LoginAttempt(
+            event_id=uuid4(),
             request_id=request_id,
             user_id=user.id,
             username_attempted=request.username,
-            occurred_at=now,
+            timestamp=now,
             outcome="failure",
-            source_ip=client_ip,
+            ip_address=client_ip,
             user_agent=req.headers.get("User-Agent"),
         )
         db.add(la)
@@ -247,12 +286,13 @@ async def login(
     # 3. Check account status
     if user.status == "locked":
         la = LoginAttempt(
+            event_id=uuid4(),
             request_id=request_id,
             user_id=user.id,
             username_attempted=request.username,
-            occurred_at=now,
+            timestamp=now,
             outcome="locked",
-            source_ip=client_ip,
+            ip_address=client_ip,
             user_agent=req.headers.get("User-Agent"),
         )
         db.add(la)
@@ -270,14 +310,14 @@ async def login(
         mfa_type = "persistent" if user.admin_mfa_required else "one_time"
         expires_at = now + timedelta(minutes=5)
 
-        pre_auth = PreAuthTransaction(
+        mfa_txn = MfaTransaction(
             user_id=user.id,
             mfa_type=mfa_type,
             expires_at=expires_at,
             status="pending",
             bound_ip=hash_ip(client_ip),
         )
-        db.add(pre_auth)
+        db.add(mfa_txn)
         db.flush()
 
         # Generate OTP
@@ -286,7 +326,7 @@ async def login(
 
         # Create MFA notification
         notification = MfaNotification(
-            pre_auth_transaction_id=pre_auth.id,
+            mfa_transaction_id=mfa_txn.id,
             channel="email",
             recipient=user.email or "",
             mfa_code_hash=otp_hash,
@@ -295,17 +335,18 @@ async def login(
         db.add(notification)
         db.flush()
 
-        # Link notification to pre_auth
-        pre_auth.notification_id = notification.id
+        # Link notification to mfa_txn
+        mfa_txn.notification_id = notification.id
 
         # TODO: Send email OTP via Mailpit (smtp localhost:1025)
 
         la = LoginAttempt(
+            event_id=uuid4(),
             request_id=request_id,
             user_id=user.id,
-            occurred_at=now,
+            timestamp=now,
             outcome="mfa_required",
-            source_ip=client_ip,
+            ip_address=client_ip,
             user_agent=req.headers.get("User-Agent"),
             mfa_used=True,
         )
@@ -318,7 +359,7 @@ async def login(
             access_token="",
             refresh_token="",
             mfa_required=True,
-            session_id=pre_auth.id,
+            session_id=mfa_txn.id,
         )
 
     # 5. No MFA - create session directly
@@ -345,7 +386,7 @@ async def _create_session(
         token_jti=jti,
         expires_at=datetime.utcnow() + timedelta(hours=1),
         last_activity_at=datetime.utcnow(),
-        ip_address=client_ip,
+        ip_address_id=resolve_ip_address(db, client_ip),
         user_agent=user_agent,
     )
     db.add(session)
@@ -356,11 +397,12 @@ async def _create_session(
     # Record successful login
     request_id = uuid4()
     la = LoginAttempt(
+        event_id=uuid4(),
         request_id=request_id,
         user_id=user.id,
-        occurred_at=datetime.utcnow(),
+        timestamp=now,
         outcome="success",
-        source_ip=client_ip,
+        ip_address=client_ip,
         user_agent=user_agent,
     )
     db.add(la)
@@ -383,8 +425,8 @@ async def mfa_verify(
     """
     Verify MFA code for a pre-auth transaction.
 
-    - Validates pre_auth transaction exists and is pending
-    - Checks ownership (session_id is pre_auth.id)
+    - Validates mfa_txn transaction exists and is pending
+    - Checks ownership (session_id is mfa_txn.id)
     - Verifies OTP against stored hash
     - Marks MFA as used (one-time: clears detection_mfa_once flag)
     - Creates session + tokens
@@ -393,23 +435,23 @@ async def mfa_verify(
     now = datetime.utcnow()
 
     # Find pre-auth transaction
-    pre_auth = db.query(PreAuthTransaction).filter(
-        PreAuthTransaction.id == request.session_id,
-        PreAuthTransaction.status == "pending",
-        PreAuthTransaction.expires_at > now,
+    mfa_txn = db.query(MfaTransaction).filter(
+        MfaTransaction.id == request.session_id,
+        MfaTransaction.status == "pending",
+        MfaTransaction.expires_at > now,
     ).first()
 
-    if not pre_auth:
+    if not mfa_txn:
         raise HTTPException(status_code=404, detail="Session not found or expired")
 
     # Find user
-    user = db.query(User).filter(User.id == pre_auth.user_id).first()
+    user = db.query(User).filter(User.id == mfa_txn.user_id).first()
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
 
     # Find MFA notification
     notification = db.query(MfaNotification).filter(
-        MfaNotification.id == pre_auth.notification_id,
+        MfaNotification.id == mfa_txn.notification_id,
     ).first()
 
     if not notification:
@@ -423,18 +465,19 @@ async def mfa_verify(
         ph.verify(notification.mfa_code_hash, request.mfa_code)
     except (VerifyMismatchError, InvalidHash):
         # Wrong OTP
-        pre_auth.fail_count += 1
-        if pre_auth.fail_count >= 3:
-            pre_auth.status = "failed"
+        mfa_txn.fail_count += 1
+        if mfa_txn.fail_count >= 3:
+            mfa_txn.status = "failed"
         db.commit()
 
         # Record failed MFA
         la = LoginAttempt(
+            event_id=uuid4(),
             request_id=uuid4(),
             user_id=user.id,
-            occurred_at=now,
+            timestamp=now,
             outcome="mfa_failed",
-            source_ip=client_ip,
+            ip_address=client_ip,
             user_agent=req.headers.get("User-Agent"),
             mfa_used=True,
         )
@@ -444,11 +487,11 @@ async def mfa_verify(
         raise HTTPException(status_code=401, detail="Invalid MFA code")
 
     # OTP verified successfully
-    pre_auth.status = "completed"
+    mfa_txn.status = "completed"
     notification.verified_at = now
 
     # Clear one-time MFA flag
-    if pre_auth.mfa_type == "one_time":
+    if mfa_txn.mfa_type == "one_time":
         user.detection_mfa_once = False
 
     # Create session
@@ -456,11 +499,12 @@ async def mfa_verify(
 
     # Record successful MFA login
     la = LoginAttempt(
+        event_id=uuid4(),
         request_id=uuid4(),
         user_id=user.id,
-        occurred_at=now,
+        timestamp=now,
         outcome="mfa_success",
-        source_ip=client_ip,
+        ip_address=client_ip,
         user_agent=req.headers.get("User-Agent"),
         mfa_used=True,
     )
@@ -586,7 +630,9 @@ async def list_sessions(
     session_items = [
         SessionItem(
             id=s.id,
-            ip_address=str(s.ip_address) if s.ip_address else None,
+            ip_address=(
+                str(s.ip_address.ip_address) if s.ip_address and s.ip_address.ip_address else None
+            ),
             user_agent=s.user_agent,
             expires_at=s.expires_at,
             last_activity_at=s.last_activity_at,

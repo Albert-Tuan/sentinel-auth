@@ -1,16 +1,18 @@
 """
-SOC Alert Management - Alert CRUD & Timeline.
-Implements:
-- Alert CRUD operations
-- Alert Timeline (audit trail)
-- SOC investigation workflow
+SOC Alert Management - Alert CRUD, evidence and timeline.
 
-Per Bảng Yêu Cầu Chức Năng Nghiệp Vụ v2:
-- UC-08: Xem bằng chứng Rule/ML/Risk
-- UC-09: Tiếp nhận và điều tra Alert
-- UC-10: Phân loại kết quả điều tra
-- UC-11: Yêu cầu hành động bảo vệ
-- UC-12: Đóng hồ sơ Incident
+Schema v3.3. Canonical decisions: docs/DECISIONS-DETECTION-v3.3.md
+
+Implements the SOC side of Detection Engine:
+- UC-DE-09: Xem bằng chứng Rule/ML/Risk
+- UC-DE-10: Tiếp nhận và điều tra Alert
+- UC-DE-11: Phân loại kết quả điều tra
+- UC-DE-12: Yêu cầu hành động bảo vệ
+- UC-DE-13: Đóng hồ sơ Incident
+- DE-15: Dòng thời gian cảnh báo
+
+All endpoints live under /api/v1/alerts and are authenticated with a
+JWT issued by core-app (SOC_ANALYST / SECURITY_MANAGER roles).
 """
 from datetime import datetime
 from typing import Optional, List
@@ -25,6 +27,7 @@ from app.models import (
     Alert, AlertTimeline, LoginAttempt, RiskAssessment,
     User, Session, DetectionLog
 )
+from app.schemas import SecurityAction
 
 router = APIRouter(prefix="/api/v1", tags=["soc"])
 
@@ -56,6 +59,7 @@ class TimelineEventType(str, Enum):
     NOTE_ADDED = "note_added"
     STATUS_CHANGED = "status_changed"
     RESOLVED = "resolved"
+    FALSE_POSITIVE = "false_positive"
 
 
 # =============================================================================
@@ -64,26 +68,32 @@ class TimelineEventType(str, Enum):
 
 class LoginAttemptSummary(BaseModel):
     id: str
-    occurred_at: datetime
+    event_id: str
+    timestamp: datetime
     outcome: str
-    source_ip: Optional[str] = None
+    username_attempted: Optional[str] = None
+    ip_address: Optional[str] = None
     user_agent: Optional[str] = None
     user_id: Optional[str] = None
-    username: Optional[str] = None
+    mfa_used: bool = False
+    risk_level: Optional[str] = None
+    detection_decision: Optional[str] = None
 
     class Config:
         from_attributes = True
 
 
 class RiskAssessmentSummary(BaseModel):
+    """DECISIONS section 4.1 - ml_score is the only ML score column."""
+
     rule_score: Optional[float] = None
-    anomaly_score: Optional[float] = None
     ml_score: Optional[float] = None
+    combined_score: Optional[float] = None
     ml_status: Optional[str] = None
     ml_model_version: Optional[str] = None
+    ml_reason_codes: Optional[list] = None
     ml_features_used: Optional[dict] = None
-    rule_hits: Optional[dict] = None
-    combined_score: Optional[float] = None
+    rule_hits: Optional[list] = None
     risk_level: Optional[str] = None
     decision: Optional[str] = None
 
@@ -92,10 +102,14 @@ class RiskAssessmentSummary(BaseModel):
 
 
 class DetectionLogSummary(BaseModel):
+    """DECISIONS section 4.3 - 4 stages, score_contribution replaces score."""
+
     id: str
     stage: str
     stage_detail: Optional[str] = None
-    score: Optional[float] = None
+    rule_name: Optional[str] = None
+    triggered: Optional[bool] = None
+    score_contribution: Optional[float] = None
     decision: Optional[str] = None
     reason: Optional[str] = None
     details: Optional[dict] = None
@@ -117,13 +131,15 @@ class AlertEvidence(BaseModel):
 class AlertItem(BaseModel):
     id: str
     login_attempt_id: str
+    policy_id: Optional[str] = None
     status: AlertStatusEnum
     risk_level: Optional[RiskLevelEnum] = None
     detection_reason: Optional[str] = None
     detection_scores: Optional[dict] = None
-    assigned_to: Optional[str] = None
-    resolved_by: Optional[str] = None
+    assigned_to_id: Optional[str] = None
+    resolved_by_id: Optional[str] = None
     resolved_at: Optional[datetime] = None
+    resolution: Optional[str] = None
     notes: Optional[str] = None
     created_at: datetime
     updated_at: datetime
@@ -142,7 +158,7 @@ class AlertListResponse(BaseModel):
 class AlertFilter(BaseModel):
     status: Optional[AlertStatusEnum] = None
     risk_level: Optional[RiskLevelEnum] = None
-    assigned_to: Optional[str] = None
+    assigned_to_id: Optional[str] = None
     from_date: Optional[datetime] = None
     to_date: Optional[datetime] = None
 
@@ -151,7 +167,8 @@ class TimelineEvent(BaseModel):
     id: str
     alert_id: str
     event_type: TimelineEventType
-    actor: str
+    actor_id: Optional[str] = None
+    actor_type: str = "user"
     old_value: Optional[str] = None
     new_value: Optional[str] = None
     comment: Optional[str] = None
@@ -172,26 +189,25 @@ class AlertAcknowledgeRequest(BaseModel):
 
 
 class AlertResolveRequest(BaseModel):
-    status: AlertStatusEnum = Field(
+    resolution: str = Field(
         ...,
-        description="Must be 'resolved' or 'false_positive'"
+        description=(
+            "Investigation outcome: true_attack | false_positive | "
+            "benign_true_positive | insufficient_evidence"
+        ),
     )
     notes: Optional[str] = None
-    resolution_notes: Optional[str] = None
 
 
 class AlertAssignRequest(BaseModel):
-    assigned_to: str
+    assigned_to_id: str
     notes: Optional[str] = None
 
 
 class AlertActionRequest(BaseModel):
-    """Request security action from SOC (UC-11)."""
-    action: str = Field(
-        ...,
-        description="REQUIRE_MFA | REVOKE_SESSIONS | LOCK_USER"
-    )
-    reason: str
+    """Request a protective action from SOC (UC-DE-12)."""
+    action: SecurityAction
+    reason: str = Field(..., min_length=1)
 
 
 class AlertActionResponse(BaseModel):
@@ -211,9 +227,32 @@ def verify_internal_token(x_internal_token: Optional[str]) -> bool:
     return x_internal_token == "changeme-in-production"
 
 
-def get_client_ip(actor: str, request=None) -> Optional[str]:
-    """Get client IP for audit."""
-    # In real implementation, extract from request
+def get_client_ip(request=None) -> Optional[str]:
+    """Extract the client IP for the audit trail."""
+    if request is None:
+        return None
+    forwarded = request.headers.get("x-forwarded-for") if hasattr(request, "headers") else None
+    if forwarded:
+        return forwarded.split(",")[0].strip()
+    client = getattr(request, "client", None)
+    return getattr(client, "host", None)
+
+
+def get_actor_id(request) -> Optional[str]:
+    """Resolve the acting user id for the timeline entry.
+
+    The SOC endpoints are authenticated by a core-app JWT. Until that
+    dependency is wired in, the analyst id may be supplied explicitly on
+    the request body; otherwise the entry records a NULL actor_id with
+    actor_type "user".
+    """
+    for field in ("actor_id", "analyst_id", "soc_analyst_id"):
+        value = getattr(request, field, None)
+        if value:
+            return str(value)
+    user = getattr(request, "user", None)
+    if user is not None:
+        return str(getattr(user, "id", user))
     return None
 
 
@@ -221,17 +260,19 @@ def create_timeline_event(
     db,
     alert_id: str,
     event_type: TimelineEventType,
-    actor: str,
+    actor_id: Optional[str] = None,
+    actor_type: str = "user",
     old_value: Optional[str] = None,
     new_value: Optional[str] = None,
     comment: Optional[str] = None,
     ip_address: Optional[str] = None
 ) -> AlertTimeline:
-    """Create a timeline event for alert."""
+    """Append an immutable entry to the alert timeline (DE-15)."""
     event = AlertTimeline(
         alert_id=alert_id,
         event_type=event_type.value,
-        actor=actor,
+        actor_id=actor_id,
+        actor_type=actor_type,
         old_value=old_value,
         new_value=new_value,
         comment=comment,
@@ -249,7 +290,7 @@ def create_timeline_event(
 async def list_alerts(
     status: Optional[AlertStatusEnum] = Query(None),
     risk_level: Optional[RiskLevelEnum] = Query(None),
-    assigned_to: Optional[str] = Query(None),
+    assigned_to_id: Optional[str] = Query(None),
     page: int = Query(1, ge=1),
     limit: int = Query(20, ge=1, le=100),
     x_internal_token: Optional[str] = Header(None),
@@ -267,8 +308,8 @@ async def list_alerts(
         query = query.filter(Alert.status == status.value)
     if risk_level:
         query = query.filter(Alert.risk_level == risk_level.value)
-    if assigned_to:
-        query = query.filter(Alert.assigned_to == assigned_to)
+    if assigned_to_id:
+        query = query.filter(Alert.assigned_to_id == assigned_to_id)
 
     # Order by created_at desc
     query = query.order_by(Alert.created_at.desc())
@@ -355,26 +396,32 @@ async def get_alert_evidence(
         user = db.query(User).filter(User.id == login_attempt.user_id).first() if login_attempt.user_id else None
         login_summary = LoginAttemptSummary(
             id=str(login_attempt.id),
-            occurred_at=login_attempt.occurred_at,
+            event_id=str(login_attempt.event_id),
+            timestamp=login_attempt.timestamp,
             outcome=login_attempt.outcome,
-            source_ip=str(login_attempt.source_ip) if login_attempt.source_ip else None,
+            username_attempted=(
+                login_attempt.username_attempted or (user.username if user else None)
+            ),
+            ip_address=str(login_attempt.ip_address) if login_attempt.ip_address else None,
             user_agent=login_attempt.user_agent,
             user_id=str(login_attempt.user_id) if login_attempt.user_id else None,
-            username=user.username if user else None,
+            mfa_used=login_attempt.mfa_used,
+            risk_level=login_attempt.risk_level,
+            detection_decision=login_attempt.detection_decision,
         )
 
     # Build risk assessment summary
     risk_summary = None
     if risk_assessment:
         risk_summary = RiskAssessmentSummary(
-            rule_score=float(risk_assessment.rule_score) if risk_assessment.rule_score else None,
-            anomaly_score=float(risk_assessment.anomaly_score) if risk_assessment.anomaly_score else None,
-            ml_score=float(risk_assessment.ml_score) if risk_assessment.ml_score else None,
+            rule_score=float(risk_assessment.rule_score) if risk_assessment.rule_score is not None else None,
+            ml_score=float(risk_assessment.ml_score) if risk_assessment.ml_score is not None else None,
+            combined_score=float(risk_assessment.combined_score) if risk_assessment.combined_score is not None else None,
             ml_status=risk_assessment.ml_status,
             ml_model_version=risk_assessment.ml_model_version,
+            ml_reason_codes=risk_assessment.ml_reason_codes,
             ml_features_used=risk_assessment.ml_features_used,
             rule_hits=risk_assessment.rule_hits,
-            combined_score=float(risk_assessment.combined_score) if risk_assessment.combined_score else None,
             risk_level=risk_assessment.risk_level,
             decision=risk_assessment.decision,
         )
@@ -430,7 +477,8 @@ async def acknowledge_alert(
         db=db,
         alert_id=alert_id,
         event_type=TimelineEventType.ACKNOWLEDGED,
-        actor="soc_analyst",  # In real impl, extract from token
+        actor_id=get_actor_id(request),
+        actor_type="user",
         old_value=old_status,
         new_value=AlertStatusEnum.ACKNOWLEDGED.value,
         comment=request.notes,
@@ -458,11 +506,11 @@ async def resolve_alert(
     if not alert:
         raise HTTPException(status_code=404, detail="Alert not found")
 
-    if request.status not in [AlertStatusEnum.RESOLVED, AlertStatusEnum.FALSE_POSITIVE]:
-        raise HTTPException(
-            status_code=400,
-            detail="Status must be 'resolved' or 'false_positive'"
-        )
+    # "resolution" records the investigation outcome; "status" is derived
+    if request.resolution == "false_positive":
+        new_status = AlertStatusEnum.FALSE_POSITIVE.value
+    else:
+        new_status = AlertStatusEnum.RESOLVED.value
 
     # Validate state transition
     valid_from = [AlertStatusEnum.OPEN.value, AlertStatusEnum.ACKNOWLEDGED.value]
@@ -474,35 +522,42 @@ async def resolve_alert(
 
     # Update alert
     old_status = alert.status
-    alert.status = request.status.value
-    alert.resolved_by = "soc_analyst"  # In real impl, extract from token
+    alert.status = new_status
+    alert.resolution = request.resolution
+    alert.resolved_by_id = get_actor_id(request)
     alert.resolved_at = datetime.utcnow()
 
-    if request.resolution_notes:
+    if request.notes:
         if alert.notes:
-            alert.notes += f"\n---\nResolution: {request.resolution_notes}"
+            alert.notes += f"\n---\nResolution: {request.notes}"
         else:
-            alert.notes = f"Resolution: {request.resolution_notes}"
+            alert.notes = f"Resolution: {request.notes}"
 
     # Create timeline events
     create_timeline_event(
         db=db,
         alert_id=alert_id,
         event_type=TimelineEventType.STATUS_CHANGED,
-        actor="soc_analyst",
+        actor_id=get_actor_id(request),
+        actor_type="user",
         old_value=old_status,
-        new_value=request.status.value,
+        new_value=new_status,
         comment=request.notes,
     )
 
     create_timeline_event(
         db=db,
         alert_id=alert_id,
-        event_type=TimelineEventType.RESOLVED,
-        actor="soc_analyst",
+        event_type=(
+            TimelineEventType.FALSE_POSITIVE
+            if new_status == AlertStatusEnum.FALSE_POSITIVE.value
+            else TimelineEventType.RESOLVED
+        ),
+        actor_id=get_actor_id(request),
+        actor_type="user",
         old_value=None,
-        new_value=request.status.value,
-        comment=request.resolution_notes,
+        new_value=request.resolution,
+        comment=request.notes,
     )
 
     db.commit()
@@ -524,8 +579,8 @@ async def assign_alert(
     if not alert:
         raise HTTPException(status_code=404, detail="Alert not found")
 
-    old_assignee = alert.assigned_to
-    alert.assigned_to = request.assigned_to
+    old_assignee = alert.assigned_to_id
+    alert.assigned_to_id = request.assigned_to_id
 
     # Create timeline event
     event_type = TimelineEventType.ASSIGNED if old_assignee is None else TimelineEventType.STATUS_CHANGED
@@ -533,9 +588,10 @@ async def assign_alert(
         db=db,
         alert_id=alert_id,
         event_type=event_type,
-        actor="soc_analyst",
+        actor_id=get_actor_id(request),
+        actor_type="user",
         old_value=old_assignee,
-        new_value=request.assigned_to,
+        new_value=request.assigned_to_id,
         comment=request.notes,
     )
 
@@ -573,15 +629,15 @@ async def request_security_action(
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
 
-    action = request.action.upper()
+    action = request.action
     details = {}
 
-    if action == "REQUIRE_MFA":
+    if action == SecurityAction.REQUIRE_MFA:
         user.admin_mfa_required = True
         user.detection_mfa_once = True
         details = {"mfa_enabled": True, "reason": request.reason}
 
-    elif action == "REVOKE_SESSIONS":
+    elif action == SecurityAction.REVOKE_SESSIONS:
         from app.models import Session
         revoked = db.query(Session).filter(
             Session.user_id == user.id,
@@ -592,7 +648,7 @@ async def request_security_action(
             session.revoked_at = datetime.utcnow()
         details = {"revoked_count": count, "reason": request.reason}
 
-    elif action == "LOCK_USER":
+    elif action == SecurityAction.LOCK_USER:
         user.status = "locked"
         user.locked_at = datetime.utcnow()
         # Also revoke sessions
@@ -606,22 +662,26 @@ async def request_security_action(
         details = {"status": "locked", "sessions_revoked": len(revoked), "reason": request.reason}
 
     else:
-        raise HTTPException(status_code=400, detail=f"Unsupported action: {action}")
+        raise HTTPException(
+            status_code=400, detail=f"Unsupported action: {action.value}"
+        )
 
     # Create timeline event
     create_timeline_event(
         db=db,
         alert_id=alert_id,
         event_type=TimelineEventType.NOTE_ADDED,
-        actor="soc_analyst",
-        comment=f"Security action requested: {action}. Reason: {request.reason}",
+        actor_id=get_actor_id(request),
+        actor_type="user",
+        new_value=action.value,
+        comment=f"Security action applied: {action.value}. Reason: {request.reason}",
     )
 
     db.commit()
 
     return AlertActionResponse(
         status="applied",
-        action=action,
+        action=action.value,
         details=details,
     )
 
@@ -669,7 +729,8 @@ async def add_timeline_event(
         db=db,
         alert_id=alert_id,
         event_type=request.event_type,
-        actor="soc_analyst",  # In real impl, extract from token
+        actor_id=get_actor_id(request),
+        actor_type="user",
         comment=request.comment,
     )
 

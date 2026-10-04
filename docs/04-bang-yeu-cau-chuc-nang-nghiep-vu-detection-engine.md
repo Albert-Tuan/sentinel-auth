@@ -140,6 +140,10 @@ Tài liệu này mô tả các yêu cầu chức năng nghiệp vụ của **Det
 | **Ưu tiên** | Bắt buộc |
 | **Timeout** | 5 giây |
 
+**Endpoint:** `POST /api/v1/internal/ml/score`
+**Header:** `X-Internal-Secret: <shared_secret>`
+**Timeout:** 5 giây
+
 **Request:**
 ```json
 {
@@ -154,6 +158,10 @@ Tài liệu này mô tả các yêu cầu chức năng nghiệp vụ của **Det
   }
 }
 ```
+
+> `normalized_anomaly_score` trong response được lưu vào cột `ml_score` của
+> bảng `risk_assessments`. Tên `anomaly_score` **không** tồn tại trong database —
+> xem `docs/DECISIONS-DETECTION-v3.3.md` mục 4.1.
 
 **Response:**
 ```json
@@ -179,11 +187,24 @@ Tài liệu này mô tả các yêu cầu chức năng nghiệp vụ của **Det
 | **Đối tượng** | Hệ thống |
 | **Ưu tiên** | Bắt buộc |
 
-**Fallback behavior:**
-1. ML timeout → sử dụng rule_score với weight cao hơn
-2. ML error → log error, proceed với rule-only scoring
-3. ML degraded → warn nhưng vẫn sử dụng
-4. Notification đến monitoring system
+**Fallback behavior** (`ml_status` lưu trong `risk_assessments`):
+
+| Tình huống | `ml_status` | `ml_score` | `combined_score` |
+|-----------|-------------|-----------|------------------|
+| ML trả kết quả bình thường | `success` | giá trị 0–1 | `w_rule × rule + w_ml × ml` |
+| ML timeout (> 5 giây) | `unavailable` | `NULL` | `rule_score` |
+| ML trả lỗi 4xx/5xx | `error` | `NULL` | `rule_score` |
+| ML trả payload không hợp lệ | `error` | `NULL` | `rule_score` |
+
+Quy tắc xử lý:
+1. **Không** chia lại trọng số — `combined_score = rule_score` nguyên vẹn
+2. Ghi cảnh báo vào `detection_logs` với `stage = 'ml_call'`
+3. Tiếp tục xử lý, **không** trả lỗi cho Core App
+4. Ghi notification đến monitoring system
+
+> **Vì sao không chia lại trọng số?** Nếu chia lại (`combined = rule_score`), tổng điểm
+> sẽ bằng `0.7583` — **cao hơn** so với khi có ML (`0.7353`). Đây là hành vi **có chủ
+> đích**: không có tín hiệu ML thì hệ thống thận trọng hơn, chứ không phải lạc quan hơn.
 
 ---
 
@@ -199,39 +220,104 @@ Tài liệu này mô tả các yêu cầu chức năng nghiệp vụ của **Det
 | **Đối tượng** | Hệ thống |
 | **Ưu tiên** | Bắt buộc |
 
-**Rule structure (trong policies):**
+**Cấu trúc quy tắc (trong `policies.rules` — JSONB):**
+
+Mỗi quy tắc có **7 trường bắt buộc**. Nguồn sự thật:
+`docs/DECISIONS-DETECTION-v3.3.md` mục 1.
+
 ```json
 {
   "rules": [
     {
-      "id": "R001",
-      "name": "Unusual Hour Login",
-      "condition": "hour_of_day >= 23 OR hour_of_day <= 5",
-      "weight": 0.3,
-      "score": 0.8
+      "name": "unusual_hour",
+      "field": "hour_of_day",
+      "operator": "not_between",
+      "value": [7, 22],
+      "weight": 0.30,
+      "score": 0.80,
+      "enabled": true,
+      "description": "Login outside 07:00-22:59 local time"
     },
     {
-      "id": "R002", 
-      "name": "Multiple Failures",
-      "condition": "fail_count_24h >= 3",
-      "weight": 0.4,
-      "score": 0.9
+      "name": "multiple_failures",
+      "field": "fail_count_24h",
+      "operator": ">=",
+      "value": 3,
+      "weight": 0.40,
+      "score": 0.90,
+      "enabled": true,
+      "description": "3 or more failed attempts in the last 24h"
     },
     {
-      "id": "R003",
-      "name": "New Device",
-      "condition": "new_device == true",
-      "weight": 0.2,
-      "score": 0.5
+      "name": "new_device",
+      "field": "new_device",
+      "operator": "==",
+      "value": true,
+      "weight": 0.20,
+      "score": 0.50,
+      "enabled": true,
+      "description": "Login from a device not seen before"
+    },
+    {
+      "name": "high_deviation",
+      "field": "deviation_score",
+      "operator": ">=",
+      "value": 0.70,
+      "weight": 0.30,
+      "score": 0.70,
+      "enabled": true,
+      "description": "Behaviour deviates strongly from the user baseline"
     }
   ]
 }
 ```
 
-**Rule Score Calculation:**
+| Trường | Bắt buộc | Ràng buộc | Ý nghĩa |
+|--------|----------|-----------|---------|
+| `name` | ✓ | duy nhất trong policy | Tên quy tắc hiển thị cho SOC |
+| `field` | ✓ | 1 trong 6 đặc trưng | **Tên đặc trưng** được đối chiếu |
+| `operator` | ✓ | xem bảng dưới | Phép so sánh |
+| `value` | ✓ | phù hợp với `operator` | Giá trị so sánh |
+| `weight` | ✓ | `0 ≤ w ≤ 1` | **Độ tin cậy** của quy tắc |
+| `score` | ✓ | `0 ≤ s ≤ 1` | **Mức nghiêm trọng** khi rule chạy |
+| `enabled` | ✓ | — | Có dùng quy tắc này không |
+| `description` | ❌ | — | Giải thích cho người đọc |
+
+**Sáu phép so sánh (`operator`) hỗ trợ:**
+
+| `operator` | Ý nghĩa | `value` | Kiểu áp dụng |
+|------------|---------|---------|------------|
+| `==` | Bằng | đơn | bool, number, string |
+| `!=` | Không bằng | đơn | number, string |
+| `>` `>=` `<` `<=` | So sánh số | đơn | number |
+| `in` | Thuộc tập hợp | `[v1, v2, ...]` | string, number |
+| `between` | Trong khoảng đóng | `[min, max]` | number |
+| `not_between` | Ngoài khoảng đóng | `[min, max]` | number |
+
+**Sáu `field` hợp lệ** (đúng bằng 6 đặc trưng của DE-04):
+
+`hour_of_day`, `fail_count_24h`, `ip_change_rate_7d`, `new_device`,
+`average_login_interval_seconds`, `deviation_score`
+
+> **Xử lý quy tắc sai cấu hình:** nếu `field` không thuộc danh sách trên, quy tắc bị
+> **bỏ qua** (không tính vào mẫu số) và ghi cảnh báo vào `detection_logs` với
+> `stage = 'rule_evaluation'`, `reason = 'unknown_feature'`. Hệ thống **không** ném
+> exception — một quy tắc sai không được làm hỏng toàn bộ chấm điểm.
+
+**Cách tính Rule Score:**
 ```
-rule_score = Sum(triggered_rule.score × rule.weight)
+rule_score = min( 1.0,
+                  Σ (rule.score × rule.weight)     ← chỉ rule đã chạy
+                  ─────────────────────────────────
+                  Σ rule.weight                    ← TẤT CẢ rule đã bật
+                )
 ```
+
+> **Lưu ý về việc chia mẫu số:** cột `detection_logs.score_contribution` lưu giá trị
+> `(rule.score × rule.weight) / Σ weight`, nên **cộng lại các `score_contribution` sẽ
+> ra đúng `rule_score`** — SOC có thể tự kiểm chứng mà không cần biết công thức.
+> Mẫu số dùng **tất cả rule đang bật**, kể cả rule không chạy, để việc bật/tắt một
+> rule chỉ tác động tới những rule còn lại một cách nhất quán.
 
 ---
 
@@ -246,9 +332,10 @@ rule_score = Sum(triggered_rule.score × rule.weight)
 | **Ưu tiên** | Bắt buộc |
 
 **Selection logic:**
-1. Lấy policy có `is_active = true` và version mới nhất
-2. Nếu không có active policy → sử dụng default policy
-3. Log policy selection decision
+1. Lấy policy duy nhất có `is_active = true`
+2. Nếu **không** có active policy → cho phép đăng nhập (`low` / `allow`), ghi log
+   `detection_logs` với `stage = 'scoring'`, `reason = 'no_policy'`
+3. Ghi log policy selection decision vào `detection_logs`
 
 ---
 
@@ -264,16 +351,63 @@ rule_score = Sum(triggered_rule.score × rule.weight)
 | **Đối tượng** | Hệ thống |
 | **Ưu tiên** | Bắt buộc |
 
-**Formula:**
+**Công thức chuẩn** (xem `docs/DECISIONS-DETECTION-v3.3.md` mục 2):
+
 ```
-Risk_Score = w_rule × Rule_Score + w_ml × ML_Score
+Bước 1 - Rule_Score:
+  Rule_Score = min( 1.0,
+                    Σ (rule.score × rule.weight)      ← chỉ rule đã chạy
+                    ─────────────────────────────────
+                    Σ rule.weight                     ← TẤT CẢ rule đã bật
+                  )
+  (không có rule nào bật → Rule_Score = 0.0)
+
+Bước 2 - ML_Score:
+  ML_Score = normalized_anomaly_score  (trả về từ ML Service)
+  = NULL nếu ML lỗi hoặc timeout > 5 giây
+
+Bước 3 - Combined_Score:
+  Nếu ML thành công:
+    Combined_Score = w_rule × Rule_Score + w_ml × ML_Score
+  Nếu ML thất bại (suy giảm êm):
+    Combined_Score = Rule_Score
+```
 
 Trong đó:
-- w_rule = 0.4 (configurable)
-- w_ml = 0.6 (configurable)
-- Rule_Score = Sum(triggered_rule.score × rule.weight)
-- ML_Score = normalized_anomaly_score
+
+| Ký hiệu | Ý nghĩa | Mặc định |
+|---------|---------|----------|
+| `w_rule` | Trọng số điểm quy tắc | `0.4` |
+| `w_ml` | Trọng số điểm ML | `0.6` |
+| `rule.score` | Mức nghiêm trọng của rule (0–1) | theo từng rule |
+| `rule.weight` | Độ tin cậy của rule (0–1) | theo từng rule |
+
+**Vì sao phải chia mẫu số?** Nếu cộng thẳng `Σ (score × weight)`, 5 rule cùng chạy
+có thể cho điểm vượt quá `1.0`, phá vỡ công thức `w_rule × Rule_Score + w_ml × ML_Score`
+(vốn giả định cả hai vế nằm trong `[0, 1]`). Chia cho tổng trọng số giữ được bất biến này.
+
+**Ví dụ tính tay** (chính sách mặc định `v1.0`, `Σ weight = 1.20`):
+
 ```
+Đặc trưng: hour_of_day=2, fail_count_24h=5, new_device=true, deviation_score=0.8
+
+  unusual_hour       0.80 × 0.30 = 0.240
+  multiple_failures  0.90 × 0.40 = 0.360
+  new_device         0.50 × 0.20 = 0.100
+  high_deviation     0.70 × 0.30 = 0.210
+  ─────────────────────────────────────────
+  Tử số   = 0.910
+  Mẫu số  = 1.20
+  Rule_Score = 0.910 / 1.20 = 0.7583
+
+  ML_Score = 0.72 (thành công)
+  Combined = 0.4 × 0.7583 + 0.6 × 0.72 = 0.7353
+  → 0.50 ≤ 0.7353 < 0.75  →  HIGH  →  REQUIRE_MFA + tạo alert
+```
+
+> **Lưu ý:** khi ML lỗi, `Combined_Score = Rule_Score = 0.7583` → rơi vào mức
+> **CRITICAL**. Chính sách nghiêm hơn khi không có tín hiệu ML — đây là hành vi
+> **có chủ đích**, không phải lỗi.
 
 **Config (trong policy):**
 ```json
@@ -304,14 +438,30 @@ Trong đó:
 | **Đối tượng** | Hệ thống |
 | **Ưu tiên** | Bắt buộc |
 
-**Classification:**
+**Phân loại** (ngưỡng lấy từ `policies.config.thresholds`):
 
-| Risk Level | Threshold | Action | Description |
-|------------|-----------|--------|-------------|
-| LOW | < 0.25 | ALLOW | Đăng nhập bình thường |
-| MEDIUM | 0.25 - 0.50 | ALLOW_LOG | Cho phép, ghi log cảnh báo |
-| HIGH | 0.50 - 0.75 | REQUIRE_MFA | Yêu cầu xác thực MFA |
-| CRITICAL | > 0.75 | BLOCK_ALERT | Chặn và tạo alert |
+| Risk Level | Điều kiện | `decision` | Action | Tạo alert? | Mô tả |
+|------------|----------|------------|--------|-----------|-------|
+| `low` | `combined < 0.25` | `allow` | ALLOW | ❌ | Đăng nhập bình thường |
+| `medium` | `0.25 ≤ combined < 0.50` | `allow` | ALLOW_LOG | ❌ | Cho phép, ghi log cảnh báo |
+| `high` | `0.50 ≤ combined < 0.75` | `challenge` | REQUIRE_MFA | ✅ | Yêu cầu xác thực MFA |
+| `critical` | `combined ≥ 0.75` | `block` | BLOCK_ALERT | ✅ | Chặn, thu hồi phiên, khóa tài khoản |
+
+> **Mức cao (HIGH) luôn sinh cảnh báo**, kể cả khi người dùng vẫn được vào sau
+> bước MFA. Cảnh báo vẫn được tạo để SOC theo dõi xu hướng tấn công.
+
+**Ràng buộc khi cấu hình `thresholds`:**
+
+| Trường | Ràng buộc |
+|--------|-----------|
+| `low` | `0 ≤ low ≤ 1` |
+| `medium` | `low ≤ medium ≤ 1` |
+| `high` | `medium ≤ high ≤ 1` |
+
+Nếu `thresholds` vi phạm (ví dụ `low = 0.8`, `medium = 0.3`):
+- **Không** ném exception
+- Ghi cảnh báo vào `detection_logs` với `stage = 'scoring'`, `reason = 'invalid_thresholds'`
+- **Dùng giá trị mặc định** `0.25 / 0.50 / 0.75` để tiếp tục xử lý
 
 ---
 
@@ -439,18 +589,38 @@ Trong đó:
 | **Đối tượng** | Hệ thống |
 | **Ưu tiên** | Bắt buộc |
 
+**Endpoint:** `POST /api/v1/internal/actions` (Detection Engine → Core App)
+**Header:** `X-Internal-Secret: <shared_secret>`
+
 **Action types:**
 
-| Action | Trigger | Target |
-|--------|---------|--------|
-| `REQUIRE_MFA` | HIGH | user_id |
-| `REVOKE_SESSIONS` | CRITICAL | user_id |
-| `LOCK_USER` | CRITICAL | user_id |
-| `RATE_LIMIT_IP` | HIGH | ip_address |
+| Action | Trigger | Target | Tác dụng |
+|--------|---------|--------|----------|
+| `REQUIRE_MFA` | `high` | `user_id` | Bắt xác thực 2 lớp ở lần đăng nhập kế tiếp |
+| `REVOKE_SESSIONS` | `critical` | `user_id` | Thu hồi toàn bộ phiên đang hoạt động |
+| `LOCK_USER` | `critical` | `user_id` | Khoá tài khoản + thu hồi phiên |
+| `FORCE_LOGOUT` | do SOC yêu cầu | `user_id` | Đăng xuất cưỡng bức |
+
+**Request:**
+```json
+{
+  "action": "LOCK_USER",
+  "target_user_id": "UUID",
+  "reason": "COMBINE: 0.7812 - rule 0.7583 + high_deviation",
+  "alert_id": "UUID",
+  "severity": "critical",
+  "idempotency_key": "string (optional)"
+}
+```
+
+> Chính sách `RATE_LIMIT_IP` **không** nằm trong phạm vi v3.3 — rate limiting do
+> Core App thực hiện qua `login_attempts.outcome = 'rate_limited'`.
 
 ---
 
 ## 4. BẢNG TỔNG HỢP
+
+> Nguồn sự thật cho mọi quyết định kỹ thuật: `docs/DECISIONS-DETECTION-v3.3.md`
 
 | Mã YC | Tên chức năng | Nhóm | Ưu tiên |
 |-------|--------------|------|---------|

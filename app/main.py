@@ -6,7 +6,8 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app import db
 from app.auth import router as auth_router
-from app.detection import router as detection_router
+from app.detection import router as detection_router, policy_router
+from app.internal_actions import router as internal_actions_router
 from app.ml import router as ml_router
 from app.alerts import router as alerts_router
 from app.devices import router as devices_router
@@ -23,7 +24,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="Sentinel Auth",
-    version="1.0.0",
+    version="3.3.0",
     lifespan=lifespan,
 )
 
@@ -37,6 +38,8 @@ app.add_middleware(
 
 app.include_router(auth_router)
 app.include_router(detection_router)
+app.include_router(policy_router)
+app.include_router(internal_actions_router)
 app.include_router(ml_router)
 app.include_router(alerts_router)
 app.include_router(devices_router)
