@@ -15,7 +15,7 @@ title Mười tình huống xử lý sự cố (Dữ liệu bị từ chối)
 left to right direction
 
 rectangle "1. Gửi trùng sự kiện" as S1
-rectangle "→ 200 OK, đã tồn tại\nKHÔNG tạo lần đăng nhập mới" as R1
+rectangle "→ 202 Đã nhận, kèm id\nlần đăng nhập đã có\nKHÔNG tạo bản ghi mới" as R1
 S1 --> R1
 
 rectangle "2. Sai khoá nội bộ" as S2

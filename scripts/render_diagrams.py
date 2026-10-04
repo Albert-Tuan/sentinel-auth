@@ -1,8 +1,17 @@
-"""Render the PlantUML diagrams in docs/ to PNG via a public Kroki server.
+"""Render the PlantUML diagrams in docs/ to PNG and SVG via a public Kroki server.
 
-Usage:  python3 scripts/render_diagrams.py [output-subdir]
-Requires network access. Files whose .uml is unchanged are skipped, so
-re-running is cheap.
+Usage:
+    python3 scripts/render_diagrams.py [subdir] [--all] [--svg]
+
+Examples:
+    python3 scripts/render_diagrams.py              # docs/diagrams/*.uml -> PNG
+    python3 scripts/render_diagrams.py v3.3-detect  # docs/diagrams/v3.3-detect/*.puml -> PNG
+    python3 scripts/render_diagrams.py v3.3-detect --svg   # -> SVG
+    python3 scripts/render_diagrams.py --all        # both dirs, both formats
+
+Requires network access. Files whose source is unchanged are skipped, so
+re-running is cheap. Use --all (or touch a .puml file) to force a re-render
+after changing the renderer itself.
 """
 from __future__ import annotations
 
@@ -15,7 +24,10 @@ from pathlib import Path
 import httpx
 
 ROOT = Path(__file__).resolve().parent.parent
-KROKI = "https://kroki.io/plantuml/png"
+KROKI = "https://kroki.io/plantuml"
+
+#: Signature expected at the start of each rendered format.
+MAGIC = {"png": b"\x89PNG", "svg": b"<svg"}
 
 
 def encode(source: str) -> str:
@@ -43,17 +55,17 @@ def encode(source: str) -> str:
     return b64encode(data)
 
 
-def render(uml: Path, out: Path) -> bool:
+def render(uml: Path, out: Path, fmt: str) -> bool:
     source = uml.read_text()
-    url = f"{KROKI}/{encode(source)}"
+    url = f"{KROKI}/{fmt}/{encode(source)}"
     out.parent.mkdir(parents=True, exist_ok=True)
     try:
         r = httpx.get(url, timeout=60.0, follow_redirects=True)
     except httpx.HTTPError as exc:
-        print(f"  ! {uml.name}: {exc}")
+        print(f"  ! {uml.name} [{fmt}]: {exc}")
         return False
-    if r.status_code != 200 or not r.content.startswith(b"\x89PNG"):
-        print(f"  ! {uml.name}: HTTP {r.status_code} {r.text[:120]}")
+    if r.status_code != 200 or not r.content.lstrip().startswith(MAGIC[fmt]):
+        print(f"  ! {uml.name} [{fmt}]: HTTP {r.status_code} {r.text[:200]}")
         return False
     out.write_bytes(r.content)
     try:
@@ -64,22 +76,52 @@ def render(uml: Path, out: Path) -> bool:
     return True
 
 
-def main() -> int:
-    outdir = ROOT / "docs" / (sys.argv[1] if len(sys.argv) > 1 else "diagrams")
+def sources(subdir: str) -> list[Path]:
+    """PlantUML sources for a docs/ subdirectory (accepts .uml and .puml)."""
+    if subdir == "diagrams":
+        found = sorted((ROOT / "docs" / "diagrams").glob("*.uml"))
+        found += sorted((ROOT / "docs").glob("WF-*.uml"))
+        return found
+    return sorted((ROOT / "docs" / "diagrams" / subdir).glob("*.puml"))
 
-    sources: list[Path] = sorted((ROOT / "docs" / "diagrams").glob("*.uml"))
-    sources += sorted((ROOT / "docs").glob("WF-*.uml"))
+
+def main() -> int:
+    argv = sys.argv[1:]
+    flags = {a for a in argv if a.startswith("--")}
+    positional = [a for a in argv if not a.startswith("--")]
+
+    if "--all" in flags:
+        subdirs = ["diagrams", "v3.3-detect"]
+    else:
+        subdirs = [positional[0] if positional else "diagrams"]
+
+    formats = ["png"]
+    if "--svg" in flags:
+        formats.append("svg")
 
     ok = failed = skipped = 0
-    for uml in sources:
-        out = outdir / (uml.stem + ".png")
-        if out.exists() and out.stat().st_mtime >= uml.stat().st_mtime:
-            skipped += 1
+    for subdir in subdirs:
+        srcs = sources(subdir)
+        if not srcs:
+            print(f"  ? no .puml/.uml sources under docs/diagrams/{subdir}")
             continue
-        if render(uml, out):
-            ok += 1
-        else:
-            failed += 1
+        print(f"\n== {subdir}: {len(srcs)} source(s) -> {', '.join(formats)} ==")
+        for uml in srcs:
+            for fmt in formats:
+                # sources() may read from docs/ (WF-*.uml) but output always
+                # belongs next to the diagrams tree it was rendered for.
+                out = ROOT / "docs" / "diagrams" / subdir / (uml.stem + f".{fmt}")
+                if (
+                    out.exists()
+                    and out.stat().st_mtime >= uml.stat().st_mtime
+                    and "--all" not in flags
+                ):
+                    skipped += 1
+                    continue
+                if render(uml, out, fmt):
+                    ok += 1
+                else:
+                    failed += 1
 
     print(f"\n{ok} rendered, {skipped} unchanged, {failed} failed")
     return 1 if failed else 0

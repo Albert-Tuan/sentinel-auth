@@ -15,7 +15,7 @@ title WF-6 — Suy luận học máy, nhìn từ bên trong ML Service (v3.3)
 |Detection Engine kiểm tra sức khoẻ trước|
 start
 partition "DETECTION ENGINE (8001)" {
-  :HTTP GET /internal/health\nkiểm tra trước khi dùng;
+  :HTTP GET /api/v1/internal/ml/health\nkiểm tra trước khi dùng;
 }
 partition "ML SERVICE (8002)" {
   if (Mô hình sẵn sàng?) then (Có)
@@ -28,7 +28,7 @@ partition "ML SERVICE (8002)" {
 |Vòng đời một lần suy luận|
 partition "DETECTION ENGINE (8001)" {
   :Dựng 6 đặc trưng đã kiểm tra;
-  :HTTP POST /internal/ml/score\n(request_id, đặc trưng, phiên bản);
+  :HTTP POST /api/v1/internal/ml/score\n(request_id, đặc trưng, phiên bản);
 }
 partition "ML SERVICE (8002)" {
   :Nạp mô hình từ sổ đăng ký\n(đọc tệp .joblib vào bộ nhớ);

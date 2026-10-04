@@ -22,26 +22,38 @@ rectangle "Trọng số\ntrong chính sách" as W #FFE6CC {
 
 rectangle "TÍNH ĐIỂM GỘP" as CALC #DAE8FC
 note right of CALC
-  `điểm_gộp = 0.4 × điểm_quy_tắc + 0.6 × điểm_ML`
+  Nếu ML trả kết quả (`ml_status = success`):
+  `điểm_gộp = w_quy_tắc × điểm_quy_tắc + w_ML × điểm_ML`
+
+  Nếu ML lỗi hoặc quá 5 giây (`unavailable` / `error`):
+  `điểm_gộp = điểm_quy_tắc`
+  → hệ thống không sập, chấm bằng quy tắc.
 
   Trọng số **không cố định cứng** mà nằm trong
   `policies.config.weights` → quản trị viên chỉnh được.
-
-  Vì sao nghiêng về ML (0.6)?
-  ML bắt được kiểu mới mà quy tắc chưa biết;
-  quy tắc chính xác hơn nhưng bị bỏ qua dễ dàng.
 end note
 
 rectangle "So với ngưỡng\ntrong policies.config.thresholds" as THR
+note right of THR
+  Ba ngưỡng phải **không giảm dần**:
+  `low ≤ medium ≤ high`
+  Cấu hình sai → không ném lỗi, ghi log
+  `reason = "invalid_thresholds"`
+  rồi dùng giá trị mặc định 0.25 / 0.50 / 0.75.
+end note
 
 rectangle "PHÂN LOẠI MỨC RỦI RO" as CLASS #FFF2CC
 note right of CLASS
-  | Mức     | Khoảng điểm | Quyết định |
-  |---------|-------------|------------|
-  | THẤP    | < 0.25      | CHO QUA   |
-  | TRUNG BÌNH | 0.25–0.50 | CHO QUA + ghi nhật ký |
-  | CAO     | 0.50–0.75   | YÊU CẦU MFA |
-  | NGHIÊM TRỌNG | > 0.75 | CHẶN + tạo cảnh báo |
+  | Mức     | Khoảng điểm | Quyết định | Cảnh báo? |
+  |---------|-------------|------------|:---------:|
+  | THẤP    | < 0.25      | CHO QUA   | ✗ |
+  | TRUNG BÌNH | 0.25 ≤ d < 0.50 | CHO QUA + ghi nhật ký | ✗ |
+  | CAO     | 0.50 ≤ d < 0.75 | YÊU CẦU MFA | ✓ |
+  | NGHIÊM TRỌNG | d ≥ 0.75 | CHẶN | ✓ |
+
+  Chú ý: **cả CAO lẫn NGHIÊM TRỌNG đều tạo cảnh báo.**
+  Rủi ro CAO thì người dùng vẫn vào được
+  (sau khi qua MFA) nhưng SOC vẫn phải xem lại.
 end note
 
 rectangle "GHI VÀO DB\nrisk_assessments" as SAVE #F5F5F5
@@ -65,8 +77,16 @@ legend bottom
 **Ví dụ tính tay:**
 rule_score = 0.45, ml_score = 0.72
 → 0.4 × 0.45 + 0.6 × 0.72 = 0.18 + 0.432 = **0.612**
-→ rơi vào khoảng 0.50–0.75 → mức **CAO**
-→ tạo cảnh báo + yêu cầu MFA cho lần đăng nhập kế tiếp
+→ rơi vào khoảng 0.50 ≤ d < 0.75 → mức **CAO**
+→ yêu cầu MFA + tạo cảnh báo cho SOC
+
+**Khi ML lỗi thì lại nghiêm hơn, và đó là chủ ý:**
+rule_score = 0.758, ML timeout
+→ điểm_gộp = 0.758 → **≥ 0.75** → mức **NGHIÊM TRỌNG**
+→ chặn + khoá tài khoản
+
+Vì không có tín hiệu học máy để bù đắp,
+hệ thống chọn phía thận trọng hơn.
 endlegend
 
 @enduml

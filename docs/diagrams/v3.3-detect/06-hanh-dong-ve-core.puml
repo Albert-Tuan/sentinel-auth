@@ -17,25 +17,24 @@ left to right direction
 rectangle "DETECTION ENGINE\nquyết định" as DE #FFF2CC {
   rectangle "Mức rủi ro\n+ chính sách" as DEC
 }
-
 rectangle "CORE APP\nthực thi" as CORE #DAE8FC {
   rectangle "Bắt buộc MFA\n(REQUIRE_MFA)" as A1
-  rectangle "Thu hồi phiên\n(REVOKE_SESSIONS)" as A2
+  rectangle "Thu hồi mọi phiên\n(REVOKE_SESSIONS)" as A2
   rectangle "Khoá tài khoản\n(LOCK_USER)" as A3
-  rectangle "Giới hạn theo IP\n(RATE_LIMIT_IP)" as A4
+  rectangle "Buộc đăng xuất\n(FORCE_LOGOUT)" as A4
 }
 
 rectangle "HỆ QUẢ" as RES {
   rectangle "Lần đăng nhập kế\ntiếp phải có MFA" as R1
   rectangle "Mọi phiên cũ chết\nngay lập tức" as R2
   rectangle "Không đăng nhập\nđược nữa" as R3
-  rectangle "Chặn/throttle\ntheo địa chỉ IP" as R4
+  rectangle "Phiên hiện tại bị\nkết thúc, buộc\nđăng nhập lại" as R4
 }
 
-DEC --> A1 : mức CAO\nnhắm vào người dùng
-DEC --> A2 : mức NGHIÊM TRỌNG\nnhắm vào người dùng
-DEC --> A3 : mức NGHIÊM TRỌNG\nnhắm vào người dùng
-DEC --> A4 : mức CAO\nnhắm vào địa chỉ IP
+DEC --> A1 : mức CAO\nnghĩa là "challenge"
+DEC --> A2 : mức NGHIÊM TRỌNG\nnghĩa là "block"
+DEC --> A3 : mức NGHIÊM TRỌNG\nnghĩa là "block"
+DEC --> A4 : mức NGHIÊM TRỌNG\nkhi cần thu hồi mềm
 
 A1 --> R1
 A2 --> R2
@@ -45,8 +44,17 @@ A4 --> R4
 note bottom of DEC
   **Giao thức (contract):**
   `POST /api/v1/internal/actions`
-  Header khoá nội bộ + body gồm
-  action, target (user_id | ip_address), reason, risk_level, login_attempt_id.
+  Header khoá nội bộ `X-Internal-Secret`.
+
+  **Body (bắt buộc):**
+  `action` (một trong 4 giá trị ở trên)
+  `target_user_id` · `reason`
+
+  **Body (tuỳ chọn):**
+  `alert_id` · `severity` · `idempotency_key`
+
+  **Phản hồi:** `status` = `applied` hoặc `already_applied`
+  → an toàn khi giao việc bị gửi lại nhiều lần.
 
   **Vòng lặp này là "đóng băng" ngay cả khi quyết định
   đã được đưa ra sau khi người dùng đã đăng nhập xong**
@@ -57,5 +65,19 @@ note bottom of CORE
   Mọi hành động đều được ghi vào `audit_logs` ở core-db
   và `detection_logs` (giai đoạn `action_sent`) ở detection-db.
 end note
+
+legend bottom
+**Phân biệt 2 cặp hành động trùng tác dụng:**
+
+| Cặp       | Khác biệt                                     |
+|-----------|-----------------------------------------------|
+| `REVOKE_SESSIONS` vs `FORCE_LOGOUT` | Kết quả giống nhau: đặt `revoked_at` cho mọi phiên đang mở. Tách hai tên để Detection Engine nói rõ **ý định**: chặn hàng loạt, hay chỉ buộc phiên hiện tại rời đi. |
+| `LOCK_USER` vs `REVOKE_SESSIONS` | `LOCK_USER` ghi `status = 'locked'` + `locked_at` (chặn trọn vẹn). `REVOKE_SESSIONS` chỉ đóng phiên, tài khoản vẫn đăng nhập lại được. |
+
+**Lưu ý ở v3.3:** hành động **luôn nhắm vào người dùng**
+(`target_user_id` là trường bắt buộc).
+Chưa có hành động giới hạn theo địa chỉ IP
+dù bảng `rate_limits` ở core-db đã có sẵn.
+endlegend
 
 @enduml

@@ -44,18 +44,31 @@ note bottom of U
   bảng kia tồn tại.
 end note
 
+note bottom of PC
+  **Cột nào được bảo vệ bằng `ON DELETE SET NULL`?**
+  - `policies.created_by` — không có FK, UUID trần
+  - `soc_analysts.user_id` — `NOT NULL UNIQUE`,
+     bản ghi mất ý nghĩa nếu người dùng biến mất
+  - `alert_timeline.actor_id` — cho phép NULL,
+     hệ thống cũng ghi dòng với `actor_type = 'system'`
+  - `model_versions.trained_by` — cho phép NULL
+end note
+
 rectangle "GIẢI PHÁP: kiểm tra ở tầng ứng dụng\nqua API của Core App" as SOL #FFE6CC
 note right of SOL
   1. Trước khi ghi, Detection Engine gọi
      `GET /api/v1/internal/users/{id}`
      để chắc chắn người dùng tồn tại.
   2. Không dùng *xoá theo dây chuyền* cho
-     tham chiếu xuyên DB — dùng *xoá mềm*
-     (`status = archived`) để giữ dấu vết.
+     tham chiếu xuyên DB — thay vào đó
+     **không bao giờ xoá cứng `users`**.
+     Xoá cứng sẽ làm hỏng mọi tham chiếu
+     chéo ở 3 database còn lại.
   3. Cần tiến trình **đối chiếu định kỳ**
      (reconciliation job) quét các tham chiếu
      mồ côi.
-  4. Nếu người dùng bị xoá ở core-db, các bản ghi
+  4. Nếu người dùng bị khoá ở core-db
+     (`status = 'locked'`), các bản ghi
      phía sau giữ nguyên UUID và đánh dấu là
      cũ (stale) bằng một cờ riêng.
 end note

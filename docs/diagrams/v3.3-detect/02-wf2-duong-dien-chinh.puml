@@ -35,7 +35,7 @@ partition "BỘ GOM SỰ KIỆN" {
 partition "DETECTION ENGINE (8001)" {
   :POST sự kiện đăng nhập\n(kèm khoá nội bộ);
   if (Sự kiện đã tồn tại?) then (Có rồi)
-    #FFE8E8:Trả 200 OK\n(bỏ qua trùng lặp);
+    #FFE8E8:Trả 202 Đã nhận\n(kèm id lần đăng nhập cũ,\nkhông tạo bản ghi mới);
     note right
       event_id là khoá duy nhất
       --> gửi lại bao nhiêu lần
@@ -59,7 +59,7 @@ partition "MÁY PHÂN TÍCH NỀN" {
     :Nhật ký giai đoạn rule_evaluation;
   }
   partition "Gọi ML Service" {
-    :HTTP POST /internal/ml/score\n(6 đặc trưng, thời hạn chờ 5s);
+    :HTTP POST /api/v1/internal/ml/score\n(6 đặc trưng, thời hạn chờ 5s);
     if (ML phản hồi?) then (Có)
       #E1D5E7:Nhận điểm bất thường (0–1)\n+ mã lý do + phiên bản mô hình;
     else (Không / lỗi)
@@ -84,7 +84,7 @@ if (Mức rủi ro cao\nhoặc nghiêm trọng?) then (Có)
   }
   if (Mức nghiêm trọng?) then (Có)
     partition "CORE APP (8000)" {
-      :Nhận yêu cầu hành động qua HTTP\n(yêu cầu MFA / thu hồi phiên /\nkhoá tài khoản / giới hạn IP);
+      :Nhận yêu cầu hành động qua HTTP\n(thu hồi phiên / khoá tài khoản /\nbuộc đăng xuất);
       :Thực thi + ghi audit_logs;
     }
   else (Không)

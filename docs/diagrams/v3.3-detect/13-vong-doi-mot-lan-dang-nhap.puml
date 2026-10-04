@@ -53,9 +53,13 @@ note bottom of T6
   | 2 | `detection_logs` (detection-db) | hệ thống đã suy luận ra sao |
   | 3 | `alert_timeline` (detection-db) | SOC đã xử lý ra sao |
 
-  Ba tầng này có thể đối chiếu chéo bằng
-  `login_attempt_id` và `request_id` để dựng
-  lại toàn bộ sự kiện từ đầu đến cuối.
+  Ba tầng này đối chiếu chéo bằng `request_id`
+  (cột có ở cả ba bảng) để dựng lại toàn bộ sự kiện
+  từ đầu đến cuối.
+
+  Riêng `login_attempt_id` chỉ tồn tại ở tầng 2 và 3
+  (`detection_logs`, `alerts`) — bảng `audit_logs`
+  ở core-db không có cột này.
 end note
 
 @enduml

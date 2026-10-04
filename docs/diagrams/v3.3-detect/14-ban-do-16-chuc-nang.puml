@@ -72,15 +72,26 @@ legend bottom
 Tất cả 16 chức năng này thuộc nhánh `detection-engine`,
 schema `detection_soc` (7 bảng), chủ sở hữu Tuấn Anh.
 
+Mã `DE-01` → `DE-16` là mã chuẩn lấy từ
+`docs/04-bang-yeu-cau-chuc-nang-nghiep-vu-detection-engine.md`.
+
 | Mã | Nơi thực hiện (thư mục) |
 |----|------------------------|
-| DE-01 | api/tuananh/detection_router.py |
-| DE-03 | services/tuananh/feature_builder.py |
-| DE-05 | services/tuananh/ml_client.py (gọi Khang) |
-| DE-07 | services/tuananh/rule_engine.py |
-| DE-09 | services/tuananh/risk_scoring.py |
-| DE-11…DE-15 | services/tuananh/soc_workflow.py, dashboard_service.py |
-| DE-16 | gọi ngược lại Core App |
+| DE-01, DE-02 | app/api/tuananh/detection_router.py |
+| DE-03, DE-04 | app/services/tuananh/feature_builder.py |
+| DE-05, DE-06 | app/services/tuananh/ml_client.py (gọi Khang) |
+| DE-07, DE-08 | app/services/tuananh/rule_engine.py |
+| DE-09, DE-10 | app/services/tuananh/risk_scoring.py |
+| DE-11 → DE-13 | app/services/tuananh/soc_workflow.py |
+| DE-14 | app/services/tuananh/dashboard_service.py |
+| DE-15 | app/services/tuananh/soc_workflow.py (bảng alert_timeline) |
+| DE-16 | app/services/tuananh/ml_client.py → gọi ngược lại Core App |
+
+Lưu ý: `app/api/tuananh/` và `app/services/tuananh/` là
+**thư mục dự kiến** theo TASK_ASSIGNMENT.md.
+Tại thời điểm hiện tại, toàn bộ Detection Engine vẫn
+nằm gộp trong `app/detection.py` — việc tách thư mục
+là nhiệm vụ của Tuấn Anh.
 endlegend
 
 @enduml

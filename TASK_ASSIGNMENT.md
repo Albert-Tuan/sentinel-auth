@@ -188,13 +188,13 @@ app/services/sony/
 ```
 app/api/tuananh/
 ├── __init__.py
-├── detection_router.py    # UC-DE-01 (nhận LoginEvent)
+├── detection_router.py    # UC-DE-01, UC-DE-02 (nhận LoginEvent)
 ├── alert_router.py        # UC-SOC-01 (danh sách alerts)
 ├── soc_workflow_router.py # UC-SOC-02/03 (acknowledge/resolve)
 ├── admin_router.py        # UC-SA-01/02 (admin endpoints)
 ├── audit_router.py        # UC-SA-03 (audit logs)
-├── dashboard_router.py    # UC-DE-08 (SOC dashboard)
-└── policy_router.py       # UC-DE-15 (quản lý policies)
+├── dashboard_router.py    # UC-DE-14 (SOC dashboard)
+└── policy_router.py       # UC-DE-08 (quản lý policies)
 
 app/models/tuananh/
 ├── __init__.py
@@ -209,34 +209,39 @@ app/models/tuananh/
 
 app/services/tuananh/
 ├── __init__.py
-├── rule_engine.py         # UC-DE-04
-├── feature_builder.py     # UC-DE-02 (6 features)
-├── risk_scoring.py        # UC-DE-05
-├── ml_client.py           # UC-DE-03 (HTTP client → khang)
-├── soc_workflow.py        # UC-DE-09 → UC-DE-13
-├── dashboard_service.py   # UC-DE-08
+├── rule_engine.py         # UC-DE-07, UC-DE-08
+├── feature_builder.py     # UC-DE-03, UC-DE-04 (6 features)
+├── risk_scoring.py        # UC-DE-09, UC-DE-10
+├── ml_client.py           # UC-DE-05, UC-DE-06 (HTTP client → khang) + UC-DE-16
+├── soc_workflow.py        # UC-DE-11 → UC-DE-15
+├── dashboard_service.py   # UC-DE-14
 ├── admin_service.py       # UC-SA-01 → UC-SA-03
-└── policy_service.py      # UC-DE-15
+└── policy_service.py      # UC-DE-08 (đọc chính sách)
 ```
 
 ### Use Cases phụ trách
+> Mã `UC-DE-01` → `UC-DE-16` lấy từ
+> `docs/04-bang-yeu-cau-chuc-nang-nghiep-vu-detection-engine.md`
+> (nguồn chuẩn). Các mã `UC-SOC-*` và `UC-SA-*` là nhóm bổ trợ.
+
 | UC | Tên | Actor | Độ ưu tiên |
 |----|------|-------|-----------|
 | UC-DE-01 | Nhận LoginEvent | Core App | 🔴 Bắt buộc |
-| UC-DE-02 | Build Features (6 features) | Hệ thống | 🔴 Bắt buộc |
-| UC-DE-03 | Gọi ML Service | Hệ thống | 🔴 Bắt buộc |
-| UC-DE-04 | Evaluate Rules | Hệ thống | 🔴 Bắt buộc |
-| UC-DE-05 | Calculate Risk Score | Hệ thống | 🔴 Bắt buộc |
-| UC-DE-06 | Tạo Alert | Hệ thống | 🔴 Bắt buộc |
-| UC-DE-07 | Gửi Action về Core | Hệ thống | 🔴 Bắt buộc |
-| UC-DE-08 | Xem SOC Dashboard | SOC Analyst | 🔴 Bắt buộc |
-| UC-DE-09 | Tiếp nhận Alert | SOC Analyst | 🔴 Bắt buộc |
-| UC-DE-10 | Điều tra Alert | SOC Analyst | 🔴 Bắt buộc |
-| UC-DE-11 | Xem Evidence | SOC Analyst | 🔴 Bắt buộc |
-| UC-DE-12 | Phân loại Alert | SOC Analyst | 🔴 Bắt buộc |
-| UC-DE-13 | Yêu cầu Action | SOC Analyst | 🔴 Bắt buộc |
-| UC-DE-14 | Tra cứu Login History | SOC Analyst | 🔴 Bắt buộc |
-| UC-DE-15 | Quản lý Policy | Security Admin | 🔴 Bắt buộc |
+| UC-DE-02 | Xác thực event source | Core App | 🔴 Bắt buộc |
+| UC-DE-03 | Feature Building (6 features) | Hệ thống | 🔴 Bắt buộc |
+| UC-DE-04 | Feature Validation | Hệ thống | 🔴 Bắt buộc |
+| UC-DE-05 | Gọi ML Service | Hệ thống | 🔴 Bắt buộc |
+| UC-DE-06 | ML Fallback | Hệ thống | 🔴 Bắt buộc |
+| UC-DE-07 | Rule Evaluation | Hệ thống | 🔴 Bắt buộc |
+| UC-DE-08 | Chọn chính sách đang áp dụng | Hệ thống | 🔴 Bắt buộc |
+| UC-DE-09 | Tính điểm rủi ro gộp | Hệ thống | 🔴 Bắt buộc |
+| UC-DE-10 | Phân loại mức rủi ro | Hệ thống | 🔴 Bắt buộc |
+| UC-DE-11 | Tạo Alert | Hệ thống | 🔴 Bắt buộc |
+| UC-DE-12 | Phân công Alert | Hệ thống | 🔴 Bắt buộc |
+| UC-DE-13 | Các hành động xử lý Alert | SOC Analyst | 🔴 Bắt buộc |
+| UC-DE-14 | Dữ liệu bảng điều khiển | SOC Analyst | 🔴 Bắt buộc |
+| UC-DE-15 | Dòng thời gian Alert | SOC Analyst | 🔴 Bắt buộc |
+| UC-DE-16 | Gửi Action về Core | Hệ thống | 🔴 Bắt buộc |
 | UC-SOC-01 | Xem danh sách alerts | SOC Analyst | 🔴 Bắt buộc |
 | UC-SOC-02 | Acknowledge alert | SOC Analyst | 🔴 Bắt buộc |
 | UC-SOC-03 | Resolve alert | SOC Analyst | 🔴 Bắt buộc |

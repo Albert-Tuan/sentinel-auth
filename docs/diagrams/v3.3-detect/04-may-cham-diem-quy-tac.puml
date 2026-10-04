@@ -14,17 +14,17 @@ title Máy chấm điểm quy tắc (Rule Engine) — Nhìn từ bên trong
 
 top to bottom direction
 
-rectangle "CHÍNH SÁCH PHÁT HIỆN\n(bảng policies, cột rules dạng JSON)" as POL #FFE6CC {
-  rectangle "R001 Giờ bất thường\nđiều kiện: giờ ≥ 23 hoặc ≤ 5\ntrọng số 0.30 · điểm 0.80" as R1
-  rectangle "R002 Nhiều lần sai\nđiều kiện: sai_trong_24h ≥ 3\ntrọng số 0.40 · điểm 0.90" as R2
-  rectangle "R003 Thiết bị mới\nđiều kiện: thiết_bị_mới = đúng\ntrọng số 0.20 · điểm 0.50" as R3
+rectangle "CHÍNH SÁCH PHÁT HIỆN\n(bảng policies, cột rules dạng JSONB)" as POL #FFE6CC {
+  rectangle "unusual_hour\nfield: hour_of_day\nnot_between [7, 22]\ntrọng số 0.30 · điểm 0.80" as R1
+  rectangle "multiple_failures\nfield: fail_count_24h\n>= 3\ntrọng số 0.40 · điểm 0.90" as R2
+  rectangle "new_device\nfield: new_device\n== true\ntrọng số 0.20 · điểm 0.50" as R3
+  rectangle "high_deviation\nfield: deviation_score\n>= 0.70\ntrọng số 0.30 · điểm 0.70" as R4
 }
 
 rectangle "CHỌN CHÍNH SÁCH\nđang áp dụng" as PICK
 note right of PICK
-  Quy tắc chọn: `is_active = true`
-  và là bản mới nhất.
-  Cơ sở dữ liệu còn có ràng buộc (constraint)
+  Quy tắc chọn: `is_active = true`.
+  Cơ sở dữ liệu có ràng buộc (constraint)
   bảo đảm **chỉ một** chính sách được bật
   tại một thời điểm.
   Nếu chưa có chính sách nào bật
@@ -35,8 +35,15 @@ rectangle "ĐỐI CHIẾU TỪNG QUY TẮC\nvới 6 đặc trưng" as EVAL
 
 rectangle "Tính điểm quy tắc\n(rule_score)" as CALC #FFF2CC
 note right of CALC
-  `điểm_quy_tắc = Σ (điểm_quy_tắc_đ_chạy × trọng_số)`
-  cho các quy tắc **đã chạy**.
+  `đóng_góp(rule) = score × weight`
+  cho các quy tắc **đã bật và đã chạy**.
+
+  `rule_score = min( 1.0,`
+  `  Σ đóng_góp / Σ weight của MỌI rule ĐÃ BẬT )`
+
+  Mẫu số lấy cả rule không chạy
+  → chính sách có nhiều rule hơn không tự động
+  phóng điểm cho các rule ít chạy.
 end note
 
 rectangle "NHẬT KÝ CHI TIẾT\n(bảng detection_logs)" as LOG
@@ -46,20 +53,35 @@ POL --> EVAL
 EVAL --> R1 : có chạy?
 EVAL --> R2 : có chạy?
 EVAL --> R3 : có chạy?
+EVAL --> R4 : có chạy?
 R1 --> CALC
 R2 --> CALC
 R3 --> CALC
-CALC --> LOG : ghi từng quy tắc chạy,\nđóng góp bao nhiêu điểm
+R4 --> CALC
+CALC --> LOG : ghi từng rule chạy,\nđóng góp sau khi đã chia mẫu số
 LOG --> CALC
 
 legend bottom
 **Cấu trúc một quy tắc (lưu trong JSONB):**
-`{ id, name, condition, weight, score, enabled }`
+`{ name, field, operator, value, weight, score, enabled }`
+— đủ **7 trường bắt buộc**.
+
+`field` chỉ nhận đúng 6 giá trị:
+`hour_of_day` · `fail_count_24h` · `ip_change_rate_7d` ·
+`new_device` · `average_login_interval_seconds` · `deviation_score`
+
+`operator` chỉ nhận:
+`== != > >= < <= in between not_between`
 
 **Vì sao có cả `weight` (trọng số) lẫn `score` (điểm)?**
 - `score` = quy tắc đó nghiêm trọng cỡ nào (0–1)
 - `weight` = quy tắc đó đáng tin cỡ nào trong tổng thể
 - Nhân hai giá trị → đóng góp thực tế của quy tắc
+
+**Field lạ thì bỏ qua, không làm sập hệ thống:**
+field không thuộc 6 giá trị trên → bỏ qua rule đó,
+loại nó khỏi mẫu số và ghi log
+`reason = "unknown_feature"`.
 
 **Quy tắc ở đây là "luật chơi cứng" (hard rules):**
 dễ hiểu, dễ giải thích cho SOC, không cần dữ liệu để huấn luyện,
