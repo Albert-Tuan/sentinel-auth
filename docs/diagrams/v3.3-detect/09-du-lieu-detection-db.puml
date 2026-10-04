@@ -1,0 +1,77 @@
+@startuml
+skinparam backgroundColor #FFFFFF
+skinparam shadowing false
+skinparam defaultFontName Sans
+skinparam rectangle {
+  BackgroundColor #F8F9FA
+  BorderColor #495057
+}
+skinparam ArrowColor #343A40
+skinparam ArrowThickness 1.2
+skinparam titleFontSize 18
+
+title Bảy bảng của detection-db — Nhìn từ góc nhìn nhà phát triển
+
+left to right direction
+
+rectangle "NHẬN VÀO" as IN {
+  rectangle "login_attempts\nMỗi lần đăng nhập\n(event_id duy nhất)" as LA #DAE8FC
+  rectangle "policies\nChính sách + quy tắc\n(dạng JSONB)" as PO #FFE6CC
+}
+
+rectangle "CHẤM ĐIỂM" as SCORE {
+  rectangle "risk_assessments\nĐánh giá rủi ro\n(1–1 với lần đăng nhập)" as RA #FFF2CC
+  rectangle "detection_logs\nNhật ký từng bước\n(giai đoạn)" as DL #FFF2CC
+}
+
+rectangle "ĐƯỜNG ĐI CỦA CẢNH BÁO" as FLOW {
+  rectangle "alerts\nCảnh báo cho SOC" as AL #F8CECC
+  rectangle "alert_timeline\nDòng thời gian xử lý" as AT #F8CECC
+}
+
+rectangle "NGƯỜI XỬ LÝ" as PEOPLE {
+  rectangle "soc_analysts\nHồ sơ chuyên viên\n(gắn với users ở core-db)" as SA #CCE5FF
+}
+
+IN --> SCORE
+SCORE --> FLOW
+FLOW --> PEOPLE
+PEOPLE --> FLOW
+
+note bottom of LA
+  **Khoá duy nhất (idempotency):**
+  `event_id UUID NOT NULL UNIQUE`
+  → nhờ vậy Core App gửi lại cùng một sự kiện
+  nhiều lần vẫn chỉ tạo ra **một** lần đăng nhập.
+end note
+
+note bottom of RA
+  **Ràng buộc 1–1:**
+  `CONSTRAINT uq_risk_assessment_login UNIQUE (login_attempt_id)`
+  → mỗi lần đăng nhập chỉ có **đúng một** kết quả chấm điểm.
+end note
+
+note bottom of DL
+  **`stage` chỉ nhận 4 giá trị** (ràng buộc CHECK):
+  `rule_evaluation` · `ml_call` · `scoring` · `action_sent`
+  → nhật ký luôn đủ 4 mốc để truy vết.
+end note
+
+note bottom of AL
+  **Xoá theo dây chuyền (cascade):**
+  xoá lần đăng nhập → xoá luôn cảnh báo → xoá luôn dòng thời gian.
+  Ngược lại, xoá chính sách thì cột `policy_id` chỉ bị đặt NULL
+  (không mất cảnh báo).
+end note
+
+legend bottom
+**Vì sao tách detection-db riêng khỏi core-db?**
+1. Detection có vòng đời dữ liệu khác: dữ liệu sinh ra liên tục,
+   tăng nhanh, có thể lưu lâu hơn.
+2. Quyền truy cập khác nhau: chuyên viên SOC vào detection-db,
+   không vào được core-db (chứa thông tin nhạy cảm như băm mật khẩu).
+3. Nhóm phụ trách khác nhau (TASK_ASSIGNMENT.md): Tuấn Anh sở hữu
+   detection_soc, Sony sở hữu core_auth → dễ chia việc, dễ mở rộng.
+endlegend
+
+@enduml

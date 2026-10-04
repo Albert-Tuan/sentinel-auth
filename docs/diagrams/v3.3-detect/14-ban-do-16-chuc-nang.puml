@@ -1,0 +1,86 @@
+@startuml
+skinparam backgroundColor #FFFFFF
+skinparam shadowing false
+skinparam defaultFontName Sans
+skinparam rectangle {
+  BackgroundColor #F8F9FA
+  BorderColor #495057
+}
+skinparam ArrowColor #343A40
+skinparam ArrowThickness 1.2
+skinparam titleFontSize 18
+
+title Bản đồ 16 chức năng nghiệp vụ (DE-01 → DE-16) — Bản đồ tra cứu nhanh
+
+left to right direction
+
+rectangle "TIẾP NHẬN SỰ KIỆN" as G1 #DAE8FC {
+  rectangle "DE-01\nNhận sự kiện đăng nhập" as DE01
+  rectangle "DE-02\nXác thực nguồn gửi\n(khoá nội bộ, chống lạm dụng)" as DE02
+}
+
+rectangle "ĐẶC TRƯNG" as G2 #FFE6CC {
+  rectangle "DE-03\nDựng 6 đặc trưng" as DE03
+  rectangle "DE-04\nKiểm tra đặc trưng" as DE04
+}
+
+rectangle "HỌC MÁY" as G3 #E1D5E7 {
+  rectangle "DE-05\nGọi ML Service" as DE05
+  rectangle "DE-06\nXử lý khi ML lỗi" as DE06
+}
+
+rectangle "MÁY QUY TẮC" as G4 #FFF2CC {
+  rectangle "DE-07\nChấm điểm quy tắc" as DE07
+  rectangle "DE-08\nChọn chính sách đang áp dụng" as DE08
+}
+
+rectangle "CHẤM ĐIỂM RỦI RO" as G5 #F8CECC {
+  rectangle "DE-09\nTính điểm gộp" as DE09
+  rectangle "DE-10\nPhân loại mức rủi ro" as DE10
+}
+
+rectangle "QUẢN LÝ CẢNH BÁO" as G6 #DAE8FC {
+  rectangle "DE-11\nTạo cảnh báo" as DE11
+  rectangle "DE-12\nPhân công cảnh báo" as DE12
+  rectangle "DE-13\nCác hành động xử lý" as DE13
+}
+
+rectangle "QUY TRÌNH SOC" as G7 #CCE5FF {
+  rectangle "DE-14\nDữ liệu bảng điều khiển" as DE14
+  rectangle "DE-15\nDòng thời gian" as DE15
+  rectangle "DE-16\nGửi hành động về Core" as DE16
+}
+
+G1 --> G2
+G2 --> G3
+G3 --> G4
+G4 --> G5
+G5 --> G6
+G6 --> G7
+
+note bottom of G1
+  **Luồng tự động (không cần người):**
+  DE-01 → DE-02 → DE-03 → DE-04 → DE-05/DE-06
+  → DE-07/DE-08 → DE-09 → DE-10 → DE-11 → DE-12 → DE-16
+
+  **Luồng có người (WF-3):**
+  DE-14 → DE-13 → DE-15
+end note
+
+legend bottom
+**Đối chiếu với phân công công việc (TASK_ASSIGNMENT.md):**
+Tất cả 16 chức năng này thuộc nhánh `detection-engine`,
+schema `detection_soc` (7 bảng), chủ sở hữu Tuấn Anh.
+
+| Mã | Nơi thực hiện (thư mục) |
+|----|------------------------|
+| DE-01 | api/tuananh/detection_router.py |
+| DE-03 | services/tuananh/feature_builder.py |
+| DE-05 | services/tuananh/ml_client.py (gọi Khang) |
+| DE-07 | services/tuananh/rule_engine.py |
+| DE-09 | services/tuananh/risk_scoring.py |
+| DE-11…DE-15 | services/tuananh/soc_workflow.py, dashboard_service.py |
+| DE-16 | gọi ngược lại Core App |
+endlegend
+
+@enduml

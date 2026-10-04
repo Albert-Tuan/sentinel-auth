@@ -1,0 +1,52 @@
+@startuml
+left to right direction
+skinparam monochrome true
+skinparam shadowing false
+skinparam backgroundColor white
+skinparam rectangle {
+  BackgroundColor white
+  BorderColor black
+}
+skinparam ArrowColor black
+title WF-3  SOC Alert Handling
+
+actor "SOC Analyst" as soc
+
+rectangle "Core App" as sys_1 {
+  rectangle "Authenticate SOC analyst" as login
+}
+
+rectangle "Detection Engine" as sys_2 {
+  rectangle "List alerts" as list
+  rectangle "Alert detail and risk" as detail
+  rectangle "Acknowledge / resolve / false positive / escalate" as action
+  rectangle "SOC dashboard" as stats
+}
+
+rectangle "detection-db" as sys_3 {
+  rectangle "Open alerts" as alerts
+  rectangle "Attempt and score context" as context
+  rectangle "Update alert and timeline" as timeline
+  rectangle "Alert counts by status and risk" as counts
+}
+
+rectangle "core-db" as sys_4 {
+  rectangle "Validate analyst role" as validate
+}
+
+soc ..> login : credentials\n<<flow>>
+login ..> soc : JWT with SOC role\n<<flow>>
+soc ..> list : GET alerts + JWT\n<<flow>>
+list ..> alerts : filter and sort\n<<flow>>
+alerts ..> detail : selected alert\n<<flow>>
+detail ..> context : load details\n<<flow>>
+soc ..> action : PATCH alert\n<<flow>>
+action ..> validate : role lookup via HTTP\n<<flow>>
+action ..> timeline : status + history\n<<flow>>
+soc ..> stats : GET dashboard\n<<flow>>
+stats ..> counts : aggregate alerts\n<<flow>>
+
+legend bottom
+  Alert states: open → acknowledged → resolved / false_positive; escalation is recorded.
+endlegend
+@enduml

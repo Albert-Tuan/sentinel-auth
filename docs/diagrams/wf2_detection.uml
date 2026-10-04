@@ -1,62 +1,119 @@
 @startuml
 skinparam backgroundColor #FFFFFF
 
-title WF-2: Detection Inline (Risk Assessment)
+title WF-2: Detection Engine Flow (v3.3 - Async via Outbox + HTTP)
 
-participant "Auth API" as A #DAE8FC
-participant "Detection\nService" as D #FFF2CC
-participant "ML Scoring\n(Isolation Forest)" as ML #E1D5E7
-participant "PostgreSQL" as DB #F5F5F5
+participant "Core App" as CA #DAE8FC
+database "core-db" as CDB #F5F5F5
+participant "Outbox\nPoller" as OP #FFE6CC
+participant "Detection Engine\n(port 8001)" as DE #FFF2CC
+database "detection-db" as DDB #F5F5F5
+participant "ML Service\n(port 8002)" as ML #E1D5E7
+database "ml-service-db" as MDB #F5F5F5
 
-note over A
+== Phase 1: Login + Outbox Event ==
+
+note over CA, CDB
   Sau khi login thành công (WF-1)
-  → gọi /internal/v1/detect
+  Core App INSERT outbox_events
+  (KHÔNG gọi detection sync)
 end note
 
-A -> D : **1. POST /internal/v1/detect**\n(login_attempt_id, user_id, source_ip,\nuser_agent, timestamp...)
-activate D
+CA -> CDB : INSERT outbox_events\n(aggregate_type=login_attempt,\nevent_type=LoginEvent,\npayload={user_id, ip, ua, ...})
+activate CDB
+deactivate CDB
 
-D -> DB : 2. SELECT user history\n(fail_count_24h, known_devices,\nlast_login_ip, last_login_time...)
-activate DB
-DB --> D : user context
-deactivate DB
+CA --> CA : Trả 200 cho User\n(đã xong phần core-app)
 
-D -> D : 3. Trích features\n(IP mới? | Fail > 3? | Giờ lạ?\n| Device mới? | Geo distance?)
-activate D
-deactivate D
+== Phase 2: Outbox Polling ==
 
-D -> D : 4. Tính rule_score (0.0 – 1.0)\nDựa trên rule engine
-activate D
-deactivate D
+OP -> CDB : SELECT outbox_events\nWHERE status='pending'\nLIMIT 100
+activate CDB
+CDB --> OP : [LoginEvent, ...]
+deactivate CDB
 
-D -> ML : **5. POST /internal/v1/ml/score**\n(features_vector)
-activate ML
+OP -> OP : status=processing
+OP -> CDB : UPDATE outbox_events SET status=processing
+deactivate CDB
 
-alt ML available
-    ML -> ML : 6. Isolation Forest\npredict() [timeout 500ms]
-    ML --> D : {anomaly_score,\nis_anomaly,\nreason_codes}
-    deactivate ML
-else ML timeout / error
-    ML --> D : error / timeout
-    note right: ml_status=error\n→ risk_level=medium\n(fallback)
-    deactivate ML
+== Phase 3: HTTP Push to Detection Engine ==
+
+OP -> DE : **POST /api/v1/internal/login-events**\n(event_id, user_id, username_attempted,\noutcome, ip, ua, timestamp)\n+ Internal-Secret header
+activate DE
+
+DE -> DE : Validate Internal-Secret
+DE -> DE : Check event_id idempotency
+
+alt event ALREADY PROCESSED
+    DE --> OP : **200 OK** {deduplicated: true}
+    deactivate DE
+else NEW event
+    DE -> DDB : INSERT login_attempts\n(event_id, user_id, outcome, ip, ua,\ntimestamp, status=pending)
+    activate DDB
+    deactivate DDB
+    DE --> OP : **202 Accepted** {login_attempt_id}
+    deactivate DE
 end
 
-D -> D : 7. risk = combine(rule_score,\nanomaly_score)\n→ risk_level
-activate D
-deactivate D
+OP -> CDB : UPDATE outbox_events\n(status=published, published_at=NOW())
 
-D -> DB : 8. INSERT risk_assessment\n(rule_score, anomaly_score,\nml_status, risk_level)\n**luôn lưu**
-activate DB
-deactivate DB
+== Phase 4: Detection Pipeline (Background Worker) ==
 
-alt risk_level HIGH hoặc CRITICAL
-    D -> DB : 9. INSERT alert\n(status=open, risk_level)
-    activate DB
-    deactivate DB
-    D --> A : **200** {alert_created: true,\nrisk_level}
-else risk_level LOW hoặc MEDIUM
-    D --> A : **200** {alert_created: false,\nrisk_level}
+note over DE, DDB
+  Detection Engine Worker
+  poll login_attempts WHERE status='pending'
+end note
+
+DE -> DDB : SELECT login_attempts\nWHERE status='pending'\nORDER BY timestamp
+activate DDB
+DDB --> DE : [pending attempts]
+deactivate DDB
+
+loop for each pending attempt
+    DE -> DDB : UPDATE login_attempts\n(status=processed)
+    
+    == Rule Evaluation ==
+    DE -> DE : Load active policy
+    DE -> DE : Calculate rule_score\n(IP new? fail_count? new_device?\nunusual_hour? new_country? VPN/Tor?)
+    DE -> DDB : INSERT detection_logs\n(stage=rule_evaluation,\nrule_name, triggered, score_contribution)
+    
+    == ML Scoring (Xem WF-6 chi tiết) ==
+    DE -> ML : **POST /api/v1/internal/ml/score**\n(features_vector)
+    activate ML
+    ML --> DE : {anomaly_score, is_anomaly,\nreason_codes, model_version}
+    deactivate ML
+    
+    == Combine Scores ==
+    DE -> DE : combined_score =\n0.4 × rule_score + 0.6 × ml_score
+    DE -> DE : risk_level =\nLOW < 0.25 < MEDIUM < 0.5 < HIGH < 0.75 < CRITICAL
+    
+    DE -> DDB : INSERT risk_assessments\n(login_attempt_id, rule_score, ml_score,\ncombined_score, risk_level, decision)
+    
+    == Action Decision ==
+    alt risk_level IN (HIGH, CRITICAL)
+        DE -> DDB : INSERT alerts\n(login_attempt_id, status=open,\nrisk_level, detection_reason,\ndetection_scores)
+        DE -> DDB : INSERT detection_logs\n(stage=action_sent,\ndetails={action: ALERT_CREATED})
+    else risk_level IN (LOW, MEDIUM)
+        DE -> DDB : INSERT detection_logs\n(stage=action_sent,\ndetails={action: NO_ALERT})
+    end
+    
+    == Optional: Send Action back to Core ==
+    alt risk_level = CRITICAL + LOCK_USER action
+        DE -> CA : **POST /api/v1/internal/actions**\n(action=LOCK_USER, target=user_id,\nreason, login_attempt_id)\n+ Internal-Secret
+        activate CA
+        CA -> CDB : UPDATE users SET status=locked
+        CA --> DE : **200 OK**
+        deactivate CA
+    end
 end
+
+note over DE
+  **v3.3 Key Points:**
+  - Login KHÔNG block chờ detection
+  - Outbox pattern đảm bảo reliability
+  - HTTP giữa Core ↔ Detection Engine
+  - Detection Engine tự quản lý login_attempts
+  - ML Service được gọi qua HTTP riêng
+end note
 
 @enduml

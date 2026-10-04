@@ -1,0 +1,93 @@
+@startuml
+skinparam backgroundColor #FFFFFF
+skinparam shadowing false
+skinparam defaultFontName Sans
+skinparam ArrowColor #343A40
+skinparam ArrowThickness 1.2
+skinparam titleFontSize 18
+skinparam swimlane {
+  BackgroundColor #F8F9FA
+  BorderColor #868E96
+}
+
+title WF-6 — Suy luận học máy, nhìn từ bên trong ML Service (v3.3)
+
+|Detection Engine kiểm tra sức khoẻ trước|
+start
+partition "DETECTION ENGINE (8001)" {
+  :HTTP GET /internal/health\nkiểm tra trước khi dùng;
+}
+partition "ML SERVICE (8002)" {
+  if (Mô hình sẵn sàng?) then (Có)
+    #E1D5E7:Trả model_status = ready\n+ phiên bản mô hình đang dùng;
+  else (Không)
+    :Trả trạng thái degraded/error;
+  endif
+}
+
+|Vòng đời một lần suy luận|
+partition "DETECTION ENGINE (8001)" {
+  :Dựng 6 đặc trưng đã kiểm tra;
+  :HTTP POST /internal/ml/score\n(request_id, đặc trưng, phiên bản);
+}
+partition "ML SERVICE (8002)" {
+  :Nạp mô hình từ sổ đăng ký\n(đọc tệp .joblib vào bộ nhớ);
+  partition "Isolation Forest" {
+    :Rút gọn: cây phân tách ngẫu nhiên;
+    :Điểm nào bị tách nhanh (ít bước)\nthì càng "lạ" -> điểm càng cao;
+    note right
+      Không cần nhãn (không cần biết
+      trước cái nào là tấn công)
+      -> rất phù hợp với dữ liệu
+      tấn công vốn rất hiếm
+    end note
+  }
+  :Kiểm tra đặc trưng: đủ, đúng kiểu, đúng khoảng;
+  if (Suy luận thành công?) then (Có)
+    :Điểm thô (decision_function);
+    :Chuẩn hoá về khoảng 0–1;
+    :Sinh mã lý do giải thích\n(vd: unusual_time, new_device);
+    :Ghi nhật ký suy luận vào ml-service-db\n(điểm thô, điểm chuẩn hoá, có bất thường không,\nmã lý do, phiên bản, thời gian xử lý ms);
+    :Trả kết quả cho Detection Engine;
+  elseif (Suy luận quá thời gian?) then (Quá thời gian)
+    #FFF4E6:Ghi nhật ký trạng thái degraded;
+    :Trả 408 Quá thời gian;
+  else (Lỗi suy luận)
+    #FFE8E8:Ghi nhật ký trạng thái error;
+    :Trả 500 Lỗi hệ thống;
+  endif
+}
+partition "DETECTION ENGINE (8001)" {
+  if (Nhận được điểm?) then (Có)
+    :Dùng điểm ML trong công thức gộp;
+  else (Không)
+    #FFF4E6:Chấm điểm CHỈ BẰNG QUY TẮC\n(ghi nhật ký ml_status = unavailable);
+  endif
+}
+
+|Vòng lặp nền mỗi giờ — theo dõi trôi dữ liệu|
+partition "ML SERVICE (8002)" {
+  :Đọc nhật ký suy luận 1 giờ gần nhất;
+  :Tính thống kê mỗi đặc trưng\n(số lượng, trung bình, độ lệch chuẩn,\nnhỏ nhất, lớn nhất, mức bất thường);
+}
+partition "ml-service-db" {
+  :Ghi vào bảng feature_statistics;
+}
+note right
+  **Vì sao cần theo dõi trôi dữ liệu (data drift)?**
+  Nếu phân bố đặc trưng thay đổi mạnh so với lúc
+  huấn luyện, mô hình không còn đáng tin.
+  Con số thống kê mỗi giờ giúp phát hiện việc này
+  sớm, trước khi chấm điểm sai hàng loạt.
+end note
+stop
+
+legend bottom
+**ML Service là không trạng thái (stateless):**
+mô hình nằm trong bộ nhớ, không giữ phiên.
+Cơ sở dữ liệu chỉ dùng cho sổ đăng ký mô hình
+(model_versions) và nhật ký (inference_logs).
+-> có thể chạy nhiều bản sao, mở rộng ngang thoải mái.
+endlegend
+
+@enduml

@@ -1,166 +1,179 @@
 @startuml
 skinparam backgroundColor #FFFFFF
 
-title WF-5: Session Management
+title WF-5: Session Management (v3.3 - core-app + core-db)
 
 participant "User\n(Browser/App)" as U #D5E8D4
-participant "Auth API" as A #DAE8FC
-participant "PostgreSQL" as DB #F5F5F5
+participant "Core App" as CA #DAE8FC
+database "core-db" as CDB #F5F5F5
 
-== Login Flow (Create Session) ==
+== Create Session ==
 
-U -> A : **POST /auth/login**\n(username, password)
-activate A
+note over U, CDB
+  Session được tạo sau khi:
+  1. Login thành công (WF-1)
+  2. MFA verify thành công (WF-4)
+end note
 
-A -> DB : SELECT user WHERE username
-activate DB
-DB --> A : user record
-deactivate DB
+U -> CA : **POST /api/v1/auth/login**\n(username, password)
+activate CA
 
-alt credentials valid + MFA not required
-    A -> DB : INSERT session\n(token_jti, access_token_hash,\nrefresh_token_hash, expires_at)
-    activate DB
-    deactivate DB
-    
-    A --> U : **200 OK**\n{access_token, refresh_token,\nexpires_in: 900}
+CA -> CDB : SELECT user WHERE username
+activate CDB
+CDB --> CA : user record
+deactivate CDB
 
-else credentials valid + MFA required
-    A -> DB : INSERT mfa_transaction (pending)
-    activate DB
-    deactivate DB
-    A --> U : **200 MFA_REQUIRED**\n{session_id, mfa_type}
-    
-    U -> A : **POST /auth/mfa/verify**
-    A -> DB : UPDATE mfa_transaction (completed)
-    A -> DB : INSERT session
-    activate DB
-    deactivate DB
-    A --> U : **200 OK**\n{access_token, refresh_token}
-end
+CA -> CDB : INSERT sessions\n(token_jti, access_token_hash,\nrefresh_token_hash, expires_at=+15min,\nrefresh_expires=+7d,\nip_address_id, user_agent)
+activate CDB
+deactivate CDB
+
+CA --> U : **200 OK**\n{access_token (15min),\nrefresh_token (7d),\nexpires_in: 900}
+deactivate CA
 
 == Token Refresh ==
 
-U -> A : **POST /auth/refresh**\n(refresh_token)
-activate A
+U -> CA : **POST /api/v1/auth/refresh**\n(refresh_token)
+activate CA
 
-A -> DB : SELECT session WHERE refresh_token_hash=?
-activate DB
-DB --> A : session record
-deactivate DB
+CA -> CDB : SELECT session\nWHERE refresh_token_hash=?\nAND revoked_at IS NULL
+activate CDB
+CDB --> CA : session record
+deactivate CDB
 
-alt refresh_token valid + not revoked
-    alt access_token still valid (not expired)
-        A --> U : **200 OK**\n{use_current_token: true}
-    else access_token expired
-        A -> DB : UPDATE session\n(new token_jti, new expires_at)
-        activate DB
-        deactivate DB
-        A --> U : **200 OK**\n{access_token, expires_in: 900}
-    end
-else refresh_token expired / revoked
-    A --> U : **401 TOKEN_EXPIRED**\n{relogin_required: true}
+CA -> CA : Validate refresh_token\n(check expiry, signature)
+
+alt refresh_token VALID + not revoked
+    CA -> CA : Generate new access_token\n(với token_jti rotation)
+    CA -> CDB : UPDATE sessions\n(token_jti=new, expires_at=NOW()+15min,\nlast_activity_at=NOW())
+    activate CDB
+    deactivate CDB
+    
+    CA --> U : **200 OK**\n{access_token, expires_in: 900}
+    deactivate CA
+
+else refresh_token EXPIRED/REVOKED
+    CA -> CDB : UPDATE sessions\n(revoked_at=NOW())
+    CA --> U : **401 TOKEN_EXPIRED**\n{relogin_required: true}
+    deactivate CA
 end
 
 == Logout (Single Session) ==
 
-U -> A : **POST /auth/logout**\n(access_token)
-activate A
+U -> CA : **POST /api/v1/auth/logout**\n(access_token)
+activate CA
 
-A -> DB : UPDATE session\n(revoked_at = NOW())
-activate DB
-deactivate DB
+CA -> CDB : UPDATE sessions\n(revoked_at=NOW())\nWHERE token_jti=access_token.jti
+activate CDB
+deactivate CDB
 
-A --> U : **200 OK**\n{logged_out: true}
+CA -> CDB : INSERT audit_logs\n(action="logout", actor_id)
+activate CDB
+deactivate CDB
+
+CA --> U : **200 OK**\n{logged_out: true}
+deactivate CA
 
 == Logout (All Sessions) ==
 
-U -> A : **POST /auth/logout-all**\n(access_token)
-activate A
+U -> CA : **POST /api/v1/auth/logout-all**\n(access_token)
+activate CA
 
-A -> DB : UPDATE session\n(revoked_at = NOW())\nWHERE user_id = current_user_id
-activate DB
-deactivate DB
+CA -> CDB : UPDATE sessions\nSET revoked_at=NOW()\nWHERE user_id=current_user_id\nAND revoked_at IS NULL
+activate CDB
+CDB --> CA : count: 5 sessions revoked
+deactivate CDB
 
-A --> U : **200 OK**\n{logged_out_all: true, sessions_revoked: 5}
+CA -> CDB : INSERT audit_logs\n(action="logout_all")
+CA --> U : **200 OK**\n{logged_out_all: true,\nsessions_revoked: 5}
+deactivate CA
 
-== Revoke Session (Admin) ==
+== List Active Sessions ==
 
-note over U
-  **Security Admin có thể revoke\nsessions của user khác**
+U -> CA : **GET /api/v1/sessions**\n(access_token)
+activate CA
+
+CA -> CDB : SELECT sessions\nWHERE user_id=current_user_id\nAND revoked_at IS NULL\nORDER BY last_activity_at DESC
+activate CDB
+CDB --> CA : [session1, session2, ...]
+deactivate CDB
+
+CA --> U : **200 OK**\n{sessions: [{id, device, ip,\nlast_activity, created_at}]}
+deactivate CA
+
+== Revoke Own Session ==
+
+U -> CA : **DELETE /api/v1/sessions/{id}**\n(access_token)
+activate CA
+
+CA -> CDB : SELECT session WHERE id=?
+activate CDB
+CDB --> CA : session record
+deactivate CDB
+
+alt session.user_id = current_user_id
+    CA -> CDB : UPDATE sessions\n(revoked_at=NOW())\nWHERE id=? AND user_id=?
+    CA --> U : **200 OK** {revoked: true}
+    deactivate CA
+
+else not own session
+    CA --> U : **403 FORBIDDEN**
+    deactivate CA
+end
+
+== Admin Revoke Session ==
+
+note over U, CDB
+  Security Admin có thể revoke
+  sessions của user khác
 end note
 
-U -> A : **POST /admin/sessions/{id}/revoke**\n(admin_token)
-activate A
+U -> CA : **POST /api/v1/admin/sessions/{id}/revoke**\n(admin_token, reason)
+activate CA
 
-A -> DB : UPDATE session\n(revoked_at = NOW(), revoked_by = admin_id)
-activate DB
-deactivate DB
+CA -> CA : Validate JWT, role=SECURITY_ADMIN
+CA -> CDB : UPDATE sessions\n(revoked_at=NOW())\nWHERE id=target_session_id
+activate CDB
+deactivate CDB
 
-A -> DB : INSERT audit_log\n(action="session_revoked_by_admin")
-activate DB
-deactivate DB
+CA -> CDB : INSERT audit_logs\n(action="session_revoked_by_admin",\nactor_id=admin_id,\nresource_id=session_id,\nafter_state={revoked: true})
+activate CDB
+deactivate CDB
 
-A --> U : **200 OK**\n{revoked: true}
+CA --> U : **200 OK** {revoked: true}
+deactivate CA
 
 == Session Activity Update ==
 
-note over U
-  **Background: Cập nhật last_activity_at\nđịnh kỳ mỗi request**
+note over U, CDB
+  Background: Middleware update
+  last_activity_at mỗi request
 end note
 
-U -> A : Any API request\n(with access_token)
-activate A
+U -> CA : Any API request\n(access_token in header)
+activate CA
 
-A -> DB : UPDATE session\n(last_activity_at = NOW())
-activate DB
-deactivate DB
+CA -> CA : Validate JWT
+CA -> CDB : UPDATE sessions\n(last_activity_at=NOW())\nWHERE token_jti=? (async)
+deactivate CA
 
 == Session Expiry Check ==
 
-note over A, DB
-  **Token Expiry Handling:**
+note over U, CA
+  **JWT Validation Pipeline:**
   1. Client gửi access_token
   2. API check exp claim trong JWT
-  3. Nếu expired → reject với 401
+  3. Nếu expired → 401
   4. Client dùng refresh_token
   5. Hoặc user phải login lại
 end note
 
 alt Token expired
-    A --> U : **401 TOKEN_EXPIRED**\nWWW-Authenticate: Bearer realm="access_token"
-    U -> A : **POST /auth/refresh** (refresh_token)
-end
-
-== List Active Sessions ==
-
-U -> A : **GET /api/v1/sessions**\n(access_token)
-activate A
-
-A -> DB : SELECT sessions\nWHERE user_id = current_user_id\nAND revoked_at IS NULL
-activate DB
-DB --> A : [session1, session2, ...]
-deactivate DB
-
-A --> U : **200 OK**\n{sessions: [
-  {id, device, ip, last_activity, created_at}
-]}
-
-== Revoke Own Session ==
-
-U -> A : **DELETE /api/v1/sessions/{id}**\n(access_token)
-activate A
-
-A -> DB : SELECT session WHERE id=?
-activate DB
-DB --> A : session record
-
-alt session.user_id = current_user_id
-    A -> DB : UPDATE session\n(revoked_at = NOW())
-    activate DB
-    deactivate DB
-    A --> U : **200 OK**\n{revoked: true}
-else not own session
-    A --> U : **403 FORBIDDEN**
+    U -> CA : Request with expired access_token
+    activate CA
+    CA --> U : **401 TOKEN_EXPIRED**\nWWW-Authenticate: Bearer realm="access_token"
+    deactivate CA
+    
+    U -> CA : **POST /api/v1/auth/refresh** (refresh_token)
 end
 
 @enduml

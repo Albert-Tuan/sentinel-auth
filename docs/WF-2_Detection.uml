@@ -1,0 +1,57 @@
+@startuml
+left to right direction
+skinparam monochrome true
+skinparam shadowing false
+skinparam backgroundColor white
+skinparam rectangle {
+  BackgroundColor white
+  BorderColor black
+}
+skinparam ArrowColor black
+title WF-2  Detection Engine Flow
+
+rectangle "Core App" as sys_1 {
+  rectangle "Record login event" as event
+  rectangle "Lock user" as lock
+}
+
+rectangle "core-db" as sys_2 {
+  rectangle "Pending outbox event" as outbox
+}
+
+rectangle "Outbox Poller" as sys_3 {
+  rectangle "Poll and publish" as poll
+}
+
+rectangle "Detection Engine" as sys_4 {
+  rectangle "HTTP event endpoint" as receive
+  rectangle "Rule evaluation" as rules
+  rectangle "Combine risk scores" as combine
+  rectangle "Optional LOCK_USER" as action
+}
+
+rectangle "detection-db" as sys_5 {
+  rectangle "Pending login attempt" as attempt
+  rectangle "Risk assessment and alert" as assess
+}
+
+rectangle "ML Service" as sys_6 {
+  rectangle "ML anomaly score" as ml
+}
+
+event ..> outbox : INSERT outbox_events\n<<flow>>
+outbox ..> poll : pending events\n<<flow>>
+poll ..> receive : POST login-events\n<<flow>>
+receive ..> attempt : idempotent insert\n<<flow>>
+attempt ..> rules : worker fetches attempts\n<<flow>>
+rules ..> ml : HTTP score request\n<<flow>>
+ml ..> combine : anomaly score\n<<flow>>
+rules ..> combine : rule score\n<<flow>>
+combine ..> assess : risk level\n<<flow>>
+assess ..> action : HIGH / CRITICAL\n<<flow>>
+action ..> lock : critical action via HTTP\n<<flow>>
+
+legend bottom
+  The login response is independent of this background pipeline.
+endlegend
+@enduml

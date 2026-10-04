@@ -1,138 +1,157 @@
 @startuml
 skinparam backgroundColor #FFFFFF
 
-title WF-4: MFA Flow - Chi tiết các loại MFA
+title WF-4: MFA Flow - Chi tiết các loại (v3.3)
 
 participant "User\n(Browser/App)" as U #D5E8D4
-participant "Auth API" as A #DAE8FC
-participant "MFA\nNotification" as N #E1D5E7
-participant "PostgreSQL" as DB #F5F5F5
+participant "Core App" as CA #DAE8FC
+participant "MFA Notification\nService" as N #E1D5E7
+database "core-db" as CDB #F5F5F5
 
 == MFA Initiation ==
 
-note over U, DB
-  **Trigger MFA:**
+note over U, CDB
+  **MFA được trigger khi:**
   1. Login với MFA enabled
-  2. Risk level HIGH/CRITICAL
-  3. Sensitive operation
-  4. Periodic re-auth
+  2. Risk level HIGH/CRITICAL (từ WF-2)
+  3. Sensitive operation (password change, etc.)
+  4. Periodic re-auth (>24h)
 end note
 
-A -> DB : INSERT mfa_transaction\n(type=one_time/persistent, status=pending)
-activate DB
-deactivate DB
+CA -> CDB : INSERT mfa_transaction\n(type=one_time/persistent,\nstatus=pending, expires_at+5min)
+activate CDB
+deactivate CDB
 
-alt MFA via EMAIL
-    A -> N : Send OTP via Email
+alt MFA via EMAIL OTP
+    CA -> N : **Send OTP via Email**\n(recipient, code=123456)
     activate N
-    N --> A : notification_id
+    N --> CA : notification_id
     deactivate N
-    A -> DB : INSERT mfa_notification\n(channel=email, recipient)
-    activate DB
-    deactivate DB
-    A --> U : **200 MFA_REQUIRED**\n{mfa_type: "email_otp", expires_in: 300}
-
-    U -> A : **POST /mfa/verify**\n(code: "123456")
     
-else MFA via SMS
-    A -> N : Send OTP via SMS
-    activate N
-    N --> A : notification_id
-    deactivate N
-    A -> DB : INSERT mfa_notification\n(channel=sms, recipient)
-    activate DB
-    deactivate DB
-    A --> U : **200 MFA_REQUIRED**\n{mfa_type: "sms_otp", expires_in: 300}
+    CA -> CDB : INSERT mfa_notifications\n(channel=email, recipient,\nmfa_code_hash, expires_at)
+    activate CDB
+    deactivate CDB
+    
+    CA --> U : **200 MFA_REQUIRED**\n{mfa_type: "email_otp", expires_in: 300}
+    
+    U -> CA : **POST /api/v1/auth/mfa/verify**\n(transaction_id, code: "123456")
 
-    U -> A : **POST /mfa/verify**\n(code: "123456")
+else MFA via SMS OTP
+    CA -> N : **Send OTP via SMS**
+    activate N
+    N --> CA : notification_id
+    deactivate N
+    
+    CA -> CDB : INSERT mfa_notifications\n(channel=sms)
+    
+    CA --> U : **200 MFA_REQUIRED**\n{mfa_type: "sms_otp", expires_in: 300}
+    
+    U -> CA : **POST /api/v1/auth/mfa/verify**\n(code: "123456")
 
 else MFA via TOTP (Authenticator)
-    A --> U : **200 MFA_REQUIRED**\n{mfa_type: "totp", setup_url: "otpauth://..."}
+    note right: User đã setup totp_secret trước đó
+    CA --> U : **200 MFA_REQUIRED**\n{mfa_type: "totp"}
     
-    note right: User nhập code từ\nGoogle Authenticator\nhoặc tương tự
-    
-    U -> A : **POST /mfa/verify**\n(code: "123456")
+    U -> CA : **POST /api/v1/auth/mfa/verify**\n(code: "123456"\ntừ Google Authenticator)
 
-else MFA via PUSH_NOTIFICATION
-    A -> N : Send Push Notification
+else MFA via PUSH Notification
+    CA -> N : **Send Push Notification**
     activate N
-    N --> A : notification_id
+    N --> CA : notification_id
     deactivate N
-    A -> DB : INSERT mfa_notification\n(channel=push)
-    activate DB
-    deactivate DB
-    A --> U : **200 MFA_REQUIRED**\n{mfa_type: "push", expires_in: 120}
-
-    note over U: User approve trên\nmobile app
     
-    U -> A : **POST /mfa/verify**\n{action: "approve"} hoặc {action: "reject"}
+    CA -> CDB : INSERT mfa_notifications\n(channel=push)
+    
+    CA --> U : **200 MFA_REQUIRED**\n{mfa_type: "push", expires_in: 120}
+    
+    note over U
+      User approve trên mobile app
+      (approve/reject)
+    end note
+    
+    U -> CA : **POST /api/v1/auth/mfa/verify**\n(action: "approve")
 end
 
 == MFA Verification ==
 
-A -> DB : SELECT mfa_transaction WHERE id=session_id
-activate DB
-DB --> A : transaction record
-deactivate DB
+CA -> CDB : SELECT mfa_transaction\nWHERE id=transaction_id
+activate CDB
+CDB --> CA : transaction record
+deactivate CDB
+
+CA -> CA : Verify OTP:\n- Hash compare\n- Expiry check\n- IP match check
 
 alt Invalid Code / Expired / IP Mismatch
-    A -> DB : UPDATE mfa_transaction\n(status=failed, fail_count+1)
-    activate DB
-    deactivate DB
+    CA -> CDB : UPDATE mfa_transaction\n(status=failed, fail_count+1)
+    activate CDB
+    deactivate CDB
     
     alt fail_count >= 3
-        A -> DB : UPDATE user\n(status=locked)
-        activate DB
-        deactivate DB
-        A --> U : **403 ACCOUNT_LOCKED**\n{max_attempts_reached: true}
+        CA -> CDB : UPDATE users\n(status=locked, locked_at=NOW())
+        activate CDB
+        deactivate CDB
+        CA -> CDB : INSERT audit_logs\n(action="account_locked")
+        CA --> U : **403 ACCOUNT_LOCKED**\n{max_attempts_reached: true}
     else fail_count < 3
-        A --> U : **401 MFA_FAILED**\n{attempts_remaining: 2}
+        CA --> U : **401 MFA_FAILED**\n{attempts_remaining: 2-fail_count}
     end
 
 else Valid Code / Approved
-    A -> DB : UPDATE mfa_transaction\n(status=completed, verified_at)
-    activate DB
-    deactivate DB
+    CA -> CDB : UPDATE mfa_transaction\n(status=completed, verified_at=NOW())
+    activate CDB
+    deactivate CDB
     
-    alt persistent MFA
-        A -> DB : INSERT persistent_mfa_token\n(user_id, device_fingerprint)
-        activate DB
-        deactivate DB
-    end
-    
-    A --> U : **200 OK**\n{access_token, refresh_token, mfa_verified: true}
+    CA --> U : **200 OK**\n{mfa_verified: true}\n(continue với session creation)
 end
 
-== Persistent MFA (Remember Device) ==
+== Persistent MFA (Trust Device) ==
 
-note over U, DB
+note over U, CDB
   **Persistent MFA Flow:**
   Sau khi verify thành công,
   user có thể chọn "Trust this device"
-  → sinh persistent token
 end note
 
 alt User clicks "Trust this device"
-    U -> A : **POST /mfa/trust-device**\n{device_fingerprint: "..."}
-    A -> DB : INSERT user_trusted_devices\n(user_id, device_fingerprint, expires_at)
-    activate DB
-    deactivate DB
-    A --> U : **200 OK**\n{trusted: true, expires_at: "+30 days"}
+    U -> CA : **POST /api/v1/auth/mfa/trust-device**\n{device_fingerprint}
+    activate CA
+    
+    CA -> CDB : INSERT user_trusted_devices\n(user_id, device_fingerprint,\nexpires_at=+30 days)
+    activate CDB
+    deactivate CDB
+    
+    CA --> U : **200 OK**\n{trusted: true, expires_at}
+    deactivate CA
 end
 
 == Next Login with Trusted Device ==
 
-U -> A : **POST /auth/login**\n(device_fingerprint included)
-A -> DB : Check user_trusted_devices\nWHERE device_fingerprint=?
-activate DB
-DB --> A : trusted device found
-deactivate DB
+U -> CA : **POST /api/v1/auth/login**\n(username, password,\ndevice_fingerprint)
+activate CA
 
-alt Trusted device valid
-    A -> DB : INSERT mfa_transaction\n(type=trusted_device, status=completed)
-    activate DB
-    deactivate DB
-    A --> U : **200 OK**\n{access_token} **← Không cần OTP**
+CA -> CDB : SELECT user WHERE username
+activate CDB
+CDB --> CA : user record
+deactivate CDB
+
+CA -> CA : Verify password (Argon2id)
+CA -> CDB : SELECT user_trusted_devices\nWHERE user_id AND\ndevice_fingerprint AND\nexpires_at > NOW()
+activate CDB
+CDB --> CA : trusted device found
+deactivate CDB
+
+alt Trusted device VALID
+    CA -> CDB : INSERT mfa_transaction\n(type=trusted_device,\nstatus=auto_completed)
+    CA -> CDB : INSERT login_attempt\n(outcome=mfa_success)
+    CA -> CDB : INSERT session
+    
+    CA --> U : **200 OK**\n{access_token, refresh_token}\n**← BỎ QUA OTP**
+    deactivate CA
+
+else Trusted device EXPIRED
+    CA -> CDB : INSERT mfa_transaction\n(status=pending, type=one_time)
+    CA --> U : **200 MFA_REQUIRED**\n{mfa_type: "email_otp"}
+    deactivate CA
 end
 
 @enduml

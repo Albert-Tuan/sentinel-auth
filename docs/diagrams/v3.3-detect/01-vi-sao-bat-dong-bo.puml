@@ -1,0 +1,58 @@
+@startuml
+skinparam backgroundColor #FFFFFF
+skinparam shadowing false
+skinparam defaultFontName Sans
+skinparam ArrowColor #343A40
+skinparam ArrowThickness 1.2
+skinparam titleFontSize 18
+
+title Vì sao Detection chạy BẤT ĐỒNG BỘ (Async)? — Outbox Pattern
+
+' ============ CÁCH CŨ: ĐỒNG BỘ ============
+rectangle "CÁCH CŨ — gọi trực tiếp, đồng bộ (đã bỏ ở v3.2)" as OLD {
+  rectangle "Người dùng" as U1
+  rectangle "Core App" as C1
+  rectangle "Detection\nEngine" as D1
+  rectangle "ML Service" as M1
+
+  U1 -> C1 : POST /auth/login
+  C1 -> D1 : gọi kiểm tra rủi ro
+  D1 -> M1 : xin điểm bất thường
+  M1 --> D1 : điểm
+  D1 --> C1 : quyết định
+  C1 --> U1 : trả token
+}
+
+note bottom of OLD
+  Người dùng phải **chờ** toàn bộ chuỗi xử lý.
+  Nếu ML Service chậm hoặc sập → người dùng chờ lâu hoặc lỗi.
+  Nếu Detection Engine sập giữa chừng → sự kiện đăng nhập bị mất.
+end note
+
+' ============ CÁCH MỚI: BẤT ĐỒNG BỘ ============
+rectangle "CÁCH MỚI — v3.3: ghi ra hộp thư, xử lý sau (Outbox)" as NEW {
+  rectangle "Người dùng" as U2
+  rectangle "Core App" as C2
+  database "core-db" as CDB2
+  rectangle "Bộ gom sự kiện\n(Outbox Poller)" as POLL
+  rectangle "Detection\nEngine" as D2
+  rectangle "Máy phân tích\nnền (worker)" as W2
+
+  U2 -> C2 : POST /auth/login
+  C2 -> CDB2 : LƯU phiên + GHI sự kiện\ntrong CÙNG một lần giao dịch
+  CDB2 --> C2 : xong
+  C2 --> U2 : trả token ngay (không chờ)
+  POLL -> CDB2 : đọc sự kiện chờ gửi
+  POLL -> D2 : HTTP đẩy sự kiện
+  D2 --> POLL : 202 Đã nhận
+  D2 -> W2 : xử lý nền
+}
+
+note bottom of NEW
+  **Ba lợi ích:**
+  1. Người dùng nhận token ngay → nhanh, không phụ thuộc ML.
+  2. Sự kiện nằm trong cùng lần ghi dữ liệu → **không mất** khi Core App sập.
+  3. Detection lỗi/thiếu → bộ gom tự thử lại, không ảnh hưởng đăng nhập.
+end note
+
+@enduml

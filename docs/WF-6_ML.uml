@@ -1,0 +1,52 @@
+@startuml
+left to right direction
+skinparam monochrome true
+skinparam shadowing false
+skinparam backgroundColor white
+skinparam rectangle {
+  BackgroundColor white
+  BorderColor black
+}
+skinparam ArrowColor black
+title WF-6  ML Inference Flow
+
+rectangle "Detection Engine" as sys_1 {
+  rectangle "Build six input features" as features
+  rectangle "POST internal ML score" as request
+  rectangle "Risk score returned" as result
+  rectangle "Rule-only fallback on error / timeout" as fallback
+}
+
+rectangle "ML Service" as sys_2 {
+  rectangle "Health check" as health
+  rectangle "Load active IsolationForest" as model
+  rectangle "Validate features + infer (<500 ms)" as predict
+  rectangle "Hourly feature statistics / drift" as stats
+}
+
+rectangle "ml-service-db" as sys_3 {
+  rectangle "Active model version" as registry
+  rectangle "Inference log + reason codes" as log
+  rectangle "Feature statistics" as stored
+}
+
+rectangle "detection-db" as sys_4 {
+  rectangle "ML failure detection log" as dlog
+}
+
+features ..> health : service readiness\n<<flow>>
+health ..> model : model ready\n<<flow>>
+model ..> registry : SELECT production model\n<<flow>>
+features ..> request : feature vector\n<<flow>>
+request ..> predict : six features\n<<flow>>
+predict ..> log : store inference\n<<flow>>
+predict ..> result : anomaly score + reasons\n<<flow>>
+predict ..> fallback : timeout / error\n<<flow>>
+log ..> stats : periodic records\n<<flow>>
+stats ..> stored : distribution + drift\n<<flow>>
+fallback ..> dlog : ml_unavailable\n<<flow>>
+
+legend bottom
+  Detection combines 0.4 × rule score + 0.6 × ML score when inference succeeds.
+endlegend
+@enduml

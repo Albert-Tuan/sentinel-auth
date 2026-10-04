@@ -1,0 +1,109 @@
+@startuml
+skinparam backgroundColor #FFFFFF
+skinparam shadowing false
+skinparam defaultFontName Sans
+skinparam ArrowColor #343A40
+skinparam ArrowThickness 1.2
+skinparam titleFontSize 18
+skinparam ActivityBorderColor #495057
+skinparam ActivityDiamondBorderColor #495057
+skinparam swimlane {
+  BackgroundColor #F8F9FA
+  BorderColor #868E96
+}
+
+title WF-2 — Luồng phát hiện đăng nhập bất thường (v3.3)
+
+|Khi sự kiện trở thành tín hiệu|
+start
+partition "CORE APP (8000)" {
+  :Xác thực đăng nhập;
+  :Ghi phiên người dùng\nvào core-db;
+  :GHI SỰ KIỆN vào hộp thư\n(bảng outbox_events);
+  note right
+    Ghi phiên và ghi sự kiện
+    trong CÙNG một lần giao dịch
+    --> không thể xảy ra
+    "có phiên mà mất sự kiện"
+  end note
+  :TRẢ TOKEN NGAY\n(người dùng không phải chờ);
+}
+partition "BỘ GOM SỰ KIỆN" {
+  :Đọc sự kiện trạng thái\n"chờ gửi" trong core-db;
+  :Đánh dấu "đang gửi"\n(tránh 2 bộ gom trùng nhau);
+}
+partition "DETECTION ENGINE (8001)" {
+  :POST sự kiện đăng nhập\n(kèm khoá nội bộ);
+  if (Sự kiện đã tồn tại?) then (Có rồi)
+    #FFE8E8:Trả 200 OK\n(bỏ qua trùng lặp);
+    note right
+      event_id là khoá duy nhất
+      --> gửi lại bao nhiêu lần
+      cũng chỉ có 1 lần đăng nhập
+    end note
+  else (Mới)
+    #E8F5E9:Ghi bảng login_attempts\n(trạng thái = chờ xử lý);
+    :Trả 202 Đã nhận;
+  endif
+}
+partition "BỘ GOM SỰ KIỆN" {
+  :Đánh dấu "đã gửi"\n(nếu lỗi thì giữ lại để thử sau);
+}
+partition "MÁY PHÂN TÍCH NỀN" {
+  :Nhặt các lần đăng nhập\ntrạng thái "chờ xử lý";
+  :Dựng và kiểm tra\n6 đặc trưng;
+  partition "Chấm điểm quy tắc" {
+    :Đọc chính sách đang áp dụng;
+    :Đối chiếu từng quy tắc với đặc trưng;
+    :Tính điểm quy tắc (0–1);
+    :Nhật ký giai đoạn rule_evaluation;
+  }
+  partition "Gọi ML Service" {
+    :HTTP POST /internal/ml/score\n(6 đặc trưng, thời hạn chờ 5s);
+    if (ML phản hồi?) then (Có)
+      #E1D5E7:Nhận điểm bất thường (0–1)\n+ mã lý do + phiên bản mô hình;
+    else (Không / lỗi)
+      #FFF4E6:Ghi nhật ký giai đoạn ml_call\n(lý do: ml_unavailable);
+      :Chuyển sang chấm điểm\nCHỈ BẰNG QUY TẮC;
+      note right
+        Hệ thống KHÔNG sập
+        vì ML lỗi — đây gọi là
+        suy giảm êm (graceful
+        degradation)
+      end note
+    endif
+  }
+  :GỘP ĐIỂM\n0.4 x điểm quy tắc + 0.6 x điểm ML;
+  :XẾP MỨC RỦI RO\n(<0.25 thấp · <0.50 trung bình\n<0.75 cao · còn lại nghiêm trọng);
+  :Ghi bảng risk_assessments\n+ nhật ký giai đoạn scoring;
+}
+if (Mức rủi ro cao\nhoặc nghiêm trọng?) then (Có)
+  partition "DETECTION ENGINE (8001)" {
+    :Tạo cảnh báo (trạng thái mở)\n+ phân công cho chuyên viên SOC;
+    :Nhật ký giai đoạn action_sent;
+  }
+  if (Mức nghiêm trọng?) then (Có)
+    partition "CORE APP (8000)" {
+      :Nhận yêu cầu hành động qua HTTP\n(yêu cầu MFA / thu hồi phiên /\nkhoá tài khoản / giới hạn IP);
+      :Thực thi + ghi audit_logs;
+    }
+  else (Không)
+    partition "CORE APP (8000)" {
+      :Yêu cầu MFA cho lần đăng nhập kế tiếp;
+    }
+  endif
+else (Không)
+  partition "DETECTION ENGINE (8001)" {
+    :Chỉ ghi nhật ký\n(không tạo cảnh báo);
+  }
+endif
+stop
+
+legend bottom
+**Bốn giai đoạn luôn có trong nhật ký (detection_logs.stage):**
+`rule_evaluation` → `ml_call` → `scoring` → `action_sent`
+Nhờ vậy, khi có khiếu nại, có thể dựng lại
+chính xác hệ thống đã suy luận ra sao.
+endlegend
+
+@enduml

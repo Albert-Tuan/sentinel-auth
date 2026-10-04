@@ -1,0 +1,124 @@
+@startuml
+skinparam backgroundColor #FFFFFF
+
+title WF-6: ML Inference Flow (v3.3 - Detection Engine → ML Service)
+
+participant "Detection Engine\n(port 8001)" as DE #FFF2CC
+participant "ML Service\n(port 8002)" as ML #E1D5E7
+database "detection-db" as DDB #F5F5F5
+database "ml-service-db" as MDB #F5F5F5
+
+== Trigger: From WF-2 ==
+
+note over DE, ML
+  Trong quá trình xử lý login_attempt
+  (WF-2 - Detection Pipeline),
+  Detection Engine cần ML scoring
+end note
+
+DE -> DE : Build features_vector\n(6 features từ login context):
+note right
+  1. hour_of_day
+  2. fail_count_24h
+  3. ip_change_rate_7d
+  4. new_device (0/1)
+  5. average_login_interval_seconds
+  6. deviation_score
+end note
+
+== ML Service Health Check ==
+
+DE -> ML : **GET /api/v1/internal/health**
+activate ML
+ML --> DE : **200 OK**\n{model_status: "ready",\nactive_version: "v1.0-isolation-forest"}
+deactivate ML
+
+alt ML service DOWN
+    DE -> DE : ML unavailable\n→ ml_status=error\n→ combined_score = rule_score\n→ risk_level = MEDIUM (fallback)
+    note right: Degrade gracefully
+    DE -> DDB : INSERT detection_logs\n(stage=ml_call, reason="ml_unavailable")
+end
+
+== Load Model from Registry ==
+
+ML -> MDB : SELECT model_versions\nWHERE status='active'\nAND is_production=TRUE
+activate MDB
+MDB --> ML : active model config
+deactivate MDB
+
+ML -> ML : Load model file\n(path=/models/isolation-forest-v1.0.joblib)
+note right: Model được load\nlúc startup hoặc lazy load
+
+== Inference Request ==
+
+DE -> ML : **POST /api/v1/internal/ml/score**\n(request_id, features: {6_features},\nmodel_version: "v1.0-isolation-forest")
+activate ML
+
+ML -> ML : Validate features\n(type check, range check)
+ML -> ML : IsolationForest.predict(features)\n(timeout 500ms)
+
+alt inference SUCCESS
+    ML -> ML : raw_score = decision_function()
+    ML -> ML : normalized_score = 1 - normalize(raw_score)
+    ML -> ML : is_anomaly = (raw_score < threshold)
+    
+    ML -> MDB : INSERT inference_logs\n(request_id, model_version_id,\nfeatures, raw_score, normalized_score,\nis_anomaly, reason_codes, model_status='ready',\nprocessing_time_ms)
+    activate MDB
+    deactivate MDB
+    
+    ML --> DE : **200 OK**\n{anomaly_score: 0.85,\nnormalized_score: 0.85,\nis_anomaly: true,\nreason_codes: ["high_fail_count", "new_country"],\nmodel_version_used: "v1.0-isolation-forest",\nprocessing_time_ms: 23}
+    deactivate ML
+
+else inference TIMEOUT (>500ms)
+    ML -> MDB : INSERT inference_logs\n(model_status='degraded',\nerror_message='timeout')
+    
+    ML --> DE : **408 Request Timeout**\n{ml_status: "timeout"}
+    deactivate ML
+    
+    DE -> DE : ml_status='unavailable'\n→ fallback to rule-only
+
+else inference ERROR
+    ML -> MDB : INSERT inference_logs\n(model_status='error',\nerror_message=...)
+    
+    ML --> DE : **500 Internal Server Error**\n{ml_status: "error"}
+    deactivate ML
+    
+    DE -> DE : ml_status='error'\n→ fallback to rule-only
+end
+
+== Feature Statistics (Periodic) ==
+
+note over ML, MDB
+  Background worker chạy mỗi giờ:
+  - Compute feature distributions
+  - Detect data drift
+end note
+
+ML -> MDB : SELECT inference_logs\nWHERE created_at > NOW()-1h
+activate MDB
+MDB --> ML : [inference records]
+deactivate MDB
+
+ML -> ML : Compute statistics:\n- count, mean, std, min, max\n- p25, p50, p75, p95\n- anomaly_rate
+
+ML -> MDB : INSERT feature_statistics\n(feature_name, timestamp, count, mean, std,\nmin, max, p25, p50, p75, p95, anomaly_rate)
+activate MDB
+deactivate MDB
+
+legend right
+  **6 Input Features:**
+  - hour_of_day (0-23)
+  - fail_count_24h (>=0)
+  - ip_change_rate_7d (0-1)
+  - new_device (0/1)
+  - average_login_interval_seconds (>=0)
+  - deviation_score (0-1)
+  
+  **Risk Score Formula:**
+  combined = 0.4 × rule_score + 0.6 × ml_score
+  
+  **Thresholds:**
+  LOW < 0.25 < MEDIUM < 0.5 < HIGH < 0.75 < CRITICAL
+endlegend
+
+@enduml

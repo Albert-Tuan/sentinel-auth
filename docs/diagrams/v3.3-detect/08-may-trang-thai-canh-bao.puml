@@ -1,0 +1,52 @@
+@startuml
+skinparam backgroundColor #FFFFFF
+skinparam shadowing false
+skinparam defaultFontName Sans
+skinparam state {
+  BackgroundColor #F8F9FA
+  BorderColor #495057
+}
+skinparam ArrowColor #343A40
+skinparam ArrowThickness 1.2
+skinparam titleFontSize 18
+
+title Máy trạng thái cảnh báo (Alert State Machine)
+
+[*] --> open : WF-2 tạo cảnh báo\n(mức CAO / NGHIÊM TRỌNG)
+
+state "mở\n(open)" as open
+state "đã tiếp nhận\n(acknowledged)" as ack
+state "đã kết luận\n(resolved)" as res
+state "báo nhầm\n(false_positive)" as fp
+
+open --> open : gán chuyên viên\n(làm việc song song nhiều người)
+open --> ack : Tiếp nhận
+
+ack --> ack : thêm ghi chú / đính chính
+ack --> res : Kết luận có vi phạm
+ack --> fp : Kết luận báo nhầm
+
+res --> [*]
+fp --> [*]
+
+note right of ack
+  **Điểm quan trọng của máy trạng thái:**
+  1. Chỉ chuyển được theo đúng đường vẽ trên.
+     Thử "kết luận" một cảnh báo đã báo nhầm
+     → hệ thống từ chối.
+  2. Cảnh báo chỉ bị đóng khi đã tiếp nhận
+     → không ai "bỏ qua" cảnh báo mà không chịu trách nhiệm.
+  3. Mọi lần chuyển trạng thái đều ghi vào
+     bảng `alert_timeline` (ai, lúc nào, từ đâu sang đâu, lý do).
+end note
+
+note left of open
+  **Chuyển cấp (escalate)** trong tài liệu là một
+  *sự kiện được ghi nhận*, không phải một trạng thái
+  đóng thay thế: analyst ghi nhận rồi chuyển cho
+  quản lý an ninh, và vẫn phải kết luận sau đó.
+
+  `alert_timeline.event_type` có giá trị `escalated`.
+end note
+
+@enduml

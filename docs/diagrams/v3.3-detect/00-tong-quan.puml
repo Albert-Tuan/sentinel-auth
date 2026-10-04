@@ -1,0 +1,75 @@
+@startuml
+skinparam backgroundColor #FFFFFF
+skinparam shadowing false
+skinparam defaultFontName Sans
+skinparam rectangle {
+  BackgroundColor #F8F9FA
+  BorderColor #495057
+}
+skinparam ArrowColor #343A40
+skinparam ArrowThickness 1.2
+skinparam titleFontSize 20
+
+title Bức tranh toàn cảnh — Hệ thống Sentinel Auth v3.3
+
+left to right direction
+
+actor "Người dùng\n(User)" as USER #D5E8D4
+actor "Chuyên viên SOC\n(SOC Analyst)" as SOC #CCE5FF
+actor "Quản trị bảo mật\n(Security Admin)" as ADM #F8CECC
+
+rectangle "CORE APP\n(cổng 8000)" as CORE #DAE8FC {
+  rectangle "Xác thực\n(đăng nhập, MFA)" as AUTH
+  rectangle "Quản lý phiên\n(session)" as SESS
+  rectangle "Hàng đợi phát\ntín hiệu (Outbox)" as OBOX
+}
+
+database "core-db\n13 bảng" as CDB #F5F5F5
+
+rectangle "DETECTION ENGINE\n(cổng 8001)" as DE #FFF2CC {
+  rectangle "Tiếp nhận sự kiện\nđăng nhập" as RECV
+  rectangle "Máy phân tích nền\n(Rule + ML)" as WORKER
+  rectangle "API cho SOC\n(quản lý cảnh báo)" as SOCAPI
+}
+
+database "detection-db\n7 bảng" as DDB #F5F5F5
+
+rectangle "ML SERVICE\n(cổng 8002)" as MLS #E1D5E7 {
+  rectangle "Suy luận mô hình\n(Isolation Forest)" as INF
+}
+
+database "ml-service-db\n3 bảng" as MDB #F5F5F5
+
+USER --> AUTH : đăng nhập
+AUTH --> SESS : tạo phiên
+AUTH --> CDB : lưu
+AUTH --> OBOX : ghi sự kiện\n(cùng lúc với lưu phiên)
+
+OBOX --> RECV : HTTP đẩy sự kiện\nđăng nhập
+RECV --> DDB : lưu lần đăng nhập
+DDB --> WORKER : nhặt lần đăng nhập\nchờ xử lý
+WORKER --> INF : HTTP xin điểm bất thường
+INF --> MDB : nhật ký suy luận
+INF --> WORKER : trả điểm
+WORKER --> DDB : ghi điểm rủi ro,\ntạo cảnh báo
+WORKER --> CORE : HTTP yêu cầu hành động\n(khóa tài khoản, yêu cầu MFA)
+
+SOC --> SOCAPI : xem & xử lý cảnh báo
+SOCAPI --> DDB : đọc/ghi cảnh báo
+ADM --> SOCAPI : quản lý chính sách phát hiện
+
+legend bottom
+|= Màu |= Ý nghĩa |
+| <back:#DAE8FC> </back> | Lõi xác thực (Core App) |
+| <back:#FFF2CC> </back> | Phát hiện rủi ro (Detection Engine) |
+| <back:#E1D5E7> </back> | Học máy (ML Service) |
+| <back:#F5F5F5> </back> | Cơ sở dữ liệu |
+| <back:#D5E8D4> </back> | Người dùng cuối |
+| <back:#CCE5FF> </back> | Nhân viên SOC |
+| <back:#F8CECC> </back> | Quản trị viên |
+
+**Ba dịch vụ tách biệt, ba cơ sở dữ liệu tách biệt,
+giao tiếp với nhau bằng HTTP (có khoá nội bộ).**
+endlegend
+
+@enduml

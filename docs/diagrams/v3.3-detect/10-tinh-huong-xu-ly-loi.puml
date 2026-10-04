@@ -1,0 +1,63 @@
+@startuml
+skinparam backgroundColor #FFFFFF
+skinparam shadowing false
+skinparam defaultFontName Sans
+skinparam rectangle {
+  BackgroundColor #F8F9FA
+  BorderColor #495057
+}
+skinparam ArrowColor #343A40
+skinparam ArrowThickness 1.2
+skinparam titleFontSize 18
+
+title Mười tình huống xử lý sự cố (Dữ liệu bị từ chối)
+
+left to right direction
+
+rectangle "1. Gửi trùng sự kiện" as S1
+rectangle "→ 200 OK, đã tồn tại\nKHÔNG tạo lần đăng nhập mới" as R1
+S1 --> R1
+
+rectangle "2. Sai khoá nội bộ" as S2
+rectangle "→ 401 Không được phép\nKHÔNG lưu gì" as R2
+S2 --> R2
+
+rectangle "3. Sai định dạng dữ liệu" as S3
+rectangle "→ 400 Yêu cầu sai\nKHÔNG lưu gì" as R3
+S3 --> R3
+
+rectangle "4. ML Service không phản hồi" as S4
+rectangle "→ ghi nhật ký ml_call\n→ chấm điểm CHỈ BẰNG QUY TẮC\n→ hệ thống KHÔNG sập" as R4 #FFF2CC
+S4 --> R4
+
+rectangle "5. Detection Engine sập giữa lúc xử lý" as S5
+rectangle "→ lần đăng nhập còn ở trạng thái\n'chờ xử lý' trong DB\n→ khi khởi động lại sẽ nhặt lại xử lý" as R5
+S5 --> R5
+
+rectangle "6. Core App sập sau khi tạo phiên" as S6
+rectangle "→ sự kiện ĐÃ nằm trong outbox_events\n(cùng lần ghi với phiên)\n→ bộ gom sẽ gửi lại" as R6
+S6 --> R6
+
+rectangle "7. Core App không nhận được lệnh khoá" as S7
+rectangle "→ ghi nhật ký hành động\n→ thử lại\n→ cảnh báo vẫn còn để SOC xử lý" as R7
+S7 --> R7
+
+rectangle "8. Analyst tiếp nhận cảnh báo\nđã có người khác xử lý" as S8
+rectangle "→ 409 Xung đột\nHệ thống chặn tranh chấp" as R8
+S8 --> R8
+
+rectangle "9. Analyst cố kết luận\ncảnh báo đã báo nhầm" as S9
+rectangle "→ 400 Yêu cầu sai\nMáy trạng thái chặn" as R9
+S9 --> R9
+
+rectangle "10. Tham chiếu tới người dùng\nở DB khác" as S10
+rectangle "→ KHÔNG có khoá ngoại\n→ phải kiểm tra qua API\n→ phải có tiến trình\nđối chiếu định kỳ" as R10 #F8CECC
+S10 --> R10
+
+legend bottom
+**Nguyên tắc chung của cả 10 tình huống:**
+Không để lỗi ở một thành phần làm hỏng trải nghiệm
+đăng nhập của người dùng, và không để mất dữ liệu.
+endlegend
+
+@enduml

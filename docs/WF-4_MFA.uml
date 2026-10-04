@@ -1,0 +1,48 @@
+@startuml
+left to right direction
+skinparam monochrome true
+skinparam shadowing false
+skinparam backgroundColor white
+skinparam rectangle {
+  BackgroundColor white
+  BorderColor black
+}
+skinparam ArrowColor black
+title WF-4  MFA Flow
+
+actor "User" as user
+
+rectangle "Core App" as sys_1 {
+  rectangle "Initiate MFA transaction" as trigger
+  rectangle "Choose Email / SMS / TOTP / Push" as channel
+  rectangle "Verify code, expiry and IP" as verify
+  rectangle "Trust this device (optional)" as trust
+}
+
+rectangle "MFA Notification Service" as sys_2 {
+  rectangle "Send OTP or push" as send
+}
+
+rectangle "core-db" as sys_3 {
+  rectangle "Store pending challenge" as pending
+  rectangle "Notification record / OTP hash" as notification
+  rectangle "Complete or fail challenge" as update
+  rectangle "Lock after 3 failures" as lock
+  rectangle "Trusted device expires in 30 days" as device
+}
+
+trigger ..> pending : INSERT mfa_transaction\n<<flow>>
+trigger ..> channel : MFA required\n<<flow>>
+channel ..> send : Email / SMS / Push\n<<flow>>
+send ..> notification : delivery + hash\n<<flow>>
+channel ..> user : MFA_REQUIRED / TOTP\n<<flow>>
+user ..> verify : OTP or push approval\n<<flow>>
+verify ..> update : check transaction\n<<flow>>
+update ..> lock : fail_count ≥ 3\n<<flow>>
+verify ..> trust : verified\n<<flow>>
+trust ..> device : save fingerprint\n<<flow>>
+
+legend bottom
+  A valid trusted device can complete MFA on the next login without a new OTP.
+endlegend
+@enduml

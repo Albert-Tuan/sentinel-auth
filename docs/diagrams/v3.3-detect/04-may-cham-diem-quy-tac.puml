@@ -1,0 +1,70 @@
+@startuml
+skinparam backgroundColor #FFFFFF
+skinparam shadowing false
+skinparam defaultFontName Sans
+skinparam rectangle {
+  BackgroundColor #F8F9FA
+  BorderColor #495057
+}
+skinparam ArrowColor #343A40
+skinparam ArrowThickness 1.2
+skinparam titleFontSize 18
+
+title Máy chấm điểm quy tắc (Rule Engine) — Nhìn từ bên trong
+
+top to bottom direction
+
+rectangle "CHÍNH SÁCH PHÁT HIỆN\n(bảng policies, cột rules dạng JSON)" as POL #FFE6CC {
+  rectangle "R001 Giờ bất thường\nđiều kiện: giờ ≥ 23 hoặc ≤ 5\ntrọng số 0.30 · điểm 0.80" as R1
+  rectangle "R002 Nhiều lần sai\nđiều kiện: sai_trong_24h ≥ 3\ntrọng số 0.40 · điểm 0.90" as R2
+  rectangle "R003 Thiết bị mới\nđiều kiện: thiết_bị_mới = đúng\ntrọng số 0.20 · điểm 0.50" as R3
+}
+
+rectangle "CHỌN CHÍNH SÁCH\nđang áp dụng" as PICK
+note right of PICK
+  Quy tắc chọn: `is_active = true`
+  và là bản mới nhất.
+  Cơ sở dữ liệu còn có ràng buộc (constraint)
+  bảo đảm **chỉ một** chính sách được bật
+  tại một thời điểm.
+  Nếu chưa có chính sách nào bật
+  → dùng chính sách mặc định.
+end note
+
+rectangle "ĐỐI CHIẾU TỪNG QUY TẮC\nvới 6 đặc trưng" as EVAL
+
+rectangle "Tính điểm quy tắc\n(rule_score)" as CALC #FFF2CC
+note right of CALC
+  `điểm_quy_tắc = Σ (điểm_quy_tắc_đ_chạy × trọng_số)`
+  cho các quy tắc **đã chạy**.
+end note
+
+rectangle "NHẬT KÝ CHI TIẾT\n(bảng detection_logs)" as LOG
+
+PICK --> POL
+POL --> EVAL
+EVAL --> R1 : có chạy?
+EVAL --> R2 : có chạy?
+EVAL --> R3 : có chạy?
+R1 --> CALC
+R2 --> CALC
+R3 --> CALC
+CALC --> LOG : ghi từng quy tắc chạy,\nđóng góp bao nhiêu điểm
+LOG --> CALC
+
+legend bottom
+**Cấu trúc một quy tắc (lưu trong JSONB):**
+`{ id, name, condition, weight, score, enabled }`
+
+**Vì sao có cả `weight` (trọng số) lẫn `score` (điểm)?**
+- `score` = quy tắc đó nghiêm trọng cỡ nào (0–1)
+- `weight` = quy tắc đó đáng tin cỡ nào trong tổng thể
+- Nhân hai giá trị → đóng góp thực tế của quy tắc
+
+**Quy tắc ở đây là "luật chơi cứng" (hard rules):**
+dễ hiểu, dễ giải thích cho SOC, không cần dữ liệu để huấn luyện,
+nhưng kẻ tấn công học được thì sẽ vượt qua.
+→ Đó là lý do cần thêm điểm từ mô hình học máy.
+endlegend
+
+@enduml

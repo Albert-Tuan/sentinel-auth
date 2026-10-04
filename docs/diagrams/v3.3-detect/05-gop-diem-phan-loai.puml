@@ -1,0 +1,72 @@
+@startuml
+skinparam backgroundColor #FFFFFF
+skinparam shadowing false
+skinparam defaultFontName Sans
+skinparam rectangle {
+  BackgroundColor #F8F9FA
+  BorderColor #495057
+}
+skinparam ArrowColor #343A40
+skinparam ArrowThickness 1.2
+skinparam titleFontSize 18
+
+title Gộp điểm và phân loại mức rủi ro (Risk Scoring)
+
+top to bottom direction
+
+rectangle "Điểm quy tắc\n(rule_score)\n0 → 1" as RS #FFF2CC
+rectangle "Điểm ML\n(ml_score)\n0 → 1" as MS #E1D5E7
+rectangle "Trọng số\ntrong chính sách" as W #FFE6CC {
+  rectangle "w_quy_tắc = 0.4\nw_ML = 0.6" as WW
+}
+
+rectangle "TÍNH ĐIỂM GỘP" as CALC #DAE8FC
+note right of CALC
+  `điểm_gộp = 0.4 × điểm_quy_tắc + 0.6 × điểm_ML`
+
+  Trọng số **không cố định cứng** mà nằm trong
+  `policies.config.weights` → quản trị viên chỉnh được.
+
+  Vì sao nghiêng về ML (0.6)?
+  ML bắt được kiểu mới mà quy tắc chưa biết;
+  quy tắc chính xác hơn nhưng bị bỏ qua dễ dàng.
+end note
+
+rectangle "So với ngưỡng\ntrong policies.config.thresholds" as THR
+
+rectangle "PHÂN LOẠI MỨC RỦI RO" as CLASS #FFF2CC
+note right of CLASS
+  | Mức     | Khoảng điểm | Quyết định |
+  |---------|-------------|------------|
+  | THẤP    | < 0.25      | CHO QUA   |
+  | TRUNG BÌNH | 0.25–0.50 | CHO QUA + ghi nhật ký |
+  | CAO     | 0.50–0.75   | YÊU CẦU MFA |
+  | NGHIÊM TRỌNG | > 0.75 | CHẶN + tạo cảnh báo |
+end note
+
+rectangle "GHI VÀO DB\nrisk_assessments" as SAVE #F5F5F5
+
+rectangle "NHÁNH THỜI GIAN\nMỗi lần đăng nhập\nchỉ có ĐÚNG 1 bản đánh giá" as ONETOONE #F8CECC
+note right of ONETOONE
+  Ràng buộc `UNIQUE (login_attempt_id)`
+  trong bảng `risk_assessments` bảo đảm quan hệ 1–1
+  với `login_attempts`.
+end note
+
+RS --> CALC
+MS --> CALC
+WW --> CALC
+CALC --> THR
+THR --> CLASS
+CLASS --> SAVE
+SAVE --> ONETOONE
+
+legend bottom
+**Ví dụ tính tay:**
+rule_score = 0.45, ml_score = 0.72
+→ 0.4 × 0.45 + 0.6 × 0.72 = 0.18 + 0.432 = **0.612**
+→ rơi vào khoảng 0.50–0.75 → mức **CAO**
+→ tạo cảnh báo + yêu cầu MFA cho lần đăng nhập kế tiếp
+endlegend
+
+@enduml

@@ -6,59 +6,84 @@ skinparam rectangle<<wf>> {
     FontStyle bold
 }
 
-title Sentinel Auth — 3 Workflow Architecture
+title Sentinel Auth — v3.3 Architecture (3 Services, 3 Databases)
 
-package "WF-1: Auth" <<wf>> {
+package "Core App (port 8000)" <<wf>> {
     rectangle "User\n(Browser)" as U #D5E8D4
-    rectangle "POST /auth/login\n(username, password, ip)" as LOGIN #FFF2CC
-    rectangle "Auth API\n(Argon2id verify)" as AUTH #DAE8FC
-    rectangle "PostgreSQL\n(users, sessions,\npre_auth_tx)" as DB1 #F5F5F5
-    rectangle "MFA?\n(optional)" as MFA #FFE6CC
-    rectangle "access_token\nrefresh_token" as TOKEN #D5E8D4
+    rectangle "POST /auth/login" as LOGIN #FFF2CC
+    rectangle "POST /auth/mfa/verify" as MFA #FFE6CC
+    rectangle "Auth API\n(FastAPI)" as AUTH #DAE8FC
+    rectangle "Outbox Poller" as OP #FFE6CC
+    database "core-db\n(13 tables)" as CDB #F5F5F5
 }
 
-package "WF-2: Detection (Inline)" <<wf>> {
-    rectangle "Auth API\n(gọi sau login)" as AUTH2 #DAE8FC
-    rectangle "POST /internal/v1/detect\n(features: IP, fail_count,\ndevice, time...)" as DETECT #FFF2CC
-    rectangle "ML Scoring\n(Isolation Forest)" as ML #E1D5E7
-    rectangle "anomaly_score (0..1)" as SCORE #E1D5E7
-    rectangle "risk_assessments\n+ alerts" as DB2 #F5F5F5
-    rectangle "HIGH/CRITICAL\n→ tạo alert?" as RISK #FFE6CC
+package "Detection Engine (port 8001)" <<wf>> {
+    rectangle "LoginEvent\nReceiver" as LER #FFF2CC
+    rectangle "Detection Worker\n(rule + ML scoring)" as DW #DAE8FC
+    rectangle "Alert Manager" as AM #FFE6CC
+    rectangle "SOC API\n(alerts CRUD)" as SOCAPI #DAE8FC
+    database "detection-db\n(7 tables)" as DDB #F5F5F5
 }
 
-package "WF-3: SOC Alerts" <<wf>> {
-    rectangle "SOC Analyst\n(Browser)" as SOC #CCE5FF
-    rectangle "GET /api/v1/alerts\n(filter: status, risk)" as GET #FFF2CC
-    rectangle "PATCH /alerts/{id}\n(acknowledge/resolve)" as PATCH #FFF2CC
-    rectangle "Auth API" as AUTH3 #DAE8FC
-    rectangle "alerts\n(status, notes)" as DB3 #F5F5F5
+package "ML Service (port 8002)" <<wf>> {
+    rectangle "Inference API\n(Isolation Forest)" as MLI #E1D5E7
+    rectangle "Model Registry\nLoader" as MRL #E1D5E7
+    database "ml-service-db\n(3 tables)" as MDB #F5F5F5
+    rectangle "isolation-forest\n-v1.0.joblib" as MODEL #E1D5E7
 }
 
-' Internal arrows
-AUTH -[#82B366,bold]-> TOKEN : access_token
-TOKEN -[#82B366,dashed,bold]-> AUTH2 : access_token
-AUTH2 -[#333]-> DETECT
-DETECT -[#333]-> ML
-ML -[#9673A6]-> RISK
-RISK -[#D6A656,dashed,bold]-> DB2 : alert
-ML -[#9673A6,dashed]-> SCORE
+' Internal flow
+U -[#82B366,bold]-> LOGIN
+LOGIN -[#333]-> AUTH
+AUTH -[#333]-> CDB
+AUTH -[#82B366,bold]-> MFA : if MFA required
+MFA -[#82B366,bold]-> U : access_token
+
+' Outbox pattern
+AUTH -[#D6A656,bold]-> CDB : INSERT outbox_events
+CDB -[#D6A656,bold]-> OP : poll pending
+OP -[#D6A656,bold]-> LER : HTTP POST /login-events
+LER -[#333]-> DDB : INSERT login_attempts
+
+' Detection pipeline
+DDB -[#333]-> DW : poll pending
+DW -[#333]-> MLI : HTTP POST /ml/score
+MLI -[#333]-> MRL
+MRL -[#333]-> MDB
+MRL -[#333]-> MODEL : load .joblib
+
+' SOC workflow
+SOCAPI -[#333]-> DDB : alerts CRUD
+SOCAPI -[#9673A6,dashed]-> CDB : validate user via HTTP
+
+' Cross-service actions
+DW -[#D6A656,dashed,bold]-> AUTH : Action: LOCK_USER
 
 legend right
-|= Color |= Meaning |
-| <back:#FFF2CC>    </back> | HTTP Request |
-| <back:#DAE8FC>    </back> | API / Service |
-| <back:#E1D5E7>    </back> | ML Component |
-| <back:#F5F5F5>    </back> | Database |
-| <back:#FFE6CC>    </back> | Decision |
-| <back:#D5E8D4>    </back> | Success/Token |
-| <back:#CCE5FF>    </back> | SOC Actor |
+||= Color |= Meaning |
+|| <back:#FFF2CC>    </back> | HTTP Endpoint |
+|| <back:#DAE8FC>    </back> | API / Service |
+|| <back:#E1D5E7>    </back> | ML Component |
+|| <back:#F5F5F5>    </back> | Database |
+|| <back:#FFE6CC>    </back> | Decision / Async |
+|| <back:#D5E8D4>    </back> | User / Success |
+
+|**v3.3 Workflows:**|
+| WF-1: Login (core-app) |
+| WF-2: Detection (async via outbox) |
+| WF-3: SOC (via detection API) |
+| WF-4: MFA (chi tiết các loại) |
+| WF-5: Session (core-app) |
+| WF-6: ML Inference (ml-service) |
 endlegend
 
 note bottom of diagram
-**Tech Stack:**
-FastAPI + PostgreSQL (1 schema) + Argon2id
-No Redis • No background worker
-Detection chạy inline trong request
+  **v3.3 Tech Stack:**
+  - FastAPI + PostgreSQL (3 schemas)
+  - 3 separate databases (core + detection + ml-service)
+  - HTTP communication between services
+  - Outbox pattern for reliability
+  - ML Service: stateless, model in memory
 end note
 
 @enduml

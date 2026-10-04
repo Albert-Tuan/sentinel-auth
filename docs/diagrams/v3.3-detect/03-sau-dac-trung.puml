@@ -1,0 +1,73 @@
+@startuml
+skinparam backgroundColor #FFFFFF
+skinparam shadowing false
+skinparam defaultFontName Sans
+skinparam rectangle {
+  BackgroundColor #F8F9FA
+  BorderColor #495057
+}
+skinparam ArrowColor #343A40
+skinparam ArrowThickness 1.2
+skinparam titleFontSize 18
+
+title Sáu đặc trưng (Features) — Đầu vào cho mô hình học máy
+
+left to right direction
+
+rectangle "Dữ liệu thô của\nmột lần đăng nhập" as RAW #F8CECC {
+  rectangle "Thời điểm\nđăng nhập" as T1
+  rectangle "Số lần đăng nhập\nsai trong 24h" as T2
+  rectangle "Lịch sử địa chỉ IP\n7 ngày gần nhất" as T3
+  rectangle "Lịch sử thiết bị\n(user-agent)" as T4
+  rectangle "Lịch sử thời điểm\nđăng nhập" as T5
+  rectangle "Thói quen đăng nhập\n(baseline)" as T6
+}
+
+rectangle "6 ĐẶC TRƯNG\nđưa vào mô hình" as FEAT #FFF2CC {
+  rectangle "1. hour_of_day\ngiờ trong ngày (0–23)" as F1
+  rectangle "2. fail_count_24h\nsố lần sai trong 24h" as F2
+  rectangle "3. ip_change_rate_7d\ntỉ lệ IP mới trong 7 ngày (0–1)" as F3
+  rectangle "4. new_device\nthiết bị mới hay không (0/1)" as F4
+  rectangle "5. average_login_interval_seconds\nkhoảng cách giữa 2 lần đăng nhập" as F5
+  rectangle "6. deviation_score\nmức lệch so với thói quen (0–1)" as F6
+}
+
+rectangle "BƯỚC KIỂM TRA\n(Feature Validation)" as VALID #FFE6CC
+rectangle "Gửi sang\nML Service" as SEND #E1D5E7
+
+T1 --> F1
+T2 --> F2
+T3 --> F3
+T4 --> F4
+T5 --> F5
+T6 --> F6
+
+F1 --> VALID
+F2 --> VALID
+F3 --> VALID
+F4 --> VALID
+F5 --> VALID
+F6 --> VALID
+
+note right of VALID
+  **Kiểm tra trước khi gửi:**
+  1. Đủ cả 6 đặc trưng (thiếu → điền giá trị mặc định)
+  2. Đúng kiểu dữ liệu
+  3. Trong khoảng cho phép
+end note
+
+VALID --> SEND : vector 6 chiều
+SEND --> SEND : ML Service chấm điểm 0..1
+
+legend bottom
+**Vì sao chỉ 6 đặc trưng?**
+Vừa đủ tín hiệu để phát hiện hành vi lạ, vừa đủ đơn giản
+để huấn luyện được khi dữ liệu còn ít.
+
+**Đặc trưng 6 là điểm mấu chốt:** nó là đại lượng chuẩn hoá
+"lệch khỏi thói quen của chính người dùng đó", nên mạnh hơn
+việc so sánh tuyệt đối (ví dụ: đăng nhập lúc 2h sáng
+chỉ bất thường nếu người đó bình thường toàn vào ban ngày).
+endlegend
+
+@enduml

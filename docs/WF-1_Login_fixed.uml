@@ -1,0 +1,59 @@
+@startuml
+left to right direction
+skinparam monochrome true
+skinparam shadowing false
+skinparam backgroundColor white
+skinparam rectangle {
+  BackgroundColor white
+  BorderColor black
+}
+skinparam ArrowColor black
+skinparam ArrowThickness 1.2
+title WF-1  Login Flow
+
+actor "User" as user
+
+rectangle "Core App" as sys_1 {
+  rectangle "Login request" as request
+  rectangle "Password and account check" as check
+  rectangle "Record login attempt" as attempt
+  rectangle "Create MFA challenge" as mfa
+  rectangle "Verify MFA code" as verify
+  rectangle "Create session and tokens" as session
+}
+
+rectangle "core-db" as sys_2 {
+  rectangle "Find user" as find
+  rectangle "Record outcome" as stored_attempt
+  rectangle "mfa_transaction pending" as tx
+  rectangle "Store session" as stored
+}
+
+user --> request : credentials\n<<flow>>
+request --> find : SELECT user\n<<flow>>
+find --> check : user record\n<<flow>>
+check --> attempt : eval outcome\n<<flow>>
+attempt --> stored_attempt : INSERT login_attempt\n<<flow>>
+check --> user : 401 / 403 if invalid\n<<flow>>
+
+' MFA branch: if MFA enabled
+check --> mfa : MFA required\n<<flow>>
+mfa --> tx : INSERT pending\n<<flow>>
+mfa --> user : 200 MFA_REQUIRED\n<<flow>>
+
+' User provides MFA code
+user --> verify : code after MFA_REQUIRED\n<<flow>>
+verify --> tx : SELECT transaction\n<<flow>>
+verify --> user : 401 if invalid\n<<flow>>
+
+' On valid MFA, create session
+verify --> session : valid code\n<<flow>>
+check --> session : MFA disabled\n<<flow>>
+session --> stored : INSERT session\n<<flow>>
+session --> user : access + refresh tokens\n<<flow>>
+
+legend bottom
+  Login returns before asynchronous detection; WF-2 handles the outbox event.
+  Outcomes: success | failure | locked | mfa_required | mfa_success
+endlegend
+@enduml

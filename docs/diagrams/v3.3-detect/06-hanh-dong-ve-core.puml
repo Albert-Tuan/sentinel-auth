@@ -1,0 +1,61 @@
+@startuml
+skinparam backgroundColor #FFFFFF
+skinparam shadowing false
+skinparam defaultFontName Sans
+skinparam rectangle {
+  BackgroundColor #F8F9FA
+  BorderColor #495057
+}
+skinparam ArrowColor #343A40
+skinparam ArrowThickness 1.2
+skinparam titleFontSize 18
+
+title Bốn loại hành động bảo vệ gửi về Core App
+
+left to right direction
+
+rectangle "DETECTION ENGINE\nquyết định" as DE #FFF2CC {
+  rectangle "Mức rủi ro\n+ chính sách" as DEC
+}
+
+rectangle "CORE APP\nthực thi" as CORE #DAE8FC {
+  rectangle "Bắt buộc MFA\n(REQUIRE_MFA)" as A1
+  rectangle "Thu hồi phiên\n(REVOKE_SESSIONS)" as A2
+  rectangle "Khoá tài khoản\n(LOCK_USER)" as A3
+  rectangle "Giới hạn theo IP\n(RATE_LIMIT_IP)" as A4
+}
+
+rectangle "HỆ QUẢ" as RES {
+  rectangle "Lần đăng nhập kế\ntiếp phải có MFA" as R1
+  rectangle "Mọi phiên cũ chết\nngay lập tức" as R2
+  rectangle "Không đăng nhập\nđược nữa" as R3
+  rectangle "Chặn/throttle\ntheo địa chỉ IP" as R4
+}
+
+DEC --> A1 : mức CAO\nnhắm vào người dùng
+DEC --> A2 : mức NGHIÊM TRỌNG\nnhắm vào người dùng
+DEC --> A3 : mức NGHIÊM TRỌNG\nnhắm vào người dùng
+DEC --> A4 : mức CAO\nnhắm vào địa chỉ IP
+
+A1 --> R1
+A2 --> R2
+A3 --> R3
+A4 --> R4
+
+note bottom of DEC
+  **Giao thức (contract):**
+  `POST /api/v1/internal/actions`
+  Header khoá nội bộ + body gồm
+  action, target (user_id | ip_address), reason, risk_level, login_attempt_id.
+
+  **Vòng lặp này là "đóng băng" ngay cả khi quyết định
+  đã được đưa ra sau khi người dùng đã đăng nhập xong**
+  (vì detection chạy nền).
+end note
+
+note bottom of CORE
+  Mọi hành động đều được ghi vào `audit_logs` ở core-db
+  và `detection_logs` (giai đoạn `action_sent`) ở detection-db.
+end note
+
+@enduml

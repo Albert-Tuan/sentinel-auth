@@ -1,116 +1,192 @@
-# Workflows — Mermaid source
+# Workflows — Mermaid source (v3.3)
 
-These diagrams render in any Markdown viewer that supports Mermaid
-(GitHub, GitLab, VS Code with Mermaid extension).
+> Cập nhật cho architecture v3.3: 3 services, 3 databases, HTTP communication
+> Mermaid renders in any Markdown viewer (GitHub, GitLab, VS Code).
 
 ---
 
-## WF-1: Đăng nhập
+## Tổng quan kiến trúc v3.3
+
+```mermaid
+flowchart LR
+    subgraph CoreApp["Core App :8000"]
+        U["User Browser"] -->|POST /auth/login| A["Auth API"]
+        A --> CDB[(core-db)]
+        A -->|MFA?| MFA["POST /auth/mfa/verify"]
+        MFA --> CDB
+        A -.->|INSERT outbox_events| OB["Outbox Poller"]
+    end
+
+    subgraph Detection["Detection Engine :8001"]
+        OB -->|HTTP POST /login-events| DE["Detection Worker"]
+        DE --> DDB[(detection-db)]
+        DE -->|HTTP POST /ml/score| ML
+        DDB --> SOC["SOC API"]
+    end
+
+    subgraph MLService["ML Service :8002"]
+        ML["Inference API"] --> MR["Model Registry"]
+        MR --> MDB[(ml-service-db)]
+        MR --> MOD[("isolation-forest-v1.0.joblib")]
+    end
+
+    style CoreApp fill:#d4edda,stroke:#28a745
+    style Detection fill:#fff3cd,stroke:#ffc107
+    style MLService fill:#e1d5e7,stroke:#9673a6
+```
+
+---
+
+## WF-1: Login Flow
 
 ```mermaid
 sequenceDiagram
     participant U as User
-    participant A as Auth API
-    participant DB as PostgreSQL
+    participant CA as Core App
+    participant CDB as core-db
 
-    U->>A: POST /api/v1/auth/login<br/>(username, password, source_ip)
-    A->>DB: SELECT user WHERE username
-    DB-->>A: user record (hash, status)
+    U->>CA: POST /api/v1/auth/login<br/>(username, password, source_ip)
+    CA->>CDB: SELECT user WHERE username
+    CDB-->>CA: user record (hash, status, mfa settings)
 
-    alt user not found OR wrong password
-        A-->>U: 401 {"error": "Invalid credentials"}
-    else user locked/suspended
-        A-->>U: 403 {"error": "Account unavailable"}
-    else credentials valid + MFA disabled
-        A->>DB: INSERT login_attempt (outcome=success)
-        A->>DB: INSERT session (token_hash, expires_at)
-        A-->>U: 200 {access_token, refresh_token}
-    else credentials valid + MFA enabled
-        A->>DB: INSERT pre_auth_transaction (status=pending, expires_at+5min)
-        A-->>U: 200 {mfa_required: true, session_id}
+    alt credentials INVALID
+        CA->>CDB: INSERT login_attempt (outcome=failure)
+        CA-->>U: 401 Invalid credentials
+    else account LOCKED/SUSPENDED
+        CA->>CDB: INSERT login_attempt (outcome=locked)
+        CA-->>U: 403 Account unavailable
+    else credentials VALID + MFA DISABLED
+        CA->>CDB: INSERT login_attempt (outcome=success)
+        CA->>CDB: INSERT sessions (token_jti, expires_at)
+        CA-->>U: 200 {access_token, refresh_token}
+    else credentials VALID + MFA REQUIRED
+        CA->>CDB: INSERT login_attempt (outcome=mfa_required)
+        CA->>CDB: INSERT mfa_transactions (status=pending)
+        CA-->>U: 200 {mfa_required: true, mfa_type}
     end
 
-    Note over U,A: MFA flow (nếu mfa_required=true)
+    Note over U,CA: **v3.3:** Detection chạy ASYNC<br/>qua Outbox Pattern → HTTP
 
-    U->>A: POST /api/v1/auth/mfa/verify<br/>(session_id, mfa_code)
-    A->>DB: SELECT pre_auth_transaction WHERE id=session_id
-    DB-->>A: transaction record
+    U->>CA: POST /api/v1/auth/mfa/verify<br/>(transaction_id, code)
+    CA->>CDB: SELECT mfa_transactions WHERE id
+    CDB-->>CA: transaction record
 
-    alt code wrong OR expired OR IP mismatch
-        A->>DB: UPDATE pre_auth_transaction (status=failed)
-        A-->>U: 401 {"error": "MFA failed"}
-    else code valid
-        A->>DB: UPDATE pre_auth_transaction (status=completed)
-        A->>DB: INSERT login_attempt (outcome=mfa_success)
-        A->>DB: INSERT session (token_hash, expires_at)
-        A-->>U: 200 {access_token, refresh_token}
+    alt code INVALID
+        CA->>CDB: UPDATE mfa_transactions (status=failed)
+        CA-->>U: 401 MFA failed
+    else code VALID
+        CA->>CDB: UPDATE mfa_transactions (status=completed)
+        CA->>CDB: INSERT sessions
+        CA-->>U: 200 {access_token, refresh_token}
     end
+
+    Note over CA,CDB: **Sau khi login thành công:**<br/>CA INSERT outbox_events<br/>(KHÔNG gọi detection sync)
 ```
 
 ---
 
-## WF-2: Detection Inline
+## WF-2: Detection Engine Flow (Async)
 
 ```mermaid
 sequenceDiagram
-    participant A as Auth API
-    participant D as Detection API
-    participant ML as ML API
-    participant DB as PostgreSQL
+    participant CA as Core App
+    participant CDB as core-db
+    participant OP as Outbox Poller
+    participant DE as Detection Engine
+    participant DDB as detection-db
+    participant ML as ML Service
+    participant MDB as ml-service-db
 
-    Note over A,D: Sau khi login thành công (WF-1)
+    Note over CA,CDB: Phase 1: Login + Outbox
+    CA->>CDB: INSERT outbox_events<br/>(aggregate=login_attempt,<br/>event_type=LoginEvent)
+    CA-->>CA: Trả 200 cho User
 
-    A->>D: POST /internal/v1/detect<br/>(login_attempt_id, user_id, source_ip, ...)
-    D->>DB: SELECT user history<br/>(fail_count_24h, ip_change_rate, ...)
+    Note over OP: Phase 2: Polling
+    OP->>CDB: SELECT outbox_events WHERE status='pending'
+    OP->>OP: status=processing
 
-    par Trích features
-        D->>D: Tính rule_score<br/>(IP mới? Fail nhiều? Giờ lạ?)
-    and Gọi ML
-        D->>ML: POST /internal/v1/ml/score<br/>(features)
-        ML-->>D: {anomaly_score, is_anomaly, reason_codes}
+    Note over OP,DE: Phase 3: HTTP Push
+    OP->>DE: POST /api/v1/internal/login-events<br/>(event_id, user_id, ip, ua, ...)<br/>+ Internal-Secret
+    DE->>DDB: INSERT login_attempts<br/>(event_id, ..., status=pending)
+    DE-->>OP: 202 Accepted {login_attempt_id}
+    OP->>CDB: UPDATE outbox_events (status=published)
+
+    Note over DE,DDB: Phase 4: Detection Pipeline
+    DE->>DDB: SELECT login_attempts WHERE status='pending'
+
+    loop for each pending attempt
+        DE->>DDB: UPDATE login_attempts (status=processed)
+        DE->>DE: Calculate rule_score
+        DE->>DDB: INSERT detection_logs (stage=rule_evaluation)
+
+        DE->>ML: POST /api/v1/internal/ml/score<br/>(features_vector)
+        ML->>MDB: SELECT active model
+        ML->>ML: IsolationForest.predict()
+        ML->>MDB: INSERT inference_logs
+        ML-->>DE: {anomaly_score, is_anomaly, reason_codes}
+
+        DE->>DE: combined = 0.4×rule + 0.6×ml
+        DE->>DDB: INSERT risk_assessments
+
+        alt risk_level HIGH/CRITICAL
+            DE->>DDB: INSERT alerts (status=open)
+            DE->>DDB: INSERT detection_logs (stage=action_sent)
+        else LOW/MEDIUM
+            DE->>DDB: INSERT detection_logs (no_alert)
+        end
+
+        opt risk_level = CRITICAL
+            DE->>CA: POST /api/v1/internal/actions<br/>(action=LOCK_USER)
+            CA->>CDB: UPDATE users (status=locked)
+        end
     end
-
-    D->>DB: INSERT risk_assessment<br/>(rule_score, anomaly_score, ml_status, risk_level)
-
-    alt risk_level IN (high, critical)
-        D->>DB: INSERT alert (status=open, risk_level)
-        D-->>A: 200 {alert_created: true}
-    else risk_level IN (low, medium)
-        D-->>A: 200 {alert_created: false}
-    end
-
-    Note over D: ML unavailable → ml_status=error<br/>→ risk_level = medium (fallback)
 ```
 
 ---
 
-## WF-3: SOC xem và xử lý Alert
+## WF-3: SOC Alert Workflow
 
 ```mermaid
 sequenceDiagram
     participant S as SOC Analyst
-    participant A as Auth API
-    participant DB as PostgreSQL
+    participant CA as Core App
+    participant DE as Detection Engine
+    participant DDB as detection-db
+    participant CDB as core-db
 
-    S->>A: GET /api/v1/alerts<br/>(status=open, risk_level=high)
-    A->>DB: SELECT alerts WHERE status=? AND risk_level=?
-    DB-->>A: [alert1, alert2, ...]
-    A-->>S: 200 {alerts: [...]}
+    S->>CA: POST /api/v1/auth/login
+    CA-->>S: 200 {access_token, role=SOC_ANALYST}
 
-    S->>A: GET /api/v1/alerts/{id}
-    A->>DB: SELECT alert WHERE id=?
-    DB-->>A: alert detail + login_attempt info
-    A-->>S: 200 {alert: {...}}
+    S->>DE: GET /api/v1/alerts<br/>?status=open&risk_level=high<br/>+ Bearer {token}
+    DE->>DE: Validate JWT (role=SOC_ANALYST)
+    DE->>DDB: SELECT alerts WHERE filters
+    DDB-->>DE: [alerts]
+    DE-->>S: 200 {alerts: [...]}
 
-    alt Acknowledge alert
-        S->>A: PATCH /api/v1/alerts/{id}<br/>{status: "acknowledged", notes: "..."}
-        A->>DB: UPDATE alert (status=acknowledged, assigned_to=S.id)
-        A-->>S: 200 {alert: {status: "acknowledged"}}
-    else Resolve alert (false positive)
-        S->>A: PATCH /api/v1/alerts/{id}<br/>{status: "resolved", notes: "user traveling", resolved_by: S.id}
-        A->>DB: UPDATE alert (status=resolved, resolved_by, resolved_at)
-        A-->>S: 200 {alert: {status: "resolved"}}
+    S->>DE: GET /api/v1/alerts/{id}
+    DE->>DDB: SELECT alerts JOIN login_attempts JOIN risk_assessments
+    DDB-->>DE: alert detail
+    DE-->>S: 200 {alert, login_attempt, risk_assessment}
+
+    alt Acknowledge
+        S->>DE: PATCH /api/v1/alerts/{id}<br/>{status: "acknowledged"}
+        DE->>CDB: (HTTP) validate SOC analyst
+        DE->>DDB: UPDATE alerts (status=acknowledged, assigned_to)
+        DE->>DDB: INSERT alert_timeline (event_type=acknowledged)
+        DE-->>S: 200 {alert: acknowledged}
+    else Resolve
+        S->>DE: PATCH /api/v1/alerts/{id}<br/>{status: "resolved", resolution}
+        DE->>DDB: UPDATE alerts (status=resolved, resolved_by, resolved_at)
+        DE->>DDB: INSERT alert_timeline (event_type=resolved)
+        DE-->>S: 200 {alert: resolved}
+    else False Positive
+        S->>DE: PATCH /api/v1/alerts/{id}<br/>{status: "false_positive"}
+        DE->>DDB: UPDATE alerts (status=false_positive)
+        DE->>DDB: INSERT alert_timeline
+        DE-->>S: 200 {alert: false_positive}
     end
+
+    Note over S,DE: Alert State Machine:<br/>open → acknowledged → resolved<br/>            ↘ false_positive
 ```
 
 ---
@@ -120,69 +196,58 @@ sequenceDiagram
 ```mermaid
 sequenceDiagram
     participant U as User
-    participant A as Auth API
-    participant N as MFA Notification
-    participant DB as PostgreSQL
+    participant CA as Core App
+    participant N as Notification Service
+    participant CDB as core-db
 
-    Note over U,A: MFA được trigger khi:<br/>1. Login với MFA enabled<br/>2. Risk level HIGH/CRITICAL<br/>3. Sensitive operation
+    Note over U,CDB: **MFA Trigger:**<br/>1. Login + MFA enabled<br/>2. Risk HIGH/CRITICAL<br/>3. Sensitive operation<br/>4. Periodic re-auth
 
-    == MFA Types ==
+    CA->>CDB: INSERT mfa_transactions (status=pending)
 
-    alt MFA via EMAIL OTP
-        A->>N: Send OTP via Email
-        N-->>A: notification_id
-        A->>DB: INSERT mfa_notification (channel=email)
-        A-->>U: 200 {mfa_type: "email_otp", expires_in: 300}
-        U->>A: POST /mfa/verify (code: "123456")
+    alt MFA via EMAIL
+        CA->>N: Send OTP via Email
+        N-->>CA: notification_id
+        CA->>CDB: INSERT mfa_notifications (channel=email)
+        CA-->>U: 200 {mfa_type: email_otp, expires_in: 300}
+        U->>CA: POST /mfa/verify (code: "123456")
 
-    else MFA via SMS OTP
-        A->>N: Send OTP via SMS
-        N-->>A: notification_id
-        A->>DB: INSERT mfa_notification (channel=sms)
-        A-->>U: 200 {mfa_type: "sms_otp", expires_in: 300}
-        U->>A: POST /mfa/verify (code: "123456")
+    else MFA via SMS
+        CA->>N: Send OTP via SMS
+        CA-->>U: 200 {mfa_type: sms_otp, expires_in: 300}
+        U->>CA: POST /mfa/verify (code)
 
-    else MFA via TOTP (Authenticator)
-        A-->>U: 200 {mfa_type: "totp", setup_url: "otpauth://..."}
-        Note over U: User nhập code từ<br/>Google Authenticator
-        U->>A: POST /mfa/verify (code: "123456")
+    else MFA via TOTP
+        CA-->>U: 200 {mfa_type: totp}
+        Note over U: Google Authenticator
+        U->>CA: POST /mfa/verify (code)
 
-    else MFA via PUSH Notification
-        A->>N: Send Push Notification
-        N-->>A: notification_id
-        A-->>U: 200 {mfa_type: "push", expires_in: 120}
-        Note over U: User approve trên mobile app
-        U->>A: POST /mfa/verify (action: "approve")
+    else MFA via PUSH
+        CA->>N: Send Push
+        CA-->>U: 200 {mfa_type: push, expires_in: 120}
+        U->>CA: POST /mfa/verify (action: approve)
     end
 
-    == Verification ==
+    CA->>CDB: SELECT mfa_transactions WHERE id
+    CDB-->>CA: transaction record
 
-    A->>DB: SELECT mfa_transaction WHERE id=session_id
-    DB-->>A: transaction record
-
-    alt Invalid / Expired / IP Mismatch
-        A->>DB: UPDATE mfa_transaction (status=failed, fail_count+1)
+    alt Invalid/Expired/IP mismatch
+        CA->>CDB: UPDATE (status=failed, fail_count+1)
         alt fail_count >= 3
-            A->>DB: UPDATE user (status=locked)
-            A-->>U: 403 ACCOUNT_LOCKED
-        else fail_count < 3
-            A-->>U: 401 MFA_FAILED (attempts_remaining: 2)
+            CA->>CDB: UPDATE users (status=locked)
+            CA-->>U: 403 ACCOUNT_LOCKED
+        else
+            CA-->>U: 401 MFA_FAILED
         end
-    else Valid / Approved
-        A->>DB: UPDATE mfa_transaction (status=completed)
-        A->>DB: INSERT session
-        A-->>U: 200 OK {access_token, mfa_verified: true}
+    else Valid/Approved
+        CA->>CDB: UPDATE (status=completed)
+        CA-->>U: 200 OK {mfa_verified: true}
     end
 
-    == Trusted Device (Persistent MFA) ==
-
-    alt User selects "Trust this device"
-        U->>A: POST /mfa/trust-device (device_fingerprint)
-        A->>DB: INSERT user_trusted_devices
-        A-->>U: 200 {trusted: true, expires_at: "+30 days"}
+    opt Trust Device
+        U->>CA: POST /mfa/trust-device {fingerprint}
+        CA->>CDB: INSERT user_trusted_devices
+        CA-->>U: 200 {trusted: true, expires_at: +30d}
     end
-
-    Note over U: Lần đăng nhập sau với<br/>trusted device → Không cần OTP
 ```
 
 ---
@@ -192,119 +257,112 @@ sequenceDiagram
 ```mermaid
 sequenceDiagram
     participant U as User
-    participant A as Auth API
-    participant DB as PostgreSQL
+    participant CA as Core App
+    participant CDB as core-db
 
-    == Create Session ==
+    Note over U,CDB: Session được tạo sau:<br/>1. Login thành công<br/>2. MFA verify thành công
 
-    U->>A: POST /auth/login (username, password)
-    A->>DB: SELECT user WHERE username
-    DB-->>A: user record
+    CA->>CDB: INSERT sessions<br/>(token_jti, access_hash, refresh_hash,<br/>expires_at=+15min, refresh_expires=+7d)
+    CA-->>U: 200 {access_token (15min), refresh_token (7d)}
 
-    alt MFA not required
-        A->>DB: INSERT session (token_jti, expires_at)
-        A-->>U: 200 {access_token, refresh_token}
-    else MFA required
-        A-->>U: 200 MFA_REQUIRED
-        U->>A: POST /mfa/verify
-        A->>DB: INSERT session
-        A-->>U: 200 {access_token, refresh_token}
-    end
-
-    == Token Refresh ==
-
-    U->>A: POST /auth/refresh (refresh_token)
-    A->>DB: SELECT session WHERE refresh_token_hash=?
-
-    alt valid + not expired
-        A->>DB: UPDATE session (new expires_at)
-        A-->>U: 200 {access_token}
+    Note over U,CA: Token Refresh
+    U->>CA: POST /api/v1/auth/refresh (refresh_token)
+    CA->>CDB: SELECT sessions WHERE refresh_token_hash
+    alt valid + not revoked
+        CA->>CDB: UPDATE sessions (new token_jti, expires_at)
+        CA-->>U: 200 {access_token}
     else expired/revoked
-        A-->>U: 401 TOKEN_EXPIRED
+        CA-->>U: 401 TOKEN_EXPIRED
     end
 
-    == Logout (Single Session) ==
+    Note over U,CA: Logout Single
+    U->>CA: POST /api/v1/auth/logout
+    CA->>CDB: UPDATE sessions (revoked_at=NOW())
+    CA->>CDB: INSERT audit_logs (action=logout)
+    CA-->>U: 200 {logged_out: true}
 
-    U->>A: POST /auth/logout (access_token)
-    A->>DB: UPDATE session (revoked_at = NOW())
-    A-->>U: 200 {logged_out: true}
+    Note over U,CA: Logout All
+    U->>CA: POST /api/v1/auth/logout-all
+    CA->>CDB: UPDATE sessions WHERE user_id (revoked_at)
+    CA-->>U: 200 {logged_out_all: true, sessions_revoked: N}
 
-    == Logout (All Sessions) ==
+    Note over U,CA: List Sessions
+    U->>CA: GET /api/v1/sessions
+    CA->>CDB: SELECT sessions WHERE user_id AND revoked_at IS NULL
+    CA-->>U: 200 {sessions: [...]}
 
-    U->>A: POST /auth/logout-all
-    A->>DB: UPDATE session WHERE user_id (revoked_at = NOW())
-    A-->>U: 200 {logged_out_all: true, sessions_revoked: N}
-
-    == List Sessions ==
-
-    U->>A: GET /api/v1/sessions
-    A->>DB: SELECT sessions WHERE user_id = current_user_id
-    DB-->>A: [sessions...]
-    A-->>U: 200 {sessions: [...]}
-
-    == Revoke Own Session ==
-
-    U->>A: DELETE /api/v1/sessions/{id}
-    alt own session
-        A->>DB: UPDATE session (revoked_at = NOW())
-        A-->>U: 200 {revoked: true}
-    else not own
-        A-->>U: 403 FORBIDDEN
-    end
+    Note over U,CA: Admin Revoke
+    U->>CA: POST /api/v1/admin/sessions/{id}/revoke (admin_token)
+    CA->>CA: Validate JWT, role=SECURITY_ADMIN
+    CA->>CDB: UPDATE sessions (revoked_at)
+    CA->>CDB: INSERT audit_logs (action=session_revoked_by_admin)
+    CA-->>U: 200 {revoked: true}
 ```
 
 ---
 
-## Tổng quan kiến trúc
+## WF-6: ML Inference Flow (MỚI trong v3.3)
 
 ```mermaid
-flowchart LR
-    subgraph Auth["WF-1: Auth + WF-5: Sessions"]
-        L["POST /auth/login"] --> MFA{"MFA?"}
-        MFA --> |yes| V["POST /auth/mfa/verify"]
-        MFA --> |no| S["Session → Token"]
-        V --> S
-        S --> R["POST /auth/refresh"]
-        S --> O["POST /auth/logout"]
+sequenceDiagram
+    participant DE as Detection Engine
+    participant ML as ML Service
+    participant MDB as ml-service-db
+    participant MOD as Model File
+
+    Note over DE,ML: Trigger từ WF-2<br/>(trong detection pipeline)
+
+    DE->>ML: GET /api/v1/internal/health
+    ML-->>DE: 200 {model_status: ready, version}
+
+    alt ML DOWN
+        DE->>DE: ml_status=error → fallback rule-only
+    else ML UP
+        DE->>ML: POST /api/v1/internal/ml/score<br/>(features: {6_features})
+        activate ML
+        ML->>MDB: SELECT active model_version
+        ML->>MOD: Load isolation-forest-v1.0.joblib
+
+        alt inference SUCCESS
+            ML->>ML: predict() → raw_score, is_anomaly
+            ML->>MDB: INSERT inference_logs
+            ML-->>DE: 200 {anomaly_score, is_anomaly,<br/>reason_codes, processing_time_ms}
+        else TIMEOUT (>500ms)
+            ML->>MDB: INSERT inference_logs (status=degraded)
+            ML-->>DE: 408 Timeout {ml_status: timeout}
+        else ERROR
+            ML->>MDB: INSERT inference_logs (status=error)
+            ML-->>DE: 500 Error {ml_status: error}
+        end
+        deactivate ML
     end
 
-    subgraph MFA["WF-4: MFA Flow"]
-        V --> MT["MFA Types"]
-        MT --> |email| E["Email OTP"]
-        MT --> |sms| SM["SMS OTP"]
-        MT --> |totp| T["TOTP Authenticator"]
-        MT --> |push| P["Push Notification"]
-    end
-
-    subgraph Detect["WF-2: Detection"]
-        S --> D["POST /internal/v1/detect"]
-        D --> F["Trích features"]
-        F --> ML["POST /internal/v1/ml/score"]
-        ML --> AL{"Alert?"}
-        AL --> |high/critical| A["INSERT alert"]
-        AL --> |low/medium| OK["Không alert"]
-    end
-
-    subgraph SOC["WF-3: SOC"]
-        A --> SOC["GET /alerts"]
-        SOC --> ACK["PATCH /alerts/{id}"]
-        SOC --> RES["PATCH /alerts/{id} (resolve)"]
-    end
-
-    style Auth fill:#d4edda,stroke:#28a745
-    style MFA fill:#e1d5e7,stroke:#9673a6
-    style Detect fill:#fff3cd,stroke:#ffc107
-    style SOC fill:#cce5ff,stroke:#17a2b8
+    Note over ML,MDB: Background:<br/>Hourly feature statistics
+    ML->>MDB: INSERT feature_statistics<br/>(count, mean, std, p25..p95)
 ```
 
 ---
 
-## Bảng tổng hợp Workflows
+## Bảng tổng hợp Workflows (v3.3)
 
-| ID | Tên | Mô tả | Actors |
-|----|-----|--------|--------|
-| WF-1 | Login Flow | Đăng nhập + MFA verification | User |
-| WF-2 | Detection Inline | Risk assessment + ML scoring | System |
-| WF-3 | SOC Alert | Xem và xử lý alert | SOC Analyst |
-| WF-4 | MFA Flow | Chi tiết các loại MFA | User |
-| WF-5 | Session Management | Login, logout, refresh token | User |
+| ID | Tên | Service | Mô tả | Actors |
+|----|-----|---------|--------|--------|
+| WF-1 | Login Flow | core-app | Login + MFA verification | User |
+| WF-2 | Detection Engine | detection-engine | Async detection pipeline (outbox + HTTP) | System |
+| WF-3 | SOC Alert | detection-engine | View và xử lý alerts | SOC Analyst |
+| WF-4 | MFA Flow | core-app | Chi tiết 4 loại MFA (email/sms/totp/push) | User |
+| WF-5 | Session Management | core-app | Login, logout, refresh, admin revoke | User/Admin |
+| WF-6 | ML Inference | ml-service | Risk scoring bằng Isolation Forest | Detection |
+
+---
+
+## Liên kết với Database Schema (v3.3)
+
+| Workflow | Tables sử dụng | Database |
+|----------|----------------|----------|
+| WF-1 | users, sessions, mfa_transactions, mfa_notifications, login_attempts | core-db |
+| WF-2 | outbox_events (core-db), login_attempts, risk_assessments, detection_logs, alerts | core-db → detection-db |
+| WF-3 | alerts, alert_timeline, soc_analysts, login_attempts | detection-db (+ cross-ref core-db) |
+| WF-4 | mfa_transactions, mfa_notifications, user_trusted_devices, users | core-db |
+| WF-5 | sessions, audit_logs, users | core-db |
+| WF-6 | model_versions, inference_logs, feature_statistics | ml-service-db |

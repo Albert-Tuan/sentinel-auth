@@ -1,0 +1,118 @@
+@startuml
+skinparam backgroundColor #FFFFFF
+skinparam shadowing false
+skinparam defaultFontName Sans
+skinparam ArrowColor #343A40
+skinparam ArrowThickness 1.2
+skinparam titleFontSize 18
+skinparam swimlane {
+  BackgroundColor #F8F9FA
+  BorderColor #868E96
+}
+
+title WF-3 — Quy trình nhân viên SOC xử lý cảnh báo (v3.3)
+
+|Bước 1 — Đăng nhập và xem danh sách|
+start
+partition "CORE APP (8000)" {
+  :Đăng nhập bằng tài khoản SOC;
+  :Kiểm tra thông tin + vai trò\ntrong core-db;
+  :Cấp JWT có ghi vai trò SOC_ANALYST;
+}
+partition "SOC ANALYST (trình duyệt)" {
+  :Dùng JWT để lấy danh sách cảnh báo\n(lọc theo trạng thái, mức rủi ro, thời gian);
+}
+partition "DETECTION ENGINE (8001)" {
+  :Xác minh chữ ký JWT, hạn dùng, vai trò;
+  :Truy vấn alerts, sắp xếp mới nhất trước,\nphân trang;
+}
+partition "detection-db" {
+  :Trả kết quả danh sách cảnh báo;
+}
+
+|Bước 2 — Mở hồ sơ để điều tra|
+partition "SOC ANALYST (trình duyệt)" {
+  :Chọn 1 cảnh báo để mở chi tiết;
+}
+partition "DETECTION ENGINE (8001)" {
+  :Lấy nội dung cảnh báo;
+  :Lấy lần đăng nhập liên quan\n(IP, thiết bị, thời điểm, kết quả);
+  :Lấy điểm rủi ro (quy tắc + ML + gộp);
+  :Lấy nhật ký từng bước phát hiện;
+  :Lấy dòng thời gian xử lý;
+}
+partition "detection-db" {
+  :Hồ sơ đầy đủ để điều tra;
+}
+
+|Bước 3 — Xử lý cảnh báo|
+partition "SOC ANALYST (trình duyệt)" {
+  if (Chọn hành động xử lý?) then (Tiếp nhận)
+    partition "DETECTION ENGINE (8001)" {
+      :Kiểm tra lại vai trò qua API nội bộ\ncủa Core App (phòng ngừa token đã bị thu hồi);
+      if (Cảnh báo đã có người khác nhận?) then (Có)
+        #FFE8E8:Từ chối 409 Xung đột\n(tránh hai người tranh nhau);
+      else (Chưa)
+        #E8F5E9:Cập nhật trạng thái + gán người xử lý;
+        :Ghi dòng thời gian (acknowledged);
+      endif
+    }
+  elseif (Chọn hành động xử lý?) then (Kết luận / báo nhầm)
+    partition "DETECTION ENGINE (8001)" {
+      if (Trạng thái hiện tại\nhợp lệ để kết luận?) then (Có)
+        #E8F5E9:Cập nhật trạng thái + ghi chú bắt buộc;
+        :Ghi dòng thời gian (status_changed);
+      else (Không)
+        #FFE8E8:Từ chối 400 — máy trạng thái chặn;
+      endif
+    }
+  elseif (Chọn hành động xử lý?) then (Chuyển cấp)
+    partition "DETECTION ENGINE (8001)" {
+      :Ghi nhận chuyển cấp vào dòng thời gian;
+    }
+    partition "QUẢN LÝ AN NINH" {
+      :Nhận thông báo để xem xét\nvà phê duyệt hành động;
+    }
+  else (Yêu cầu hành động bảo vệ)
+    partition "DETECTION ENGINE (8001)" {
+      :Nhận yêu cầu kèm lý do bắt buộc;
+    }
+    partition "CORE APP (8000)" {
+      :Khoá tài khoản / thu hồi phiên /\nđặt lại MFA / chặn IP;
+      :Ghi audit_logs;
+    }
+    partition "DETECTION ENGINE (8001)" {
+      :Ghi dòng thời gian (note_added);
+    }
+  endif
+
+|Bước 4 — Theo dõi tổng quan|
+partition "SOC ANALYST (trình duyệt)" {
+  :Mở bảng điều khiển (chọn 24h / 7 ngày);
+}
+partition "DETECTION ENGINE (8001)" {
+  :Tổng hợp số liệu;
+}
+partition "detection-db" {
+  :Đếm theo trạng thái, theo mức rủi ro,\nđếm theo giờ, lý do phổ biến,\nkhối lượng việc mỗi người;
+}
+partition "SOC ANALYST (trình duyệt)" {
+  :Ra quyết định xử lý tiếp theo;
+}
+stop
+
+legend bottom
+**Phân quyền (RBAC) — nguồn: đặc tả đối tượng sử dụng §7, tài liệu Tuần 2 §3:**
+
+| Chức năng | User | SOC | Admin | Manager |
+|-----------|:----:|:---:|:------:|:-------:|
+| Xem bảng điều khiển | ✗ | ✓ | ✓ | ✓ |
+| Xem / điều tra cảnh báo | ✗ | ✓ | ✓ | ✓ |
+| Phân loại cảnh báo | ✗ | ✓ | ✓ | ✓ |
+| Yêu cầu hành động bảo vệ | ✗ | ✓ | ✓ | ✓ |
+| Quản lý chính sách phát hiện | ✗ | ✗ | ✓ | ✓ |
+| Phê duyệt chuyển cấp | ✗ | ✗ | ✓ | ✓ |
+| Xuất báo cáo | ✗ | ✗ | ✗ | ✓ |
+endlegend
+
+@enduml

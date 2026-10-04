@@ -1,0 +1,48 @@
+@startuml
+left to right direction
+skinparam monochrome true
+skinparam shadowing false
+skinparam backgroundColor white
+skinparam rectangle {
+  BackgroundColor white
+  BorderColor black
+}
+skinparam ArrowColor black
+title WF-5  Session Management
+
+actor "User" as user
+actor "Security Admin" as admin
+
+rectangle "Core App" as sys_1 {
+  rectangle "Create session after login / MFA" as create
+  rectangle "Refresh and rotate token JTI" as refresh
+  rectangle "Logout one or all sessions" as logout
+  rectangle "List / revoke own sessions" as list
+  rectangle "Admin revoke target session" as admin_action
+  rectangle "JWT expiry and refresh check" as expiry
+}
+
+rectangle "core-db" as sys_2 {
+  rectangle "sessions: token hashes + expiry" as record
+  rectangle "Update expiry and activity" as rotated
+  rectangle "Set revoked_at + audit log" as revoked
+  rectangle "Active sessions by user" as active
+  rectangle "Revoke + audit trail" as admin_log
+}
+
+user ..> create : successful authentication\n<<flow>>
+create ..> record : INSERT session\n<<flow>>
+user ..> refresh : refresh token\n<<flow>>
+refresh ..> rotated : rotate JTI\n<<flow>>
+user ..> logout : logout request\n<<flow>>
+logout ..> revoked : revoke + audit\n<<flow>>
+user ..> list : GET / DELETE session\n<<flow>>
+list ..> active : SELECT / UPDATE\n<<flow>>
+admin ..> admin_action : admin token + reason\n<<flow>>
+admin_action ..> admin_log : target session\n<<flow>>
+user ..> expiry : expired access token\n<<flow>>
+
+legend bottom
+  Access token: 15 min; refresh token: 7 days. Expired or revoked refresh requires login.
+endlegend
+@enduml

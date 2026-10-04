@@ -1,72 +1,143 @@
 @startuml
 skinparam backgroundColor #FFFFFF
 
-title WF-3: SOC — Xem và xử lý Alert
+title WF-3: SOC Alert Handling (v3.3 - via Detection Engine API)
 
 participant "SOC Analyst\n(Browser)" as S #CCE5FF
-participant "Auth API\n(SOC endpoints)" as A #DAE8FC
-participant "PostgreSQL" as DB #F5F5F5
+participant "Core App\n(port 8000)" as CA #DAE8FC
+participant "Detection Engine\n(port 8001)" as DE #FFF2CC
+database "core-db" as CDB #F5F5F5
+database "detection-db" as DDB #F5F5F5
+
+== Authentication ==
+
+S -> CA : **POST /api/v1/auth/login**\n(username, password)
+activate CA
+CA --> S : **200 OK** {access_token, role=SOC_ANALYST}
+deactivate CA
 
 == List Alerts ==
 
-S -> A : **1. GET /api/v1/alerts**\n?status=open&risk_level=high
-activate A
+S -> DE : **GET /api/v1/alerts**\n?status=open&risk_level=high\n+ Bearer {access_token}
+activate DE
 
-A -> DB : 2. SELECT alerts\nWHERE status=? AND risk_level=?
-activate DB
-DB --> A : [alert1, alert2, ...]
-deactivate DB
+DE -> DE : Validate JWT\n(role=SOC_ANALYST)
+DE -> DDB : SELECT alerts\nWHERE status=? AND risk_level=?\nORDER BY created_at DESC
+activate DDB
+DDB --> DE : [alert1, alert2, ...]
+deactivate DDB
 
-A --> S : **200 OK**\n{alerts: [{id, risk_level,\nuser_id, created_at...}]}
-deactivate A
+DE --> S : **200 OK**\n{alerts: [{id, login_attempt_id,\nrisk_level, status, created_at}]}
+deactivate DE
 
 == Alert Detail ==
 
-S -> A : **3. GET /api/v1/alerts/{id}**
-activate A
+S -> DE : **GET /api/v1/alerts/{id}**\n+ Bearer {access_token}
+activate DE
 
-A -> DB : 4. SELECT alert\n+ login_attempt info
-activate DB
-DB --> A : {alert detail}
-deactivate DB
+DE -> DDB : SELECT alerts WHERE id=?
+activate DDB
+DDB --> DE : alert record
+deactivate DDB
 
-A --> S : **200 OK**\n{alert: {...}}
-deactivate A
+DE -> DDB : SELECT login_attempts WHERE id=alert.login_attempt_id
+activate DDB
+DDB --> DE : login attempt context
+deactivate DDB
 
-== Handle Alert ==
+DE -> DDB : SELECT risk_assessments WHERE login_attempt_id=?
+activate DDB
+DDB --> DE : risk scoring details
+deactivate DDB
 
-alt Acknowledge
-    S -> A : **5a. PATCH /api/v1/alerts/{id}**\n{status: "acknowledged", notes: "..."}
-    activate A
-    A -> DB : 6a. UPDATE alert\n(status=acknowledged,\nassigned_to=S.id, notes)
-    activate DB
-    deactivate DB
-    A --> S : **200 OK**\n{alert: {status: "acknowledged"}}
-    deactivate A
+DE --> S : **200 OK**\n{alert, login_attempt, risk_assessment}
+deactivate DE
 
-else Resolve
-    S -> A : **5b. PATCH /api/v1/alerts/{id}**\n{status: "resolved", notes,\nresolved_by: S.id}
-    activate A
-    A -> DB : 6b. UPDATE alert\n(status=resolved, resolved_by,\nresolved_at, notes)
-    activate DB
-    deactivate DB
-    A --> S : **200 OK**\n{alert: {status: "resolved"}}
-    deactivate A
+== Alert Actions ==
+
+alt Acknowledge Alert
+    S -> DE : **PATCH /api/v1/alerts/{id}**\n{status: "acknowledged", notes: "..."}\n+ Bearer {access_token}
+    activate DE
+    
+    DE -> DE : Validate JWT, role=SOC_ANALYST
+    DE -> CDB : (HTTP) **GET /api/v1/internal/users/{user_id}**\nđể validate SOC analyst
+    activate CDB
+    CDB --> DE : user record (role=SOC_ANALYST)
+    deactivate CDB
+    
+    DE -> DDB : UPDATE alerts\n(status=acknowledged, assigned_to_id,\nupdated_at=NOW())
+    activate DDB
+    DDB --> DE : updated alert
+    deactivate DDB
+    
+    DE -> DDB : INSERT alert_timeline\n(event_type=acknowledged,\nactor_id, old_value=open,\nnew_value=acknowledged, comment)
+    
+    DE --> S : **200 OK**\n{alert: {status: "acknowledged"}}
+    deactivate DE
+
+else Resolve Alert
+    S -> DE : **PATCH /api/v1/alerts/{id}**\n{status: "resolved", resolution: "..."}\n+ Bearer {access_token}
+    activate DE
+    
+    DE -> CDB : validate SOC analyst via HTTP
+    DE -> DDB : UPDATE alerts\n(status=resolved, resolved_by_id,\nresolved_at=NOW(), resolution, notes)
+    activate DDB
+    DDB --> DE : updated alert
+    deactivate DDB
+    
+    DE -> DDB : INSERT alert_timeline\n(event_type=resolved, actor_id,
+    resolved_by_id, old_value=acknowledged,
+    new_value=resolved, comment)
+    
+    DE --> S : **200 OK**\n{alert: {status: "resolved"}}
+    deactivate DE
 
 else Mark False Positive
-    S -> A : **5c. PATCH /api/v1/alerts/{id}**\n{status: "false_positive", notes}
-    activate A
-    A -> DB : 6c. UPDATE alert\n(status=false_positive,\nresolved_by, resolved_at)
-    activate DB
-    deactivate DB
-    A --> S : **200 OK**\n{alert: {status: "false_positive"}}
-    deactivate A
+    S -> DE : **PATCH /api/v1/alerts/{id}**\n{status: "false_positive", notes: "user traveling"}\n+ Bearer {access_token}
+    activate DE
+    
+    DE -> DDB : UPDATE alerts\n(status=false_positive, resolved_by_id,\nresolved_at=NOW(), notes)
+    activate DDB
+    DDB --> DE : updated alert
+    deactivate DDB
+    
+    DE -> DDB : INSERT alert_timeline\n(event_type=false_positive)
+    
+    DE --> S : **200 OK**\n{alert: {status: "false_positive"}}
+    deactivate DE
+
+else Escalate Alert
+    S -> DE : **PATCH /api/v1/alerts/{id}**\n{action: "escalate", notes: "..."}\n+ Bearer {access_token}
+    activate DE
+    
+    DE -> DDB : UPDATE alerts\n(notes=escalated)
+    DE -> DDB : INSERT alert_timeline\n(event_type=escalated)
+    
+    DE --> S : **200 OK**\n{alert: {escalated: true}}
+    deactivate DE
 end
 
+== SOC Dashboard Stats ==
+
+S -> DE : **GET /api/v1/soc/dashboard**\n?timeframe=24h\n+ Bearer {access_token}
+activate DE
+
+DE -> DDB : SELECT COUNT(*) FROM alerts\nWHERE created_at > NOW()-24h
+DE -> DDB : SELECT COUNT(*) FROM alerts\nWHERE status='open'
+DE -> DDB : SELECT COUNT(*) GROUP BY risk_level
+
+DE --> S : **200 OK**\n{stats: {total, open, by_risk_level}}
+deactivate DE
+
 legend right
-  Alert State Machine:
+  **Alert State Machine (v3.3):**
   **open** → acknowledged → **resolved**
-                     ↘ **false_positive**
+                 ↘ **false_positive**
+  
+  **v3.3 Cross-DB refs:**
+  - alerts.assigned_to_id → soc_analysts.id
+  - soc_analysts.user_id → users.id (core-db, app-level)
+  - alert_timeline.actor_id → users.id (core-db, app-level)
 endlegend
 
 @enduml

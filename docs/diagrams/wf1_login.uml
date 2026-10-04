@@ -3,64 +3,79 @@ skinparam backgroundColor #FFFFFF
 skinparam handwritten false
 skinparam actorStyle awesome
 
-title WF-1: Đăng nhập (Login Flow)
+title WF-1: Login Flow (v3.3)
 
 participant "User\n(Browser)" as U #D5E8D4
-participant "Auth API" as A #DAE8FC
-participant "PostgreSQL" as DB #F5F5F5
-participant "MFA\n(TOTP/Email)" as MFA #E1D5E7
+participant "Core App\n(port 8000)" as CA #DAE8FC
+database "core-db\n(PostgreSQL)" as CDB #F5F5F5
 
-== Đăng nhập ==
+== Login Request ==
 
-U -> A : **1. POST /auth/login**\n(username, password, source_ip)
-activate A
+U -> CA : **POST /api/v1/auth/login**\n(username, password, source_ip, device_fingerprint)
+activate CA
 
-A -> DB : 2. SELECT user WHERE username
-activate DB
-DB --> A : user record\n(hash, status)
-deactivate DB
+CA -> CDB : SELECT user WHERE username
+activate CDB
+CDB --> CA : user record\n(hash, status, mfa settings)
+deactivate CDB
 
-A -> A : 3. Argon2id verify\ncredentials valid?
+CA -> CA : Verify password (Argon2id)
 
 alt credentials INVALID
-    A --> U : **401 Invalid credentials**\n(generic error, không leak)
-    deactivate A
+    CA -> CDB : INSERT login_attempt\n(outcome=failure)
+    CA --> U : **401 Invalid credentials**
+    deactivate CA
+
+else account LOCKED/SUSPENDED
+    CA -> CDB : INSERT login_attempt\n(outcome=locked)
+    CA --> U : **403 Account unavailable**
+    deactivate CA
+
 else credentials VALID + MFA DISABLED
-    A -> DB : 4. INSERT session\n+ login_attempt (outcome=success)
-    activate DB
-    deactivate DB
-    A --> U : **200 OK**\n{access_token, refresh_token}
-    deactivate A
-else credentials VALID + MFA ENABLED
-    A -> DB : 5. INSERT pre_auth_transaction\n(status=pending, expires_at+5min)
-    activate DB
-    deactivate DB
-    A --> U : **200 MFA_REQUIRED**\n{mfa_required:true, session_id}
-    deactivate A
+    CA -> CDB : INSERT login_attempt\n(outcome=success)
+    CA -> CDB : INSERT session\n(token_jti, access_hash,\nrefresh_hash, expires_at)
+    note right: core-db.sessions
+    CA --> U : **200 OK**\n{access_token, refresh_token}
+    deactivate CA
 
-    == MFA Verify ==
+else credentials VALID + MFA REQUIRED
+    CA -> CDB : INSERT login_attempt\n(outcome=mfa_required)
+    CA -> CDB : INSERT mfa_transaction\n(status=pending)
+    note right: core-db.mfa_transactions
+    CA --> U : **200 MFA_REQUIRED**\n{mfa_required: true,\nmfa_type: email_otp|sms_otp|totp}
+    deactivate CA
 
-    U -> A : **6. POST /auth/mfa/verify**\n(session_id, mfa_code)
-    activate A
+    == MFA Verify (chi tiết tại WF-4) ==
 
-    A -> DB : 7. SELECT pre_auth_transaction\nWHERE id=session_id
-    activate DB
-    DB --> A : transaction record
-    deactivate DB
+    U -> CA : **POST /api/v1/auth/mfa/verify**\n(transaction_id, mfa_code)
+    activate CA
 
-    alt code WRONG / expired / IP mismatch
-        A -> DB : 8. UPDATE pre_auth_transaction\n(status=failed)
-        activate DB
-        deactivate DB
-        A --> U : **401 MFA failed**
-        deactivate A
+    CA -> CDB : SELECT mfa_transaction WHERE id
+    activate CDB
+    CDB --> CA : transaction record
+    deactivate CDB
+
+    CA -> CA : Verify OTP (hash compare)
+
+    alt code INVALID / expired / IP mismatch
+        CA -> CDB : UPDATE mfa_transaction\n(status=failed, fail_count+1)
+        CA --> U : **401 MFA failed**
+        deactivate CA
     else code VALID
-        A -> DB : 8. UPDATE pre_auth_transaction\n(status=completed)\n+ INSERT login_attempt (outcome=mfa_success)\n+ INSERT session
-        activate DB
-        deactivate DB
-        A --> U : **200 OK**\n{access_token, refresh_token}
-        deactivate A
+        CA -> CDB : UPDATE mfa_transaction\n(status=completed)
+        CA -> CDB : INSERT login_attempt\n(outcome=mfa_success)
+        CA -> CDB : INSERT session
+        CA --> U : **200 OK**\n{access_token, refresh_token}
+        deactivate CA
     end
 end
+
+note bottom of CA
+  **v3.3 Changes:**
+  - Core App giao tiếp Detection Engine qua HTTP
+  - Login Event KHÔNG gọi detection ngay
+  - Detection chạy async qua Outbox Pattern
+  - Xem WF-2 để biết chi tiết
+end note
 
 @enduml

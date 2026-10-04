@@ -1,0 +1,61 @@
+@startuml
+skinparam backgroundColor #FFFFFF
+skinparam shadowing false
+skinparam defaultFontName Sans
+skinparam rectangle {
+  BackgroundColor #F8F9FA
+  BorderColor #495057
+}
+skinparam ArrowColor #343A40
+skinparam ArrowThickness 1.2
+skinparam titleFontSize 18
+
+title Vòng đời của một lần đăng nhập đi qua hệ thống (từ đầu đến cuối)
+
+left to right direction
+
+rectangle "T0\n0ms" as T0 #D5E8D4
+rectangle "T1\n≈5ms" as T1 #DAE8FC
+rectangle "T2\n≈10ms" as T2 #DAE8FC
+rectangle "T3\n+5–30s\n(nền)" as T3 #FFE6CC
+rectangle "T4\n+1–3 phút\n(người)" as T4 #F8CECC
+rectangle "T5\n+30 phút" as T5 #CCE5FF
+rectangle "T6\nvài ngày" as T6 #E1D5E7
+
+T0 --> T1 : người dùng nhận\nthông tin đăng nhập
+T1 --> T2 : phiên được tạo\n+ sự kiện ghi vào hộp thư
+T2 --> T3 : bộ gom đẩy sự kiện\nqua HTTP
+T3 --> T4 : chấm điểm quy tắc + ML\n→ gộp → xếp mức
+T4 --> T5 : nếu rủi ro cao:\ntạo cảnh báo + yêu cầu MFA/khoá
+T5 --> T6 : chuyên viên SOC\nxử lý và kết luận
+T6 --> T6 : nhật ký kiểm toán\ntồn tại lâu dài
+
+note bottom of T2
+  **Trải nghiệm người dùng kết thúc ở đây.**
+  Từ T3 trở đi, mọi thứ chạy nền.
+end note
+
+note bottom of T4
+  **Điểm then chốt của thiết kế bất đồng bộ:**
+  quyết định "khoá tài khoản" có thể đến
+  *sau khi* người dùng đã đăng nhập thành công.
+  Hệ thống phải sẵn sàng thu hồi phiên đang
+  hoạt động — đó là lý do có hành động
+  `REVOKE_SESSIONS`.
+end note
+
+note bottom of T6
+  **Ba tầng nhật ký, ba mục đích khác nhau:**
+
+  | Tầng | Bảng | Mục đích |
+  |------|------|----------|
+  | 1 | `audit_logs` (core-db) | ai đã làm gì với tài khoản |
+  | 2 | `detection_logs` (detection-db) | hệ thống đã suy luận ra sao |
+  | 3 | `alert_timeline` (detection-db) | SOC đã xử lý ra sao |
+
+  Ba tầng này có thể đối chiếu chéo bằng
+  `login_attempt_id` và `request_id` để dựng
+  lại toàn bộ sự kiện từ đầu đến cuối.
+end note
+
+@enduml

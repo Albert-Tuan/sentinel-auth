@@ -1,0 +1,80 @@
+@startuml
+skinparam backgroundColor #FFFFFF
+skinparam shadowing false
+skinparam defaultFontName Sans
+skinparam rectangle {
+  BackgroundColor #F8F9FA
+  BorderColor #495057
+}
+skinparam ArrowColor #343A40
+skinparam ArrowThickness 1.2
+skinparam titleFontSize 18
+
+title Tham chiếu chéo giữa ba cơ sở dữ liệu — Điểm khó nhất của v3.3
+
+left to right direction
+
+rectangle "CORE-DB" as CDB #DAE8FC {
+  rectangle "users\nnguồn sự thật về con người" as U
+}
+
+rectangle "DETECTION-DB" as DDB #FFF2CC {
+  rectangle "soc_analysts.user_id" as SA
+  rectangle "alerts.assigned_to_id\n→ soc_analysts.id" as A1
+  rectangle "alerts.resolved_by_id\n→ soc_analysts.id" as A2
+  rectangle "alert_timeline.actor_id" as AT
+  rectangle "policies.created_by" as PC
+}
+
+rectangle "ML-SERVICE-DB" as MDB #E1D5E7 {
+  rectangle "model_versions.trained_by" as MV
+}
+
+U --> SA : cùng một UUID
+SA --> A1
+SA --> A2
+U --> AT
+U --> PC
+U --> MV
+
+note bottom of U
+  **Vấn đề:** mỗi cơ sở dữ liệu một nơi.
+  Không thể tạo *khoá ngoại* (foreign key) xuyên
+  suốt giữa chúng — cơ sở dữ liệu không biết
+  bảng kia tồn tại.
+end note
+
+rectangle "GIẢI PHÁP: kiểm tra ở tầng ứng dụng\nqua API của Core App" as SOL #FFE6CC
+note right of SOL
+  1. Trước khi ghi, Detection Engine gọi
+     `GET /api/v1/internal/users/{id}`
+     để chắc chắn người dùng tồn tại.
+  2. Không dùng *xoá theo dây chuyền* cho
+     tham chiếu xuyên DB — dùng *xoá mềm*
+     (`status = archived`) để giữ dấu vết.
+  3. Cần tiến trình **đối chiếu định kỳ**
+     (reconciliation job) quét các tham chiếu
+     mồ côi.
+  4. Nếu người dùng bị xoá ở core-db, các bản ghi
+     phía sau giữ nguyên UUID và đánh dấu là
+     cũ (stale) bằng một cờ riêng.
+end note
+
+A1 --> SOL
+A2 --> SOL
+AT --> SOL
+PC --> SOL
+MV --> SOL
+
+legend bottom
+**Đánh đổi của cách tách 3 cơ sở dữ liệu:**
+
+| Có được                          | Phải trả giá                        |
+|----------------------------------|-------------------------------------|
+| Quyền truy cập tách bạch          | Phải kiểm tra tham chiếu bằng tay   |
+| Nhóm phụ trách độc lập            | Tốn 1 vòng gọi HTTP mỗi lần ghi      |
+| Mở rộng / thay thế dịch vụ dễ     | Không có tính toàn vẹn tham chiếu    |
+| Có thể mở rộng theo chiều ngang   | Phải bù bằng quy trình đối chiếu    |
+endlegend
+
+@enduml
