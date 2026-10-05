@@ -81,10 +81,23 @@ detection-engine (port 8001) ← Risk detection, SOC workflow
 ml-service (port 8002)      ← ML inference (stateless)
 ```
 
-### 2. Detection chạy ASYNC qua Outbox Pattern
-- **Trước (v3.2):** Core gọi detection sync trong request login
-- **Sau (v3.3):** Core INSERT `outbox_events` → Poller → HTTP push sang Detection Engine
-- Lợi ích: Login không bị block chờ detection
+### 2. Detection: cổng đồng bộ + hành động bất đồng bộ
+
+> **Cập nhật 2026-10-05.** Mô hình "async thuần qua outbox" là **thiết kế dự kiến**, chưa
+> phải hiện thực. Xem bảng bên dưới.
+
+**Thực trạng code hiện tại:**
+
+| Bước | Thời điểm | Cơ chế |
+|------|-----------|--------|
+| Ghi `login_attempts` | Đồng bộ, trong request login | Core ghi thẳng vào `login_attempts` |
+| `pre-token-check` | **Đồng bộ**, sau xác thực mật khẩu | Core gọi Detection, chặn token nếu rủi ro cao |
+| Chấm điểm | **Đồng bộ**, trong handler Detection | `process_attempt()` được `await` |
+| `POST /actions` | Sau khi commit verdict | Detection gọi ngược Core để thu hồi |
+
+- **Đã có:** cổng kiểm duyệt trước khi cấp token + thu hồi phiên tự động.
+- **Chưa có:** bảng `outbox_events` **không** được ghi, **không có poller**. Xem
+  `DECISIONS-DETECTION-v3.3.md` mục 12.
 
 ### 3. 3 databases tách biệt
 - **core-db:** 13 tables (users, sessions, MFA, outbox)
@@ -93,11 +106,12 @@ ml-service (port 8002)      ← ML inference (stateless)
 
 ### 4. HTTP communication giữa services
 ```
-Core App ←→ Detection Engine  (LoginEvent, Action)
-Detection Engine ←→ ML Service  (ML scoring)
+Core App ──(sync)──→ Detection Engine   (pre-token-check, login-events)
+Core App ←─(sync)─── Detection Engine   (actions: revoke / require MFA)
+Detection Engine ──→ ML Service         (ML scoring)
 ```
 - Tất cả HTTP calls có `Internal-Secret` header
-- Có retry logic + idempotency (event_id)
+- Có idempotency: `event_id` (login events), `idempotency_key` (actions)
 
 ### 5. ML Service là stateless
 - Model load từ disk vào memory lúc startup
@@ -111,7 +125,7 @@ Xem chi tiết trong `ERD_v3.3.md`:
 | Workflow | Tables liên quan |
 |----------|------------------|
 | WF-1 | `users`, `sessions`, `mfa_transactions`, `mfa_notifications` |
-| WF-2 | `outbox_events` (core-db) → `login_attempts`, `risk_assessments`, `detection_logs`, `alerts` (detection-db) |
+| WF-2 | `login_attempts`, `risk_assessments`, `detection_logs`, `alerts` (detection-db) — hiện nhận trực tiếp qua HTTP, chưa qua `outbox_events` |
 | WF-3 | `alerts`, `alert_timeline`, `soc_analysts` (cross-ref `users` via app) |
 | WF-4 | `mfa_transactions`, `mfa_notifications`, `user_trusted_devices` |
 | WF-5 | `sessions`, `audit_logs` |

@@ -112,6 +112,57 @@ def test_revoke_sessions_with_no_active_session_is_already_applied(client, user)
     assert body["details"]["sessions_revoked"] == 0
 
 
+# =============================================================================
+# REQUIRE_MFA must also cut live sessions
+# =============================================================================
+
+def test_require_mfa_revokes_live_sessions(client, db, user):
+    """Without revoking, a token issued before detection ran keeps working
+    for its full hour and the MFA requirement has no effect at all."""
+    live = Session(
+        user_id=user.id, access_token_hash="h", expires_at=user.created_at
+    )
+    db.add(live)
+    db.commit()
+
+    body = _post(client, "REQUIRE_MFA", user.id).json()
+    assert body["status"] == "applied"
+    assert body["details"]["sessions_revoked"] == 1
+
+    db.expire_all()
+    assert db.get(Session, live.id).revoked_at is not None
+
+
+def test_require_mfa_does_not_touch_other_users_sessions(client, db, user):
+    other = User(username="bob", password_hash="x", status="active")
+    db.add(other)
+    db.commit()
+    db.refresh(other)
+    theirs = Session(
+        user_id=other.id, access_token_hash="h2", expires_at=user.created_at
+    )
+    db.add(theirs)
+    db.commit()
+
+    _post(client, "REQUIRE_MFA", user.id)
+
+    db.expire_all()
+    assert db.get(Session, theirs.id).revoked_at is None
+
+
+def test_lock_user_also_revokes_sessions(client, db, user):
+    live = Session(
+        user_id=user.id, access_token_hash="h", expires_at=user.created_at
+    )
+    db.add(live)
+    db.commit()
+
+    body = _post(client, "LOCK_USER", user.id).json()
+    assert body["details"]["sessions_revoked"] == 1
+    db.expire_all()
+    assert db.get(Session, live.id).revoked_at is not None
+
+
 def test_force_logout_revokes_without_locking(client, db, user):
     db.add(Session(user_id=user.id, access_token_hash="h", expires_at=user.created_at))
     db.commit()

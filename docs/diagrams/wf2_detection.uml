@@ -1,95 +1,96 @@
 @startuml
 skinparam backgroundColor #FFFFFF
 
-title WF-2: Detection Engine Flow (v3.3 - Async via Outbox + HTTP)
+title WF-2: Detection Engine Flow (v3.3 - Risk Gate + Direct HTTP)
 
 participant "Core App" as CA #DAE8FC
 database "core-db" as CDB #F5F5F5
-participant "Outbox\nPoller" as OP #FFE6CC
+participant "Outbox\nPoller\n(NOT impl.)" as OP #F5F5F5
 participant "Detection Engine\n(port 8001)" as DE #FFF2CC
 database "detection-db" as DDB #F5F5F5
 participant "ML Service\n(port 8002)" as ML #E1D5E7
 database "ml-service-db" as MDB #F5F5F5
 
-== Phase 1: Login + Outbox Event ==
+== Phase 0: Risk Gate (đồng bộ, 2026-10-05) ==
 
-note over CA, CDB
-  Sau khi login thành công (WF-1)
-  Core App INSERT outbox_events
-  (KHÔNG gọi detection sync)
+note over CA, DE
+  Sau khi xác thực mật khẩu thành công,
+  TRƯỚC khi tạo session / cấp token.
+  FAIL OPEN: lỗi hoặc timeout thì vẫn cho đăng nhập.
 end note
 
-CA -> CDB : INSERT outbox_events\n(aggregate_type=login_attempt,\nevent_type=LoginEvent,\npayload={user_id, ip, ua, ...})
+CA -> DE : **POST /api/v1/internal/pre-token-check**\n(username, user_id, ip, ua)\n+ Internal-Secret, timeout 3s
+activate DE
+DE --> CA : {risk_level, decision,\nrequire_mfa, degraded}
+deactivate DE
+
+alt require_mfa = true (high / critical)
+    CA -> CA : detection_mfa_once = true
+    note right: **Chưa tạo session,\nchưa cấp token**
+    CA -> CDB : INSERT login_attempts\n(outcome=mfa_required)
+    CA -> CDB : INSERT mfa_transactions
+    CA --> CA : 200 {mfa_required: true}\n(xử lý ở WF-4)
+else low / medium / degraded
+    CA --> CA : tiếp tục tạo session
+end
+
+== Phase 1: Login Event (gửi trực tiếp) ==
+
+note over CA, CDB
+  Core App INSERT login_attempts rồi POST thẳng
+  sang Detection. KHÔNG qua outbox_events:
+  bảng có trong schema nhưng code chưa ghi,
+  và chưa có poller (DECISIONS mục 12).
+end note
+
+CA -> CDB : INSERT login_attempts\n(user_id, ip_address, user_agent,\noutcome, timestamp)
 activate CDB
 deactivate CDB
 
-CA --> CA : Trả 200 cho User\n(đã xong phần core-app)
+== Phase 2: HTTP Push to Detection Engine ==
 
-== Phase 2: Outbox Polling ==
-
-OP -> CDB : SELECT outbox_events\nWHERE status='pending'\nLIMIT 100
-activate CDB
-CDB --> OP : [LoginEvent, ...]
-deactivate CDB
-
-OP -> OP : status=processing
-OP -> CDB : UPDATE outbox_events SET status=processing
-deactivate CDB
-
-== Phase 3: HTTP Push to Detection Engine ==
-
-OP -> DE : **POST /api/v1/internal/login-events**\n(event_id, user_id, username_attempted,\noutcome, ip, ua, timestamp)\n+ Internal-Secret header
+CA -> DE : **POST /api/v1/internal/login-events**\n(event_id, user_id, username_attempted,\noutcome, ip, ua, timestamp)\n+ Internal-Secret header
 activate DE
 
 DE -> DE : Validate Internal-Secret
 DE -> DE : Check event_id idempotency
 
 alt event ALREADY PROCESSED
-    DE --> OP : **200 OK** {deduplicated: true}
+    DE --> CA : **200 OK** {deduplicated: true}
     deactivate DE
 else NEW event
     DE -> DDB : INSERT login_attempts\n(event_id, user_id, outcome, ip, ua,\ntimestamp, status=pending)
     activate DDB
     deactivate DDB
-    DE --> OP : **202 Accepted** {login_attempt_id}
+    DE --> CA : **202 Accepted** {login_attempt_id}
     deactivate DE
 end
 
-OP -> CDB : UPDATE outbox_events\n(status=published, published_at=NOW())
-
-== Phase 4: Detection Pipeline (Background Worker) ==
+== Phase 3: Detection Pipeline (đồng bộ trong handler) ==
 
 note over DE, DDB
-  Detection Engine Worker
-  poll login_attempts WHERE status='pending'
+  process_attempt() được await ngay trong request
+  handler. KHÔNG có worker nền poll pending.
 end note
 
-DE -> DDB : SELECT login_attempts\nWHERE status='pending'\nORDER BY timestamp
-activate DDB
-DDB --> DE : [pending attempts]
-deactivate DDB
-
-loop for each pending attempt
-    DE -> DDB : UPDATE login_attempts\n(status=processed)
-    
-    == Rule Evaluation ==
+loop ngay trong handler (không có worker nền)
     DE -> DE : Load active policy
     DE -> DE : Calculate rule_score\n(IP new? fail_count? new_device?\nunusual_hour? new_country? VPN/Tor?)
     DE -> DDB : INSERT detection_logs\n(stage=rule_evaluation,\nrule_name, triggered, score_contribution)
-    
+
     == ML Scoring (Xem WF-6 chi tiết) ==
     DE -> ML : **POST /api/v1/internal/ml/score**\n(request_id, features: {6 features})\n+ Internal-Secret, timeout 5s
     activate ML
     ML --> DE : {normalized_anomaly_score, is_anomaly,\nreason_codes, model_version, model_status}
     deactivate ML
-    
+
     == Combine Scores ==
-    DE -> DE : rule_score = min(1.0, Σ(score×weight) / Σ weight_cua_rule_da_bat)
-    DE -> DE : combined_score =\n0.4 × rule_score + 0.6 × ml_score\n(neu ML that cong: combined = rule_score)
-    DE -> DE : risk_level =\nlow < 0.25 ≤ medium < 0.50 ≤ high < 0.75 ≤ critical
-    
+    DE -> DE : rule_score = min(1.0, SUM(score*weight) / SUM(weight cua rule da bat))
+    DE -> DE : combined_score =\n0.4 x rule_score + 0.6 x ml_score\n(neu ML that: combined = rule_score)
+    DE -> DE : risk_level =\nlow < 0.25 <= medium < 0.50 <= high < 0.75 <= critical
+
     DE -> DDB : INSERT risk_assessments\n(login_attempt_id, policy_id, rule_score, ml_score,\ncombined_score, ml_status, ml_model_version,\nrule_hits, ml_reason_codes, ml_features_used,\nrisk_level, decision)
-    
+
     == Action Decision ==
     alt risk_level IN (high, critical)
         DE -> DDB : INSERT alerts\n(login_attempt_id, status=open,\nrisk_level, detection_reason,\ndetection_scores)
@@ -97,24 +98,36 @@ loop for each pending attempt
     else risk_level IN (low, medium)
         DE -> DDB : INSERT detection_logs\n(stage=action_sent, stage_detail=no_alert)
     end
-    
-    == Optional: Send Action back to Core ==
-    alt risk_level = critical (block)
-        DE -> CA : **POST /api/v1/internal/actions**\n(action=LOCK_USER, target_user_id,\nreason, alert_id, severity)\n+ Internal-Secret
+
+    == Gửi hành động về Core (SAU khi commit) ==
+    note over DE, CA
+      timeout 3s, nuốt lỗi, có idempotency_key.
+      critical KHÔNG gửi LOCK_USER.
+    end note
+    alt risk_level = high
+        DE -> CA : **POST /api/v1/internal/actions**\n(action=REQUIRE_MFA, target_user_id,\nreason, alert_id, severity=high,\nidempotency_key)\n+ Internal-Secret
         activate CA
-        CA -> CDB : UPDATE users SET status=locked
-        CA --> DE : **200 OK**
+        CA -> CDB : UPDATE users\nSET detection_mfa_once=true
+        CA -> CDB : UPDATE sessions\nSET revoked_at=NOW()\n(phiên đang hoạt động)
+        CA --> DE : **200 OK**\n{details.sessions_revoked}
+        deactivate CA
+    else risk_level = critical
+        DE -> CA : **POST /api/v1/internal/actions**\n(action=REVOKE_SESSIONS,\ntarget_user_id, reason, alert_id,\nseverity=critical, idempotency_key)\n+ Internal-Secret
+        activate CA
+        CA -> CDB : UPDATE sessions\nSET revoked_at=NOW()\n(phiên đang hoạt động)
+        CA --> DE : **200 OK**\n{details.sessions_revoked}
         deactivate CA
     end
 end
 
 note over DE
   **v3.3 Key Points:**
-  - Login KHÔNG block chờ detection
-  - Outbox pattern đảm bảo reliability
-  - HTTP giữa Core ↔ Detection Engine
-  - Detection Engine tự quản lý login_attempts
-  - ML Service được gọi qua HTTP riêng
+  - HIGH/CRITICAL: token bị giữ, bắt MFA trước khi cấp
+  - Cổng risk gate FAIL OPEN khi Detection lỗi
+  - Detection tự gọi /actions sau khi commit verdict
+  - REQUIRE_MFA cũng thu hồi phiên đang hoạt động
+  - Outbox pattern: THIẾT KẾ ĐÍCH, chưa hiện thực
+  - Xem DECISIONS-DETECTION-v3.3.md mục 10, 11, 12
 end note
 
 @enduml

@@ -14,7 +14,12 @@ flowchart LR
         A --> CDB[(core-db)]
         A -->|MFA?| MFA["POST /auth/mfa/verify"]
         MFA --> CDB
-        A -.->|INSERT outbox_events| OB["Outbox Poller"]
+        A -.->|INSERT login_attempts| RG["Risk Gate"]
+        RG -.->|"pre-token-check"| B
+        OB["Outbox Poller
+(NOT impl.)"]:::ghost
+        A -.->|INSERT outbox_events| OB
+        classDef ghost stroke-dasharray: 3 3,opacity:0.5
     end
 
     subgraph Detection["Detection Engine :8001"]
@@ -43,6 +48,7 @@ flowchart LR
 sequenceDiagram
     participant U as User
     participant CA as Core App
+    participant DE as Detection Engine
     participant CDB as core-db
 
     U->>CA: POST /api/v1/auth/login<br/>(username, password)
@@ -54,18 +60,23 @@ sequenceDiagram
         CA-->>U: 401 Invalid credentials
     else account LOCKED/SUSPENDED
         CA->>CDB: INSERT login_attempt (outcome=locked)
-        CA-->>U: 403 Account unavailable
-    else credentials VALID + MFA DISABLED
-        CA->>CDB: INSERT login_attempt (outcome=success)
-        CA->>CDB: INSERT sessions (token_jti, expires_at)
-        CA-->>U: 200 {access_token, refresh_token}
-    else credentials VALID + MFA REQUIRED
-        CA->>CDB: INSERT login_attempt (outcome=mfa_required)
-        CA->>CDB: INSERT mfa_transactions (status=pending)
-        CA-->>U: 200 {mfa_required: true, mfa_type}
-    end
+        CA-->>U: 423 Account locked
+    else credentials VALID
+        Note over CA,DE: Risk gate (2026-10-05)<br/>đồng bộ, timeout 3s, FAIL OPEN
+        CA->>DE: POST /internal/pre-token-check<br/>(username, user_id, ip, ua)
+        DE-->>CA: {risk_level, require_mfa, degraded}
 
-    Note over U,CA: **v3.3:** Detection chạy ASYNC<br/>qua Outbox Pattern → HTTP
+        alt require_mfa (high / critical)
+            CA->>CDB: INSERT login_attempt (outcome=mfa_required)
+            CA->>CDB: INSERT mfa_transactions (status=pending)
+            Note over CA: Chưa tạo session,<br/>chưa cấp token
+            CA-->>U: 200 {mfa_required: true}
+        else low / medium / degraded
+            CA->>CDB: INSERT login_attempt (outcome=success)
+            CA->>CDB: INSERT sessions (token_jti, expires_at)
+            CA-->>U: 200 {access_token, refresh_token}
+        end
+    end
 
     U->>CA: POST /api/v1/auth/mfa/verify<br/>(transaction_id, code)
     CA->>CDB: SELECT mfa_transactions WHERE id
@@ -80,42 +91,35 @@ sequenceDiagram
         CA-->>U: 200 {access_token, refresh_token}
     end
 
-    Note over CA,CDB: **Sau khi login thành công:**<br/>CA INSERT outbox_events<br/>(KHÔNG gọi detection sync)
+    Note over CA,CDB: **Sau khi login thành công:**<br/>CA INSERT login_attempts rồi POST thẳng<br/>sang Detection (chưa dùng outbox)
 ```
 
 ---
 
-## WF-2: Detection Engine Flow (Async)
+## WF-2: Detection Engine Flow (Risk Gate + Direct HTTP)
 
 ```mermaid
 sequenceDiagram
     participant CA as Core App
     participant CDB as core-db
-    participant OP as Outbox Poller
     participant DE as Detection Engine
     participant DDB as detection-db
     participant ML as ML Service
     participant MDB as ml-service-db
 
-    Note over CA,CDB: Phase 1: Login + Outbox
-    CA->>CDB: INSERT outbox_events<br/>(aggregate=login_attempt,<br/>event_type=LoginEvent)
-    CA-->>CA: Trả 200 cho User
+    Note over CA,DE: Phase 0 - Risk gate<br/>dong bo, timeout 3s, FAIL OPEN
+    CA->>DE: POST /api/v1/internal/pre-token-check<br/>(username, user_id, ip, ua)
+    DE-->>CA: {risk_level, require_mfa, degraded}
+    Note over CA: high/critical - giu token, bat MFA<br/>low/medium - cap token<br/>loi - cho qua
 
-    Note over OP: Phase 2: Polling
-    OP->>CDB: SELECT outbox_events WHERE status='pending'
-    OP->>OP: status=processing
-
-    Note over OP,DE: Phase 3: HTTP Push
-    OP->>DE: POST /api/v1/internal/login-events<br/>(event_id, user_id, ip, ua, ...)<br/>+ Internal-Secret
+    Note over CA,CDB: Phase 1 - Login event gui truc tiep<br/>KHONG qua outbox (chua hien thuc)
+    CA->>CDB: INSERT login_attempts
+    CA->>DE: POST /api/v1/internal/login-events<br/>(event_id, user_id, ip, ua, ...)<br/>+ Internal-Secret
     DE->>DDB: INSERT login_attempts<br/>(event_id, ..., status=pending)
-    DE-->>OP: 202 Accepted {login_attempt_id}
-    OP->>CDB: UPDATE outbox_events (status=published)
+    DE-->>CA: 202 Accepted {login_attempt_id}
 
-    Note over DE,DDB: Phase 4: Detection Pipeline
-    DE->>DDB: SELECT login_attempts WHERE status='pending'
-
-    loop for each pending attempt
-        DE->>DDB: UPDATE login_attempts (status=processed)
+    Note over DE,DDB: Phase 2 - Detection pipeline<br/>chay await trong handler, KHONG co worker nen
+    loop ngay trong handler
         DE->>DE: Calculate rule_score
         DE->>DDB: INSERT detection_logs (stage=rule_evaluation)
 
@@ -125,8 +129,9 @@ sequenceDiagram
         ML->>MDB: INSERT inference_logs
         ML-->>DE: {anomaly_score, is_anomaly, reason_codes}
 
-        DE->>DE: combined = 0.4×rule + 0.6×ml
+        DE->>DE: combined = 0.4 x rule + 0.6 x ml
         DE->>DDB: INSERT risk_assessments
+        DE->>DDB: UPDATE login_attempts (status=processed)
 
         alt risk_level HIGH/CRITICAL
             DE->>DDB: INSERT alerts (status=open)
@@ -135,9 +140,16 @@ sequenceDiagram
             DE->>DDB: INSERT detection_logs (no_alert)
         end
 
-        opt risk_level = CRITICAL
-            DE->>CA: POST /api/v1/internal/actions<br/>(action=LOCK_USER)
-            CA->>CDB: UPDATE users (status=locked)
+        Note over DE,CA: Gui action SAU khi commit<br/>timeout 3s, nuot loi
+        alt risk_level = HIGH
+            DE->>CA: POST /api/v1/internal/actions<br/>(action=REQUIRE_MFA, idempotency_key)
+            CA->>CDB: UPDATE users (detection_mfa_once=true)
+            CA->>CDB: UPDATE sessions (revoked_at=NOW())
+            CA-->>DE: 200 {details.sessions_revoked}
+        else risk_level = CRITICAL
+            DE->>CA: POST /api/v1/internal/actions<br/>(action=REVOKE_SESSIONS, idempotency_key)
+            CA->>CDB: UPDATE sessions (revoked_at=NOW())
+            CA-->>DE: 200 {details.sessions_revoked}
         end
     end
 ```
@@ -361,7 +373,7 @@ sequenceDiagram
 | Workflow | Tables sử dụng | Database |
 |----------|----------------|----------|
 | WF-1 | users, sessions, mfa_transactions, mfa_notifications, login_attempts | core-db |
-| WF-2 | outbox_events (core-db), login_attempts, risk_assessments, detection_logs, alerts | core-db → detection-db |
+| WF-2 | login_attempts, risk_assessments, detection_logs, alerts | detection-db (nhận trực tiếp qua HTTP; outbox_events chưa dùng) |
 | WF-3 | alerts, alert_timeline, soc_analysts, login_attempts | detection-db (+ cross-ref core-db) |
 | WF-4 | mfa_transactions, mfa_notifications, user_trusted_devices, users | core-db |
 | WF-5 | sessions, audit_logs, users | core-db |

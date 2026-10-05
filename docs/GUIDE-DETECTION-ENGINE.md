@@ -8,6 +8,30 @@
 
 ---
 
+## ⚠️ Đọc trước: hiện trạng thực tế khác thiết kế
+
+Tài liệu này giảng **kiến trúc đích**. Code hiện tại đã đi được một phần, còn một phần
+**chưa hiện thực**. Đọc mục này trước để không hiểu nhầm.
+
+| Phần | Thiết kế đích | Code hiện tại |
+|------|---------------|---------------|
+| Phát sự kiện login | Transactional outbox + poller | ❌ `app/auth.py` ghi thẳng `LoginAttempt`, **không** tạo dòng `outbox_events`, **không có poller** |
+| Kiểm duyệt trước khi cấp token | — | ✅ **Đã có** (2026-10-05): `pre-token-check`, chặn token khi rủi ro `high`/`critical` |
+| Chấm điểm | Worker nền | `process_attempt()` chạy `await` trong request handler (đồng bộ), trả `202` vì ngữ nghĩa REST |
+| Gửi hành động về Core App | Có | ✅ **Đã có** (2026-10-05): `high`→`REQUIRE_MFA`, `critical`→`REVOKE_SESSIONS` |
+| Chấm lại attempt lỗi | Tự động | ⚠️ Hàm `rescore_failed_attempts()` có, **chưa** có worker gọi định kỳ |
+
+**Vì sao phần outbox vẫn đáng giữ trong tài liệu:** đó vẫn là câu trả lời đúng cho bài toán
+"sự kiện đã ghi nhưng Detection không nhận được". Cổng `pre-token-check` giảm thiểu rủi
+ro trong lúc chờ, nhưng **không thay thế** được outbox.
+
+Chi tiết đầy đủ: `docs/DECISIONS-DETECTION-v3.3.md` mục 10, 11, 12.
+
+> **Mục 2 (Outbox pattern) mô tả thiết kế, không phải code đang chạy.** Đọc mục 2 để
+> hiểu *vì sao* chọn mô hình đó, nhưng đừng tìm `outbox.py` hay poller trong repo — chưa có.
+
+---
+
 ## Mục lục
 
 | # | Phần | Nội dung |
@@ -584,12 +608,19 @@ Một quy trình (policy) khác nhau có thể cùng một `risk_level` nhưng `
 
 ![Bốn hành động bảo vệ](diagrams/v3.3-detect/06-hanh-dong-ve-core.png)
 
-| Hành động | Đích | Khi nào | Tác động |
-|-----------|------|---------|----------|
-| `REQUIRE_MFA` | `user_id` | `high` | Lần đăng nhập kế tiếp bắt buộc có MFA |
-| `REVOKE_SESSIONS` | `user_id` | `critical` | Thu hồi **tất cả** phiên đang hoạt động |
-| `LOCK_USER` | `user_id` | `critical` | Khoá tài khoản + thu hồi phiên |
-| `FORCE_LOGOUT` | `user_id` | do SOC yêu cầu | Đăng xuất cưỡng bức |
+| Hành động | Đích | Khi nào | Tác động | Gửi tự động? |
+|-----------|------|---------|----------|---------------|
+| `REQUIRE_MFA` | `user_id` | `high` | Lần đăng nhập kế tiếp bắt buộc có MFA **+ thu hồi mọi phiên đang hoạt động** | ✅ |
+| `REVOKE_SESSIONS` | `user_id` | `critical` | Thu hồi **tất cả** phiên đang hoạt động | ✅ |
+| `LOCK_USER` | `user_id` | do SOC yêu cầu | Khoá tài khoản + thu hồi phiên | ❌ thủ công |
+| `FORCE_LOGOUT` | `user_id` | do SOC yêu cầu | Đăng xuất cưỡng bức | ❌ thủ công |
+
+> **`critical` KHÔNG gửi `LOCK_USER`** (đổi 2026-10-05). Vì `false positive` của ML là
+> tình huống thường gặp, khoá tài khoản sẽ chặn oan người dùng hợp lệ tới khi admin mở
+> khoá. `REVOKE_SESSIONS` cắt quyền kẻ tấn công nhưng **đảo ngược được**. Xem
+> `DECISIONS-DETECTION-v3.3.md` mục 11.2.
+>
+> `LOCK_USER` vẫn giữ cho SOC dùng thủ công sau khi đã điều tra có bằng chứng.
 
 > Rate limiting **không** nằm trong phạm vi v3.3 — Core App tự xử lý và ghi
 > `login_attempts.outcome = 'rate_limited'`.
@@ -604,43 +635,72 @@ Content-Type: application/json
 
 ```json
 {
-    "action": "LOCK_USER",
+    "action": "REVOKE_SESSIONS",
     "target_user_id": "uuid-cua-user",
     "reason": "COMBINE: 0.8125 - rule 0.7583 + high_deviation",
     "alert_id": "uuid-canh-bao",
     "severity": "critical",
-    "idempotency_key": "optional-string"
+    "idempotency_key": "detection:<attempt_id>:REVOKE_SESSIONS"
 }
 ```
 
 > `target_user_id` là UUID phẳng, **không** phải object `{type, value}`.
-> `idempotency_key` giúp Core App không thực hiện trùng khi outbox retry.
+> `idempotency_key` do Detection tự sinh theo mẫu `detection:{attempt_id}:{action}` —
+> giao lại sau timeout là no-op, không thu hồi hai lần.
 
-### 7.3. Vòng lặp đóng băng — điểm then chốt
+**Response:**
+```json
+{
+    "status": "applied",
+    "action": "REVOKE_SESSIONS",
+    "target_user_id": "uuid-cua-user",
+    "details": { "sessions_revoked": 3, "reason": "..." }
+}
+```
 
-Vì detection chạy **bất đồng bộ**, quyết định khoá tài khoản có thể đến **sau khi** người dùng đã đăng nhập thành công và đang sử dụng hệ thống.
+> `status` có 2 giá trị: `applied` và `already_applied`. Gọi lại action đã có hiệu lực
+> trả `already_applied` chứ không lỗi.
+
+### 7.3. Khoảng trống giữa cấp token và phát hiện
+
+Token Core App có hạn **1 giờ**. Nếu chỉ thu hồi hậu kỳ, kẻ đánh cắp mật khẩu có tối
+đa 1 giờ dùng hệ thống trước khi bị chặn.
+
+**Hai lớp phòng thủ (cả hai đều đang hoạt động):**
 
 ```
-T0:  User đăng nhập thành công → nhận token → bắt đầu làm việc
-                              ↓ (nền)
-T1:  Detection chạy xong → phát hiện bất thường → gửi LOCK_USER
-                              ↓
-T2:  Core App khoá tài khoản + thu hồi phiên
+Lớp 1 — CHẶN TRƯỚC (đồng bộ, phương án C):
+  User đăng nhập → xác thực mật khẩu OK
+                 → gọi pre-token-check (timeout 3s)
+                   ├─ high/critical → CHƯA tạo session, chưa có token → bắt MFA
+                   └─ low/medium    → cấp token bình thường
+                 (lỗi/timeout → fail open, vẫn cho qua)
+
+Lớp 2 – THU HỒI SAU (bất đồng bộ):
+  Detection chấm xong → gửi /actions → thu hồi phiên
 ```
 
-> **Đây chính là lý do hành động `REVOKE_SESSIONS` tồn tại.** Nếu chỉ khoá tài khoản mà không thu hồi phiên, kẻ tấn công đã có token hợp lệ vẫn sử dụng được hệ thống bình thường.
+> **Lớp 1 mới thu hẹp được cửa sổ tấn công.** Chỉ lớp 2 thì kẻ tấn công đã vào được
+> trước khi bị chặn. Với lớp 1, `high`/`critical` **chưa tồn tại token nào** để lợi dụng.
+>
+> Lớp 1 cố ý **fail open**: Detection sập mà khoá cả hệ thống là kết quả tệ hơn nhiều so
+> với lọt một lần đăng nhập không được chấm. Lớp 2 vẫn bảo đảm an toàn nên đánh đổi này
+> chỉ đổi *thời điểm* phát hiện, không mất an toàn.
 
 ### 7.4. Core App làm gì khi nhận hành động
 
 ```
 VERIFY   Kiểm tra khoá nội bộ
 LOOKUP   Tìm user theo target
-EXECUTE  LOCK_USER      → UPDATE users SET status='locked', locked_at=NOW()
-                       → UPDATE sessions SET revoked_at=NOW() WHERE revoked_at IS NULL
-         REVOKE_SESSIONS→ UPDATE sessions SET revoked_at=NOW() WHERE revoked_at IS NULL
-         REQUIRE_MFA    → UPDATE users SET admin_mfa_required=TRUE, detection_mfa_once=TRUE
+EXECUTE  REVOKE_SESSIONS→ UPDATE sessions SET revoked_at=NOW()
+                              WHERE user_id=? AND revoked_at IS NULL
+         FORCE_LOGOUT   → (giống REVOKE_SESSIONS)
+         REQUIRE_MFA    → UPDATE users SET detection_mfa_once=TRUE
+                       → UPDATE sessions SET revoked_at=NOW() ...   ← thu hồi luôn
+         LOCK_USER      → UPDATE users SET status='locked', locked_at=NOW()
+                       → UPDATE sessions SET revoked_at=NOW() ...
 LOG      INSERT audit_logs
-RETURN   { "status": "applied", "action": ..., "details": {...} }
+RETURN   { "status": "applied", "details": { "sessions_revoked": N } }
 ```
 
 ---
@@ -915,12 +975,17 @@ graph LR
 | 2 | Sai khoá nội bộ | `401` | Không |
 | 3 | Sai định dạng JSON | `400` | Không |
 | 4 | ML không phản hồi | Chấm điểm chỉ bằng quy tắc | Không |
-| 5 | Detection sập giữa lúc xử lý | Lần đăng nhập còn `pending` → xử lý lại khi khởi động | Không |
-| 6 | Core App sập sau khi tạo phiên | Sự kiện đã trong outbox → gửi lại | Không |
-| 7 | Core App không nhận lệnh khoá | Ghi nhật ký, thử lại, cảnh báo vẫn còn cho SOC | Có (tạm thời) |
-| 8 | Analyst nhận cảnh báo đã có người xử lý | `409 Conflict` | Không |
-| 9 | Kết luận cảnh báo đã báo nhầm | `400` | Không |
-| 10 | Tham chiếu tới user ở DB khác | Phải kiểm tra qua API, cần đối chiếu định kỳ | Không |
+| 5 | Detection sập giữa lúc xử lý | Attempt để ở `status='failed'`. Hàm `rescore_failed_attempts()` chấm lại được — nhưng **chưa có worker gọi định kỳ** | Không |
+| 6 | Core App không nhận được sự kiện login | ⚠️ Sự kiện **mất**, không có cơ chế gửi lại (chưa có outbox poller) | Không (nhưng bỏ sót phát hiện) |
+| 7 | Detection không gửi được lệnh về Core App | Nuốt lỗi, ghi log, `false`. Cảnh báo vẫn còn cho SOC xử lý thủ công | Có (tạm thời) |
+| 8 | `pre-token-check` lỗi / timeout | **Fail open** — vẫn cấp token, ghi log cảnh báo | Không |
+| 9 | Analyst nhận cảnh báo đã có người xử lý | `409 Conflict` | Không |
+| 10 | Kết luận cảnh báo đã báo nhầm | `400` | Không |
+| 11 | Tham chiếu tới user ở DB khác | Phải kiểm tra qua API, cần đối chiếu định kỳ | Không |
+
+> **Hai dòng 5 và 6 là nợ kỹ thuật đã biết.** Không phải hành vi đã được bảo đảm — xem
+> `DECISIONS-DETECTION-v3.3.md` mục 12. Đặc biệt dòng 6: cổng `pre-token-check` **không**
+> bù được cho outbox, vì nó chỉ canh cửa khi Detection **còn sống** để trả lời.
 
 ### 11.3. Suy giảm êm (graceful degradation) — nguyên tắc số một
 
@@ -943,6 +1008,16 @@ Ba kịch bản ML (theo DE-06):
 > **Không để lỗi ở thành phần phát hiện rủi ro làm hỏng trải nghiệm đăng nhập của người dùng.**
 
 Đây là lý do cốt lõi của toàn bộ quyết định thiết kế bất đồng bộ. Nếu hệ thống bảo mật làm người dùng không đăng nhập được, chính hệ thống đó đã tự tạo ra một cuộc tấn công từ chối dịch vụ (DoS).
+
+> **Bổ sung 2026-10-05 — cổng kiểm duyệt có ngoại lệ, nhưng vẫn an toàn.**
+> Nguyên tắc trên từng có nghĩa "Detection không bao giờ chặn đăng nhập". Nay cổng
+> `pre-token-check` **có** chặn — nhưng chỉ khi Detection **đã trả lời** rủi ro cao. Khi
+> Detection lỗi, cổng fail open. Nghĩa là:
+>
+> - Detection **sống và nói "nguy hiểm"** → chặn (đúng mục đích bảo mật)
+> - Detection **chết / không trả lời** → cho qua (đúng mục đích sẵn có dịch vụ)
+>
+> Đây là phân biệt then chốt: hệ thống **không bao giờ** tự tạo ra DoS bằng sự cố hạ tầng.
 
 ---
 

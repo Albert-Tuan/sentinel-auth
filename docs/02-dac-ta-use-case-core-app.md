@@ -62,7 +62,7 @@ flowchart LR
 | UC-DE-01 | Login event detection | Hệ thống | Nhận login event qua HTTP, chấm rule + gọi ML, trả risk assessment. |
 | UC-DE-02 | ML scoring | Hệ thống | Gọi ML Service, nhận `normalized_anomaly_score` trong [0,1]. |
 | UC-DE-03 | Ghi login event | Hệ thống | Lưu `login_attempts` + `detection_logs` vào detection-db. |
-| UC-DE-04 | Enforce action | Hệ thống | Áp dụng REQUIRE_MFA / REVOKE_SESSIONS / LOCK_USER qua `/api/v1/internal/actions`. |
+| UC-DE-04 | Enforce action | Hệ thống | Áp dụng `REQUIRE_MFA` / `REVOKE_SESSIONS` / `LOCK_USER` / `FORCE_LOGOUT` qua `/api/v1/internal/actions`. Mọi hành động đều trả `details.sessions_revoked`. |
 
 ---
 
@@ -91,14 +91,14 @@ flowchart LR
 | **Actor chính** | User |
 | **Tiền điều kiện** | Account tồn tại và chưa bị `LOCKED`. |
 | **Kích hoạt** | User gửi POST `/api/v1/auth/login` với username, password. IP lấy từ header / socket. |
-| **Luồng chính** | 1. Rate limit: kiểm tra số request/phút/IP (max 5). Vượt → `429`. 2. Tìm user theo username, verify Argon2id hash. 3. Kiểm tra `status != LOCKED`. 4. Ghi login event (UC-DE-03): INSERT `outbox_events`, poller push `POST /api/v1/internal/login-events` sang Detection Engine (bất đồng bộ). 5. Nếu không có cờ MFA → tạo Session, sinh access JWT + refresh token (hash trước khi lưu). Trả `200`. 6. Nếu có cờ MFA → tạo MfaTransaction, sinh OTP 6 số, hash + lưu. Gửi email OTP (Mailpit). Trả `200` + `mfa_required=true` + `session_id`. |
-| **Detection** | Bất đồng bộ qua outbox → Detection Engine chấm rule + gọi ML; kết quả về sau qua `POST /api/v1/internal/actions` (WF-2). Không chặn request login hiện tại. |
+| **Luồng chính** | 1. Rate limit: kiểm tra số request/phút/IP (max 5). Vượt → `429`. 2. Tìm user theo username, verify Argon2id hash. 3. Kiểm tra `status != LOCKED`. 4. **Cổng kiểm duyệt rủi ro**: gọi `POST {DETECTION_URL}/api/v1/internal/pre-token-check` (timeout 3s). Nếu `risk_level ∈ {high, critical}` → đặt `detection_mfa_once=true` và sang bước 6 (chưa tạo session, chưa có token). Lỗi/timeout → **fail open**, coi như rủi ro thấp. 5. Ghi login event (UC-DE-03): INSERT `login_attempts`. 6. Nếu có cờ MFA → tạo MfaTransaction, sinh OTP 6 số, hash + lưu. Gửi email OTP (Mailpit). Trả `200` + `mfa_required=true` + `session_id`. 7. Nếu không có cờ MFA → tạo Session, sinh access token + refresh token (hash trước khi lưu). Trả `200`. |
+| **Detection** | **Hai chiều.** (1) Đồng bộ: cổng `pre-token-check` chặn token khi rủi ro cao — xem `DECISIONS-DETECTION-v3.3.md` mục 10. (2) Bất đồng bộ: Detection chấm xong gọi `POST /api/v1/internal/actions` để thu hồi phiên hoặc bắt MFA (mục 11). |
 | **Request** | `POST /api/v1/auth/login` → `{"username": "string", "password": "string"}` (IP lấy từ `X-Forwarded-For` / client socket) |
 | **Response thành công** | `200 OK` → `{"access_token": "string", "refresh_token": "string", "session_id": "uuid", "mfa_required": false}` |
 | **Response MFA required** | `200 OK` → `{"access_token": "", "refresh_token": "", "session_id": "uuid", "mfa_required": true}` |
-| **Response lỗi** | `401 Unauthorized` (sai credentials); `423 Locked` (account locked); `429 Too Many Requests` (rate limit). Login không trả `403` vì detection chạy bất đồng bộ. |
+| **Response lỗi** | `401 Unauthorized` (sai credentials); `423 Locked` (account locked); `429 Too Many Requests` (rate limit). Login **không** trả `403`: khi rủi ro cao, cổng trả `200` + `mfa_required=true` chứ không chặn. |
 | **Ngoại lệ** | Rate limit → `429`; account `LOCKED` → `423`; wrong password → generic `401` (không tiết lộ account tồn tại). |
-| **Hậu điều kiện** | Hoặc có JWT + session; hoặc có MfaTransaction + OTP pending; hoặc login bị từ chối. |
+| **Hậu điều kiện** | Hoặc có token + session; hoặc có MfaTransaction + OTP pending (chưa có token); hoặc login bị từ chối. |
 
 ---
 
@@ -267,8 +267,9 @@ flowchart LR
 | Thuộc tính | Nội dung |
 |---|---|
 | **Actor chính** | Hệ thống (được gọi sau UC-AU-02 và UC-AU-03) |
-| **Luồng chính** | 1. Core App INSERT `outbox_events` (payload = login event). 2. Outbox poller đọc event `PENDING` → `POST /api/v1/internal/login-events` kèm `X-Internal-Secret`. 3. Detection Engine INSERT `login_attempts` (idempotent theo `event_id`). 4. Ghi `detection_logs` cho 4 stage (`rule_evaluation`, `ml_call`, `scoring`, `action_sent`). 5. Nếu có alert → ghi record `alerts`. |
+| **Luồng chính** | 1. Core App INSERT `login_attempts` (nhãn `status='pending'`). 2. Core App POST `POST /api/v1/internal/login-events` kèm `X-Internal-Secret`. 3. Detection Engine INSERT `login_attempts` (idempotent theo `event_id`). 4. Ghi `detection_logs` cho 4 stage (`rule_evaluation`, `ml_call`, `scoring`, `action_sent`). 5. Nếu có alert → ghi record `alerts`. 6. Detection gọi ngược `POST /api/v1/internal/actions` nếu `risk_level ∈ {high, critical}`. |
 | **Hậu điều kiện** | Login attempt có trong database phục vụ detection và audit. |
+| **Ghi chú vận hành** | `app/auth.py` hiện ghi thẳng `LoginAttempt`; **chưa** tạo dòng `outbox_events` và **chưa** có poller. Nếu Detection Engine không nhận được sự kiện thì sự kiện đó không được chấm — xem `DECISIONS-DETECTION-v3.3.md` mục 12. |
 
 ---
 
@@ -278,9 +279,10 @@ flowchart LR
 |---|---|
 | **Actor chính** | Hệ thống (gọi sau UC-DE-01 khi decision = challenge/block) |
 | **Tiền điều kiện** | Action nằm trong danh sách cho phép. |
-| **Luồng chính** | 1. Parse action: `REQUIRE_MFA` / `REVOKE_SESSIONS` / `LOCK_USER`. 2. Validate action + payload. 3. Áp dụng: `REQUIRE_MFA` → đặt `detection_mfa_once=true`; `REVOKE_SESSIONS` → revoke mọi session; `LOCK_USER` → đặt `status=LOCKED`. 4. Ghi Audit Log với actor `system:detection-engine`. |
+| **Luồng chính** | 1. Parse action: `REQUIRE_MFA` / `REVOKE_SESSIONS` / `LOCK_USER` / `FORCE_LOGOUT`. 2. Validate action + payload. 3. Áp dụng: `REQUIRE_MFA` → đặt `detection_mfa_once=true` **và thu hồi mọi session đang hoạt động**; `REVOKE_SESSIONS` / `FORCE_LOGOUT` → thu hồi mọi session; `LOCK_USER` → đặt `status=LOCKED` và thu hồi session. 4. Trả `details.sessions_revoked` = số session bị thu hồi. 5. Ghi Audit Log với actor `system:detection-engine`. |
 | **Internal Endpoint** | `POST /api/v1/internal/actions` (X-Internal-Secret required) |
-| **Request** | `POST /api/v1/internal/actions` → `{"action": "REQUIRE_MFA"|"REVOKE_SESSIONS"|"LOCK_USER", "target_user_id": "uuid", "reason": "string", "alert_id": "uuid?", "severity": "high"|"critical"?}` |
-| **Response** | `{"status": "applied", "action": "string", "target_user_id": "uuid"}` |
+| **Request** | `POST /api/v1/internal/actions` → `{"action": "REQUIRE_MFA"|"REVOKE_SESSIONS"|"LOCK_USER"|"FORCE_LOGOUT", "target_user_id": "uuid", "reason": "string", "alert_id": "uuid?", "severity": "high"|"critical"?, "idempotency_key": "string?"}` |
+| **Response** | `{"status": "applied"\|"already_applied", "action": "string", "target_user_id": "uuid", "details": {"sessions_revoked": int, "reason": "string"}}` |
 | **Ngoại lệ** | Action không hỗ trợ → `400`; user không tồn tại → `404`; sai secret → `401` |
 | **Hậu điều kiện** | Biện pháp bảo vệ được áp dụng ngay trong process. |
+| **Idempotency** | Gọi lại cùng `idempotency_key` hoặc khi hành động đã có hiệu lực → trả `status = "already_applied"` chứ không lỗi. |

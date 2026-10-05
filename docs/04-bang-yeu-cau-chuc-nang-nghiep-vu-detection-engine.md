@@ -594,22 +594,40 @@ Nếu `thresholds` vi phạm (ví dụ `low = 0.8`, `medium = 0.3`):
 
 **Action types:**
 
-| Action | Trigger | Target | Tác dụng |
-|--------|---------|--------|----------|
-| `REQUIRE_MFA` | `high` | `user_id` | Bắt xác thực 2 lớp ở lần đăng nhập kế tiếp |
-| `REVOKE_SESSIONS` | `critical` | `user_id` | Thu hồi toàn bộ phiên đang hoạt động |
-| `LOCK_USER` | `critical` | `user_id` | Khoá tài khoản + thu hồi phiên |
-| `FORCE_LOGOUT` | do SOC yêu cầu | `user_id` | Đăng xuất cưỡng bức |
+| Action | Trigger | Target | Tác dụng | Gửi tự động? |
+|--------|---------|--------|----------|---------------|
+| `REQUIRE_MFA` | `high` | `user_id` | Bắt xác thực 2 lớp ở lần đăng nhập kế tiếp **+ thu hồi mọi phiên đang hoạt động** | ✅ |
+| `REVOKE_SESSIONS` | `critical` | `user_id` | Thu hồi toàn bộ phiên đang hoạt động | ✅ |
+| `LOCK_USER` | do SOC yêu cầu | `user_id` | Khoá tài khoản + thu hồi phiên | ❌ thủ công |
+| `FORCE_LOGOUT` | do SOC yêu cầu | `user_id` | Đăng xuất cưỡng bức | ❌ thủ công |
+
+> **`critical` KHÔNG gửi `LOCK_USER`** (cập nhật 2026-10-05). `false positive` của ML là
+> tình huống thường gặp; khoá tài khoản khiến người dùng hợp lệ bị chặn oan tới khi admin
+> mở khoá. `REVOKE_SESSIONS` cắt quyền kẻ tấn công nhưng đảo ngược được. Xem
+> `DECISIONS-DETECTION-v3.3.md` mục 11.2.
+>
+> `REQUIRE_MFA` thu hồi phiên vì cờ one-time chỉ áp cho lần đăng nhập **kế tiếp**; token
+> đã cấp trước đó vẫn hợp lệ tới hết 1 giờ. Mục 11.3.
 
 **Request:**
 ```json
 {
-  "action": "LOCK_USER",
+  "action": "REVOKE_SESSIONS",
   "target_user_id": "UUID",
   "reason": "COMBINE: 0.7812 - rule 0.7583 + high_deviation",
   "alert_id": "UUID",
   "severity": "critical",
   "idempotency_key": "string (optional)"
+}
+```
+
+**Response:**
+```json
+{
+  "status": "applied | already_applied",
+  "action": "REVOKE_SESSIONS",
+  "target_user_id": "UUID",
+  "details": { "sessions_revoked": 3, "reason": "..." }
 }
 ```
 
@@ -673,8 +691,12 @@ Nếu `thresholds` vi phạm (ví dụ `low = 0.8`, `medium = 0.3`):
     │◄───────┘ Alert ID
     │
     └─► [Action to Core]
-             REQUIRE_MFA / LOCK_USER / etc.
+            REQUIRE_MFA (high) / REVOKE_SESSIONS (critical)
 ```
+
+> Cập nhật 2026-10-05: Detection gọi `POST /api/v1/internal/actions` **sau khi** commit
+> verdict + alert, timeout 3s, nuốt lỗi (Core App chết không được làm mất alert đã ghi).
+> Ngoài ra Core App hỏi ngược `pre-token-check` **trước khi cấp token**.
 
 ---
 

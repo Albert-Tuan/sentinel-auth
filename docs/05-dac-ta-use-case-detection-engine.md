@@ -57,12 +57,19 @@ Tài liệu này mô tả chi tiết các Use Case của **Detection Engine** tr
 4. Validate payload → 422 nếu sai định dạng
 5. Lưu LoginAttempt (status = 'pending')
 6. Chạy scoring pipeline (UC-DE-02 → 04 → 03 → 05 → 06)
-7. Trả về HTTP 202 Accepted
+7. Commit risk_assessments + alerts
+8. Nếu risk_level ∈ {high, critical} → gọi POST /api/v1/internal/actions về Core App
+9. Trả về HTTP 202 Accepted
 ```
 
-> **Vì sao 202 chứ không phải 200?** Detection chạy **bất đồng bộ** để không làm
-> chậm đăng nhập. Core App không cần chờ kết quả — nó có thể poll
-> `GET /api/v1/internal/login-attempts/{id}` khi cần.
+> **Lưu ý 2026-10-05 — hiện trạng thực tế.** Mã trả `202 Accepted` vì đây là ngữ nghĩa
+> REST đúng, **không** phải vì xử lý chạy nền. `process_attempt()` được `await` **ngay
+> trong request handler** (`app/detection.py`), và `enforce_action_in_core()` cũng chạy
+> trong cùng request đó. Core App vẫn **không cần** chờ kết quả để trả token cho user vì
+> đã có cổng `pre-token-check` chặn trước (xem `DECISIONS-DETECTION-v3.3.md` mục 10).
+>
+> Nếu sau này tách scoring ra worker nền thì câu chữ "bất đồng bộ" mới đúng. Hiện tại
+> ghi vậy để không ai hiểu nhầm là có hàng đợi xử lý.
 
 #### Request Schema
 ```json
@@ -385,7 +392,7 @@ Nếu ML không thành công:
 ```
 1. Dựa trên risk_level từ UC-DE-05:
    - high     → REQUIRE_MFA
-   - critical → REVOKE_SESSIONS + LOCK_USER
+   - critical → REVOKE_SESSIONS
 2. Build action payload
 3. POST /api/v1/internal/actions to Core App
    (Header: X-Internal-Secret)
@@ -394,6 +401,11 @@ Nếu ML không thành công:
 
 > Detection Engine **không** tự khoá tài khoản — nó **yêu cầu** Core App thực hiện.
 > Core App mới là nơi duy trì `users`, `sessions` nên mới có quyền thay đổi.
+
+> **`critical` KHÔNG gửi `LOCK_USER`** (cập nhật 2026-10-05). Vì `false positive` của ML
+> là tình huống thường gặp, khoá tài khoản sẽ chặn oan người dùng hợp lệ tới khi admin
+> mở khoá. `REVOKE_SESSIONS` cắt quyền kẻ tấn công nhưng đảo ngược được. Xem
+> `DECISIONS-DETECTION-v3.3.md` mục 11.2.
 
 #### Action Payload
 ```json
@@ -667,13 +679,18 @@ Nếu ML không thành công:
 ```
 
 #### Available Actions
-| Action | Target | Mô tả |
-|--------|--------|--------|
-| `LOCK_USER` | user_id | Khóa tài khoản |
-| `UNLOCK_USER` | user_id | Mở khóa tài khoản |
-| `REVOKE_SESSIONS` | user_id | Thu hồi tất cả sessions |
-| `RESET_MFA` | user_id | Reset MFA setup |
-| `BLOCK_IP` | ip_address | Thêm vào block list |
+| Action | Target | Mô tả | Tự động? |
+|--------|--------|--------|----------|
+| `REQUIRE_MFA` | user_id | Đặt cờ one-time **+ thu hồi mọi phiên đang hoạt động** | ✅ (`high`) |
+| `REVOKE_SESSIONS` | user_id | Thu hồi tất cả sessions | ✅ (`critical`) |
+| `LOCK_USER` | user_id | Khoá tài khoản + thu hồi phiên | ❌ SOC thủ công |
+| `FORCE_LOGOUT` | user_id | Đăng xuất cưỡng bức (giống `REVOKE_SESSIONS`) | ❌ SOC thủ công |
+
+> Đây là **4 action duy nhất** mà `SecurityAction` enum định nghĩa trong code. Các action
+> như `UNLOCK_USER`, `RESET_MFA`, `BLOCK_IP` **không tồn tại** — mọi hành động ngoài danh
+> sách bị từ chối ở tầng Pydantic (422) trước khi tới handler.
+>
+> Cả 4 action đều trả `details.sessions_revoked` = số phiên đã thu hồi.
 
 ---
 

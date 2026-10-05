@@ -130,6 +130,22 @@
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
 
+> **Cập nhật 2026-10-05:** sơ đồ trên chưa hiển thị **cổng kiểm duyệt trước khi cấp token**
+> (`pre-token-check`) và vòng gọi ngược `actions`. Sơ đồ đầy đủ:
+>
+> ```
+> Client → [Core App] ──pre-token-check──→ [Detection Engine] ──→ [ML Service]
+>            │                                  │
+>            │<────────verdict (risk_level)─────┘
+>            │  high/critical → giữ token, bắt MFA (fail open nếu lỗi)
+>            │  low/medium    → cấp token
+>            │
+>            │<──────actions (revoke / require MFA)──── [Detection Engine]
+>            │  (sau khi commit verdict; timeout 3s, nuốt lỗi)
+>            ▼
+>         [Core DB]
+> ```
+
 ### 2.3 Service Responsibilities
 
 | Service | Trách nhiệm |
@@ -767,12 +783,19 @@ Header: `X-Internal-Secret: <shared_secret>`
 
 #### Action Types
 
-| Action | Mô tả | Trigger |
-|--------|--------|---------|
-| `REQUIRE_MFA` | Yêu cầu user thực hiện MFA | `high` |
-| `REVOKE_SESSIONS` | Thu hồi tất cả sessions của user | `critical` |
-| `LOCK_USER` | Khóa tài khoản + thu hồi phiên | `critical` |
-| `FORCE_LOGOUT` | Đăng xuất cưỡng bức | do SOC yêu cầu |
+| Action | Mô tả | Trigger | Gửi tự động? |
+|--------|--------|---------|--------------|
+| `REQUIRE_MFA` | Đặt cờ one-time **và thu hồi mọi phiên đang hoạt động** | `high` | ✅ Tự động |
+| `REVOKE_SESSIONS` | Thu hồi tất cả sessions của user | `critical` | ✅ Tự động |
+| `LOCK_USER` | Khóa tài khoản + thu hồi phiên | do SOC yêu cầu | ❌ Thủ công |
+| `FORCE_LOGOUT` | Đăng xuất cưỡng bức (giống `REVOKE_SESSIONS`) | do SOC yêu cầu | ❌ Thủ công |
+
+> **`critical` cố ý KHÔNG dùng `LOCK_USER`.** Nếu ML báo nhầm, khoá tài khoản khiến
+> người dùng hợp lệ bị khoá oan và không tự thoát ra được. `REVOKE_SESSIONS` cắt quyền
+> truy cập của kẻ tấn công nhưng đảo ngược được (đăng nhập lại + MFA). Xem
+> `DECISIONS-DETECTION-v3.3.md` mục 11.2.
+>
+> **`LOCK_USER` vẫn dùng được** cho SOC sau khi điều tra có bằng chứng rõ ràng.
 
 > Rate limiting **không** thuộc Detection Engine v3.3 — Core App tự xử lý và ghi
 > `login_attempts.outcome = 'rate_limited'`.
@@ -833,6 +856,14 @@ Header: `X-Internal-Secret: <shared_secret>` — timeout 5 giây.
 - Atomicity: Event được tạo cùng với business transaction
 - Durability: Event được persist trong DB
 
+> **Trạng thái 2026-10-05: CHƯA HIỆN THỰC.** Bảng `outbox_events` có trong schema và
+> ERD, nhưng `app/auth.py` ghi thẳng `LoginAttempt` và **không** tạo dòng outbox;
+> **không có** poller. Sự kiện đã ghi mà Detection không nhận được thì mất vĩnh viễn.
+>
+> ADR này giữ nguyên vì vẫn là câu trả lời đúng cho bài toán đó. Trong lúc chờ poller,
+> cổng `pre-token-check` (ADR-005) giảm thiểu rủi ro vì `high`/`critical` bị chặn
+> **trước khi** có token. Xem `DECISIONS-DETECTION-v3.3.md` mục 12.
+
 ### ADR-003: 3NF Database Normalization
 
 **Quyết định:** Database được normalize ở mức 3NF.
@@ -869,6 +900,43 @@ Header: `X-Internal-Secret: <shared_secret>` — timeout 5 giây.
 - Technology flexibility (Python for ML, Go/Rust for Core)
 - Clear boundaries
 - Fault isolation
+
+### ADR-007: Risk-Gated Token Issuance (2026-10-05)
+
+**Quyết định:** Core App hỏi Detection **đồng bộ** trước khi cấp token, nhưng chỉ chặn khi
+`risk_level ∈ {high, critical}`. Cổng **fail open** khi lỗi.
+
+**Lý do:**
+- Cửa sổ tấn công giảm từ 1 giờ (hạn token) xuống vài giây ở trường hợp nghi ngờ
+- Không thêm độ trễ cho đăng nhập bình thường (`low`/`medium` cấp token ngay)
+- Fail open vì khoá cả hệ thống khi Detection sập tệ hơn lọt một lần đăng nhập
+- Thu hồi hậu kỳ (ADR-004) vẫn bảo đảm nên fail open không đánh đổi an toàn
+
+Chi tiết: `DECISIONS-DETECTION-v3.3.md` mục 10.
+
+### ADR-008: Revoke, Don't Lock, on Critical Risk (2026-10-05)
+
+**Quyết định:** `risk_level = critical` gửi `REVOKE_SESSIONS`, **không** gửi `LOCK_USER`.
+
+**Lý do:**
+- `LOCK_USER` chặn vĩnh viễn tới khi admin mở khoá → ML báo nhầm thì khoá oan người dùng hợp lệ
+- `REVOKE_SESSIONS` cắt quyền kẻ tấn công nhưng đảo ngược được
+- `false positive` của ML là tình huống thường gặp, hậu quả khoá oan thì nghiêm trọng
+- `LOCK_USER` vẫn giữ cho SOC dùng thủ công sau khi điều tra
+
+Chi tiết: `DECISIONS-DETECTION-v3.3.md` mục 11.2.
+
+### ADR-009: REQUIRE_MFA Revokes Live Sessions (2026-10-05)
+
+**Quyết định:** `REQUIRE_MFA` luôn thu hồi mọi phiên đang hoạt động của user, không chỉ
+đặt cờ one-time.
+
+**Lý do:**
+- Cờ `detection_mfa_once` chỉ áp cho lần đăng nhập **kế tiếp**
+- Token đã cấp trước khi Detection chạy vẫn hợp lệ tới hết 1 giờ
+- Không thu hồi thì yêu cầu MFA vô nghĩa: người đã có token không cần MFA để dùng hệ thống
+
+Chi tiết: `DECISIONS-DETECTION-v3.3.md` mục 11.3.
 
 ---
 

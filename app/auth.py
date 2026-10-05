@@ -3,12 +3,14 @@ Authentication endpoints - login, MFA, session management.
 Mirrors infra/postgres/schema-core-v3.3.sql.
 """
 import logging
+import os
 from datetime import datetime, timedelta
 from typing import Optional
 from uuid import uuid4
 import hashlib
 import secrets
 
+import httpx
 from fastapi import APIRouter, HTTPException, status, Depends, Request, Header
 from pydantic import BaseModel
 from argon2 import PasswordHasher
@@ -35,6 +37,9 @@ from app.schemas import (
 )
 
 logger = logging.getLogger(__name__)
+
+#: Shared secret with the Detection Engine.
+INTERNAL_SECRET = os.getenv("INTERNAL_SECRET", "changeme-in-production")
 
 router = APIRouter(prefix="/api/v1/auth", tags=["auth"])
 ph = PasswordHasher()
@@ -190,6 +195,73 @@ async def register(request: UserRegisterRequest, db=Depends(get_db)) -> UserRegi
     )
 
 
+#: Detection Engine is consulted synchronously before a token is issued.
+#: Set to "" to disable the gate (e.g. local development, or when the
+#: Detection Engine is not deployed).
+DETECTION_URL = os.getenv("DETECTION_URL", "http://localhost:8001").rstrip("/")
+#: Set to "0" to bypass the gate entirely (local dev, or Detection not deployed).
+RUN_PRE_TOKEN_CHECK = os.getenv("RUN_PRE_TOKEN_CHECK", "1")
+PRE_TOKEN_CHECK_TIMEOUT = 3.0
+#: Only these risk levels hold the token back. Everything below the
+#: threshold is served immediately so normal logins keep their latency.
+GATED_RISK_LEVELS = {"high", "critical"}
+
+
+async def _pre_token_risk(user, client_ip: str, user_agent: Optional[str]) -> Optional[str]:
+    """Ask the Detection Engine to score this login before we issue a token.
+
+    Returns the risk level (``high``/``critical``) when the login should be
+    held back for MFA, or ``None`` to proceed.
+
+    Fails **open**: any error, timeout or missing configuration returns
+    ``None`` so a Detection outage cannot lock every user out of the system.
+    That trade-off is deliberate - availability of the login path wins over
+    a stricter gate, and the asynchronous callback still revokes the session
+    afterwards if the verdict turns out to be risky.
+    """
+    if not DETECTION_URL or RUN_PRE_TOKEN_CHECK != "1":
+        return None
+
+    try:
+        async with httpx.AsyncClient(timeout=PRE_TOKEN_CHECK_TIMEOUT) as client:
+            response = await client.post(
+                f"{DETECTION_URL}/api/v1/internal/pre-token-check",
+                json={
+                    "username": user.username,
+                    "user_id": str(user.id),
+                    "ip_address": client_ip,
+                    "user_agent": user_agent,
+                },
+                headers={"X-Internal-Secret": INTERNAL_SECRET},
+            )
+    except Exception as exc:  # noqa: BLE001 - fail open by design
+        logger.warning(
+            "pre-token-check unavailable, proceeding unscored: %s",
+            exc.__class__.__name__,
+        )
+        return None
+
+    if response.status_code >= 400:
+        logger.warning("pre-token-check returned HTTP %s, proceeding", response.status_code)
+        return None
+
+    try:
+        body = response.json()
+    except ValueError:
+        logger.warning("pre-token-check returned a non-JSON body, proceeding")
+        return None
+
+    if body.get("degraded"):
+        logger.info("pre-token-check degraded (%s), proceeding", body.get("reason"))
+        return None
+
+    level = body.get("risk_level")
+    if body.get("require_mfa") and level in GATED_RISK_LEVELS:
+        logger.info("holding token for %s: risk_level=%s", user.username, level)
+        return level
+    return None
+
+
 @router.post("/login", response_model=LoginResponse)
 async def login(
     request: LoginRequest,
@@ -202,9 +274,9 @@ async def login(
     1. Rate limit check (5 requests/minute/IP)
     2. Verify credentials
     3. Check account status
-    4. Record login event (detection is async: outbox -> Detection Engine)
+    4. Risk gate: ask the Detection Engine whether to hold the token
     5. MFA check (persistent or one-time)
-    6. Create session + JWT tokens
+    6. Create session + tokens
     """
     client_ip = get_client_ip(req)
     request_id = uuid4()
@@ -302,7 +374,19 @@ async def login(
     # Reset failed login count on successful credential verification
     user.failed_login_count = 0
 
-    # 4. MFA check
+    # 4. Risk gate (phương án C). Credentials are valid, but the Detection
+    # Engine may still consider this login risky. In that case we demand a
+    # fresh MFA before any token exists, which closes the window where a
+    # stolen credential would otherwise be usable immediately. The async
+    # callback also revokes the session later, so this is defence in depth.
+    user_agent = req.headers.get("User-Agent")
+    gated_level = await _pre_token_risk(user, client_ip, user_agent)
+    if gated_level is not None:
+        # Reuse the one-time MFA machinery: the challenge is issued, but
+        # no session and therefore no token exists yet.
+        user.detection_mfa_once = True
+
+    # 5. MFA check
     mfa_required = user.admin_mfa_required or user.detection_mfa_once
 
     if mfa_required:

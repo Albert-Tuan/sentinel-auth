@@ -5,11 +5,14 @@
 > và code, **tài liệu này thắng**.
 >
 > **Ngày chốt:** 2026-10-04
+> **Cập nhật:** 2026-10-05 — bổ sung quyết định 8-11 về luồng cấp token có kiểm duyệt
+> (risk gate), hành động bảo vệ tự động và khôi phục sau sự cố.
+>
 > **Trạng thái:** Đã chốt, áp dụng cho toàn bộ tài liệu và code
 
 ---
 
-## 0. Tóm tắt 7 quyết định
+## 0. Tóm tắt 11 quyết định
 
 | # | Vấn đề | Quyết định chuẩn | Lý do |
 |---|--------|-------------------|-------|
@@ -20,6 +23,10 @@
 | 5 | Tên bảng chính sách | `policies` (đã đúng), nhưng `rules` + `config` gộp trong JSONB | Đã đúng ở v3.3 — giữ nguyên |
 | 6 | Đường dẫn API nội bộ | `/api/v1/internal/*` | Đúng như `docs/diagrams/README.md` |
 | 7 | Phạm vi code | Sửa `app/*.py` cho khớp v3.3 | Tránh 2 nguồn sự thật |
+| **8** | **Thời điểm kiểm duyệt trước khi cấp token** | **Risk gate đồng bộ, chỉ gate `high`/`critical`** | **Mục 10** |
+| **9** | **`critical` gửi hành động nào** | **`REVOKE_SESSIONS` (không `LOCK_USER`)** | **Mục 11** |
+| **10** | **Cổng kiểm duyệt lỗi thì làm gì** | **Fail open — vẫn cho đăng nhập** | **Mục 10.4** |
+| **11** | **`REQUIRE_MFA` có thu hồi phiên sống không** | **Có, thu hồi luôn** | **Mục 11.3** |
 
 ---
 
@@ -270,10 +277,14 @@ Cùng đặc trưng trên, nhưng ML Service timeout.
 
 combined_score = rule_score = 0.758
 
-0.75 ≤ 0.758  →  mức NGHIÊM TRỌNG  →  BLOCK_ALERT + LOCK_USER
+0.75 ≤ 0.758  →  mức NGHIÊM TRỌNG  →  BLOCK_ALERT + REVOKE_SESSIONS
 
 Ghi chú: chính sách nghiêm ngặt hơn khi không có tín hiệu ML —
 đây là hành vi CÓ CHỦ ĐÍCH, không phải bug.
+
+Lưu ý: `BLOCK_ALERT` **không** khoá tài khoản. Hành động gửi đi là
+`REVOKE_SESSIONS` (mục 11) — người dùng phải đăng nhập lại và qua MFA.
+Xem mục 11.2 để hiểu vì sao không dùng `LOCK_USER`.
 ```
 
 ---
@@ -380,6 +391,7 @@ Mọi endpoint dành cho giao tiếp **service-to-service** đều:
 
 | Method | Đường dẫn | Bên gọi → Bên nhận | Mô tả |
 |--------|-----------|---------------------|--------|
+| `POST` | `/api/v1/internal/pre-token-check` | Core App → Detection | Chấm điểm **trước khi cấp token** (mục 10) |
 | `POST` | `/api/v1/internal/login-events` | Core App → Detection | Nhận sự kiện đăng nhập (UC-DE-01) |
 | `GET`  | `/api/v1/internal/login-attempts/{id}` | Core App → Detection | Theo dõi trạng thái xử lý |
 | `POST` | `/api/v1/internal/ml/score` | Detection → ML Service | Yêu cầu chấm điểm (UC-DE-03) |
@@ -387,6 +399,11 @@ Mọi endpoint dành cho giao tiếp **service-to-service** đều:
 | `GET`  | `/api/v1/internal/ml/features` | Detection → ML Service | Hợp đồng 6 đặc trưng |
 | `POST` | `/api/v1/internal/actions` | Detection → Core App | Yêu cầu hành động bảo vệ (UC-DE-07) |
 | `GET`  | `/api/v1/internal/users/{id}` | Detection → Core App | Kiểm tra vai trò người dùng (WF-3) |
+
+> **Hai chiều Core App ↔ Detection:** `/pre-token-check` đi **Core → Detection**
+> (cổng kiểm duyệt, đồng bộ), còn `/actions` đi **Detection → Core** (thu hồi
+> hậu kỳ, bất đồng bộ về mặt điện toán nhưng chạy trong cùng request chấm điểm).
+> Xem mục 10 và mục 11.
 
 > **Lưu ý về `/health`:** mỗi service có **endpoint health riêng** để tránh xung đột
 > khi nhiều service cùng mount vào một ứng dụng:
@@ -416,6 +433,10 @@ Mọi endpoint dành cho giao tiếp **service-to-service** đều:
 | `GET`  | `/api/v1/policies` | Danh sách chính sách (UC-DE-15) |
 | `POST` | `/api/v1/policies` | Tạo chính sách (UC-DE-15) |
 | `POST` | `/api/v1/policies/{id}/activate` | Kích hoạt chính sách (UC-DE-15) |
+
+> **Bốn hành động bảo vệ** dùng chung cho cả hai endpoint `/actions`:
+> `REQUIRE_MFA`, `REVOKE_SESSIONS`, `LOCK_USER`, `FORCE_LOGOUT`.
+> Xem mục 11 về hành vi của từng hành động.
 
 ### 5.4. Mã lỗi chuẩn
 
@@ -486,7 +507,208 @@ CREATE TABLE IF NOT EXISTS policies (
 
 ---
 
-## 8. Quy trình đảm bảo không phát sinh mâu thuẫn mới
+## 10. Cổng kiểm duyệt trước khi cấp token (risk gate) — CHUẨN
+
+> Bổ sung 2026-10-05. Xem `app/auth.py::_pre_token_risk` và
+> `app/detection.py::pre_token_check`.
+
+### 10.1. Vấn đề
+
+Mô hình bất đồng bộ thuần: Core App cấp token **ngay** sau khi xác thực mật khẩu,
+Detection chấm điểm sau. Với token thời hạn 1 giờ, kẻ đánh cắp được mật khẩu có
+**tối đa 1 giờ** dùng hệ thống trước khi bị thu hồi.
+
+### 10.2. Quyết định: gate có điều kiện theo rủi ro
+
+Không gate mọi đăng nhập (sẽ thêm 2-5 giây độ trễ cho **mọi** người dùng, kể cả
+đăng nhập bình thường). Chỉ gate khi mức rủi ro đã vượt ngưỡng:
+
+| `risk_level` | Hành động của Core App | Có tạo session/token? |
+|--------------|------------------------|----------------------|
+| `low` | Cấp token ngay | ✅ Có |
+| `medium` | Cấp token ngay | ✅ Có |
+| `high` | **Giữ token, bắt MFA** | ❌ Không |
+| `critical` | **Giữ token, bắt MFA** | ❌ Không |
+
+Hằng số: `GATED_RISK_LEVELS = {"high", "critical"}`.
+
+### 10.3. Luồng xử lý
+
+```
+Client → POST /api/v1/auth/login
+Core App: rate limit → xác thực mật khẩu → kiểm tra status
+         │
+         ├─→ POST {DETECTION_URL}/api/v1/internal/pre-token-check   (timeout 3s)
+         │        ├─ risk_level ∈ {high, critical} → đặt detection_mfa_once = true
+         │        │                                    → phát MFA challenge, KHÔNG cấp token
+         │        └─ risk_level ∈ {low, medium}      → tiếp tục, cấp token bình thường
+         │
+         ├─ admin_mfa_required? → MFA challenge (không cấp token)
+         └─ không → _create_session() → trả token
+```
+
+**Điểm quan trọng:** cổng nằm **sau** bước xác thực mật khẩu và **trước** khi tạo
+session. Người dùng đúng định danh nhưng bị nghi ngờ vẫn phải qua MFA; người dùng sai
+mật khẩu không tốn một lượt gọi Detection.
+
+### 10.4. Quyết định: FAIL OPEN
+
+**Nếu cổng không hoạt động → vẫn cho đăng nhập.** Cụ thể, trả về "cho qua" khi:
+
+| Tình huống | Xử lý |
+|-----------|--------|
+| Timeout quá 3 giây | Cho qua, ghi log cảnh báo |
+| Không kết nối được (`ConnectError`) | Cho qua, ghi log cảnh báo |
+| HTTP ≥ 400 | Cho qua |
+| Body không phải JSON | Cho qua |
+| Response có `degraded: true` | Cho qua |
+| `RUN_PRE_TOKEN_CHECK=0` | Không gọi, cho qua |
+
+**Lý do:** Detection Engine sập mà khoá cả hệ thống là kết quả tệ hơn nhiều so với
+lọt **một** lần đăng nhập không được chấm điểm. Còn khi hạ tầng ổn định, cổng có tác
+dụng. Việc thu hồi vẫn được bảo đảm bởi đường hậu kỳ ở mục 11 — tức là lựa chọn
+"fail open" **không** đánh đổi bằng mất an toàn, chỉ đổi **thời điểm** phát hiện.
+
+### 10.5. Hợp đồng `POST /api/v1/internal/pre-token-check`
+
+Request:
+```json
+{
+  "username": "alice",
+  "user_id": "b1f2...",           // null nếu chưa xác định được user
+  "ip_address": "203.0.113.5",
+  "user_agent": "Mozilla/5.0 ...",
+  "timestamp": "2026-10-05T04:10:00Z",
+  "features": { "hour_of_day": 4 }  // optional, core-app gửi sẵn nếu có
+}
+```
+
+Response:
+```json
+{
+  "risk_level": "high",
+  "decision": "challenge",
+  "require_mfa": true,
+  "degraded": false,
+  "reason": "challenge"
+}
+```
+
+> `degraded: true` chỉ xuất hiện khi chính Detection **có** lỗi chấm điểm. Core App
+> **phải** fail open theo `degraded`, tuyệt đối không coi đây là rủi ro cao.
+
+### 10.6. Biến môi trường
+
+| Biến | Mặc định | Ý nghĩa |
+|------|----------|---------|
+| `DETECTION_URL` | `http://localhost:8001` | Địa chỉ Detection Engine |
+| `RUN_PRE_TOKEN_CHECK` | `1` | Đặt `0` để tắt cổng (dev, hoặc khi chưa deploy Detection) |
+| `PRE_TOKEN_CHECK_TIMEOUT` | hằng số `3.0` | Timeout cố định trong code |
+
+---
+
+## 11. Hành động bảo vệ tự động (UC-DE-07) — CHUẨN
+
+> Bổ sung 2026-10-05. Xem `app/detection.py::enforce_action_in_core`.
+
+### 11.1. Detection gọi ngược Core App
+
+Sau khi **đã commit** verdict và alert, Detection gọi
+`POST {CORE_APP_URL}/api/v1/internal/actions`. Cố ý gọi **sau commit** để Core App
+chậm hoặc chết không thể rollback `risk_assessments` / `alerts` đã ghi.
+
+```python
+RISK_ACTION_MAP = {
+    "high":     "REQUIRE_MFA",
+    "critical": "REVOKE_SESSIONS",
+}
+```
+
+| `risk_level` | Hành động gửi đi | `severity` |
+|--------------|------------------|------------|
+| `low`, `medium` | *(không gọi)* | — |
+| `high` | `REQUIRE_MFA` | `high` |
+| `critical` | `REVOKE_SESSIONS` | `critical` |
+
+### 11.2. Vì sao `critical` KHÔNG dùng `LOCK_USER`
+
+`LOCK_USER` sẽ chặn tài khoản vĩnh viễn cho tới khi admin mở khoá. Nếu mô hình ML
+báo nhầm, người dùng hợp lệ bị khoá oan và không tự thoát ra được.
+
+`REVOKE_SESSIONS` **rẻ và đảo ngược được**: phiên hiện tại bị cắt, người dùng đăng nhập
+lại và qua MFA. Kẻ tấn công mất quyền truy cập, người dùng hợp lệ chỉ tốn thêm một bước
+xác thực. Đánh đổi này được chấp nhận vì `false positive` của ML là tình huống thường
+gặp, còn hậu quả khoá oan thì nghiêm trọng.
+
+> `LOCK_USER` vẫn tồn tại như hành động **thủ công** cho SOC dùng khi đã điều tra và
+> có bằng chứng rõ ràng.
+
+### 11.3. `REQUIRE_MFA` phải thu hồi phiên sống
+
+**Quyết định:** `REQUIRE_MFA` **luôn** thu hồi mọi phiên đang hoạt động của user, không
+chỉ đặt cờ one-time.
+
+**Lý do:** cờ `detection_mfa_once` chỉ có tác dụng cho **lần đăng nhập kế tiếp**. Token đã
+cấp trước khi Detection chạy vẫn hợp lệ tới hết 1 giờ. Nếu không thu hồi, yêu cầu MFA
+trở nên vô nghĩa — người đã có token không cần MFA để tiếp tục dùng hệ thống.
+
+Phạm vi: áp dụng cho **cả hai** đường gọi, để hành vi nhất quán:
+- `POST /api/v1/internal/actions` (Detection tự động gọi)
+- `POST /api/v1/alerts/{id}/actions` (SOC yêu cầu thủ công)
+
+Response `details` trả về `sessions_revoked` cho cả `REQUIRE_MFA`, `REVOKE_SESSIONS`,
+`LOCK_USER` và `FORCE_LOGOUT`.
+
+### 11.4. Đặc tính vận hành
+
+| Đặc tính | Giá trị | Vì sao |
+|----------|---------|--------|
+| Timeout | 3 giây | Không giữ request chấm điểm mở chờ auth service |
+| Lỗi | Nuốt, ghi log, trả `False` | Detection không được chết vì Core App |
+| `idempotency_key` | `detection:{attempt_id}:{action}` | Giao lại sau timeout là no-op |
+| `alert_id` | Gửi kèm | SOC đối chiếu được giữa 2 DB |
+
+### 11.5. Khôi phục sau sự cố
+
+Khi `process_attempt` ném exception, `LoginAttempt` bị để ở `status = "failed"` mà không
+có đánh giá, không có cảnh báo, không có hành động nào được gửi. Hàm
+`rescore_failed_attempts()` quét lại các dòng này và chấm lại.
+
+> **Trạng thái:** hàm đã hiện thực và có test, **nhưng chưa được nối vào bộ lập lịch nào.**
+> Cần một cron/worker chạy định kỳ — xem mục 12.
+
+### 11.6. Hành vi của `status` trên `LoginAttempt`
+
+| `status` | Ý nghĩa | Ai chuyển sang |
+|----------|---------|---------------|
+| `pending` | Đã nhận, chưa chấm | `receive_login_event` |
+| `processed` | Đã chấm xong, có đánh giá | `process_attempt` |
+| `failed` | Chấm lỗi, cần chấm lại | handler khi bắt exception |
+
+`rescore_failed_attempts()` chỉ quét `failed`, và `process_attempt` luôn đặt lại
+`processed` khi thành công — nên quét lại nhiều lần **không** gây lặp vô hạn.
+
+---
+
+## 12. Việc chưa làm (nợ kỹ thuật)
+
+Ghi lại rõ để không ai hiểu nhầm là đã xong:
+
+| Việc | Trạng thái | Rủi ro nếu bỏ |
+|------|-----------|---------------|
+| Worker gọi `rescore_failed_attempts()` định kỳ | **Chưa có** | Attempt `failed` không bao giờ được chấm lại |
+| Poller `outbox_events` | **Chưa có** | Ghi `LoginAttempt` xong mà Detection chết → mất sự kiện |
+| Tái sử dụng token rotation cho refresh | Đã có `refresh_token_family` nhưng chưa dùng để phát hiện replay | Refresh token bị đánh cắp tái sử dụng không bị phát hiện |
+| Đối chiếu `risk_assessments` ↔ `sessions` định kỳ | **Chưa có** | Lệch trạng thái giữa 2 DB không được phát hiện |
+
+> **Về poller outbox:** hiện `app/auth.py` ghi thẳng `LoginAttempt` và **không** tạo dòng
+> `outbox_events`. Cổng ở mục 10 đã giảm thiểu đáng kể rủi ro trong lúc chờ poller, vì
+> `high`/`critical` bị chặn **trước khi** có token. Poller vẫn là câu trả lời đúng cho bài
+> toán "sự kiện đã ghi nhưng Detection chết", nên không nên coi là đã giải quyết.
+
+---
+
+## 13. Quy trình đảm bảo không phát sinh mâu thuẫn mới
 
 Mỗi khi thêm/sửa tài liệu hoặc code liên quan tới Detection Engine, chạy checklist sau:
 
@@ -498,11 +720,14 @@ Mỗi khi thêm/sửa tài liệu hoặc code liên quan tới Detection Engine,
 □ Ví dụ JSON trong tài liệu parse được bằng json.loads()
 □ Nếu đổi schema → cập nhật cả ERD_v3.3.md
 □ Nếu đổi API → cập nhật cả wf2_detection.uml, wf3_soc.uml, wf6_ml_inference.uml
+□ Nếu đổi hành vi hành động bảo vệ → cập nhật mục 11
+□ Nếu đổi cổng kiểm duyệt → cập nhật mục 10 và WF-1_Login.uml
+□ Việc chưa làm phải ghi ở mục 12, không được im lặng coi là đã xong
 ```
 
 ---
 
-## 9. Danh sách tài liệu phải cập nhật khi có thay đổi
+## 14. Danh sách tài liệu phải cập nhật khi có thay đổi
 
 | Tài liệu | Nội dung liên quan |
 |----------|-------------------|
@@ -521,12 +746,15 @@ Mỗi khi thêm/sửa tài liệu hoặc code liên quan tới Detection Engine,
 | `TASK_ASSIGNMENT.md` | Công thức, ngưỡng |
 | `app/models.py` | Model ORM |
 | `app/schemas.py` | Pydantic schema |
-| `app/detection.py` | Logic chấm điểm |
+| `app/detection.py` | Logic chấm điểm, cổng pre-token, callback hành động |
+| `app/auth.py` | Risk gate trước khi cấp token |
+| `app/internal_actions.py` | Thực thi hành động bảo vệ |
 | `app/alerts.py` | Endpoint SOC |
 
 ---
 
-**Phiên bản:** 1.0
+**Phiên bản:** 1.1
 **Ngày chốt:** 2026-10-04
+**Cập nhật:** 2026-10-05 (mục 10-13: risk gate, hành động tự động, khôi phục sự cố)
 **Người chốt:** Nhóm Detection Engine
 **Áp dụng cho:** Sentinel Auth v3.3

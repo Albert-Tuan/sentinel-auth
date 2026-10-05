@@ -108,9 +108,11 @@ def main() -> int:
         print(f"\n== {subdir}: {len(srcs)} source(s) -> {', '.join(formats)} ==")
         for uml in srcs:
             for fmt in formats:
-                # sources() may read from docs/ (WF-*.uml) but output always
-                # belongs next to the diagrams tree it was rendered for.
-                out = ROOT / "docs" / "diagrams" / subdir / (uml.stem + f".{fmt}")
+                # sources() mixes docs/diagrams/*.uml with docs/WF-*.uml, so
+                # the output always belongs NEXT TO ITS SOURCE - deriving it
+                # from the subdir would drop the WF-* files into a nested
+                # docs/diagrams/diagrams/ directory.
+                out = uml.with_suffix(f".{fmt}")
                 if (
                     out.exists()
                     and out.stat().st_mtime >= uml.stat().st_mtime

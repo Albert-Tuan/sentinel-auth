@@ -55,6 +55,10 @@ DEFAULT_THRESHOLDS = {"low": 0.25, "medium": 0.50, "high": 0.75}
 #: ML Service is called over HTTP; this is the hard timeout (DECISIONS 2.2)
 ML_TIMEOUT_SECONDS = 5.0
 
+#: Callback into Core App to enforce a protective action. Kept short: the
+#: scoring endpoint must not be held open waiting on an auth service.
+ACTION_ENFORCE_TIMEOUT_SECONDS = 3.0
+
 #: Risk level -> (decision, action label, create_alert)
 DECISION_MATRIX = {
     "low": ("allow", "ALLOW", False),
@@ -72,6 +76,28 @@ def internal_secret() -> str:
 def ml_service_url() -> str:
     """Base URL of the ML Service, without trailing slash."""
     return os.getenv("ML_SERVICE_URL", "http://localhost:8002").rstrip("/")
+
+
+def core_app_url() -> str:
+    """Base URL of the Core App, without trailing slash.
+
+    The Detection Engine calls back into Core App to enforce protective
+    actions; the address is not hardcoded so tests and deployments can
+    point it elsewhere.
+    """
+    return os.getenv("CORE_APP_URL", "http://localhost:8000").rstrip("/")
+
+
+#: Risk level -> protective action to enforce in Core App.
+#:
+#: ``critical`` revokes sessions and demands a fresh MFA rather than locking
+#: the account outright: a false positive from the ML model would otherwise
+#: lock out a legitimate user, whereas revocation is cheap and reversible -
+#: they simply sign in again and pass MFA.
+RISK_ACTION_MAP = {
+    "high": "REQUIRE_MFA",
+    "critical": "REVOKE_SESSIONS",
+}
 
 
 def verify_internal_secret(x_internal_secret: Optional[str]) -> None:
@@ -632,6 +658,104 @@ async def process_attempt(db, attempt: LoginAttempt, request_id: UUID) -> Detect
     )
 
 
+async def enforce_action_in_core(
+    attempt: LoginAttempt,
+    risk_level: str,
+    alert_id: Optional[UUID] = None,
+) -> bool:
+    """Ask Core App to enforce a protective action for a risky login (UC-DE-07).
+
+    Returns ``True`` when Core App accepted the action, ``False`` when there
+    was nothing to do or the call failed.
+
+    This is deliberately best-effort: a detection verdict must never fail
+    the scoring endpoint, and a Core App outage must not lose the alert
+    that was already persisted. The failure is logged for the reconciliation
+    job to pick up.
+    """
+    action = RISK_ACTION_MAP.get(risk_level)
+    if action is None or attempt.user_id is None:
+        return False
+
+    payload: dict = {
+        "action": action,
+        "target_user_id": str(attempt.user_id),
+        "reason": (
+            f"detection risk_level={risk_level} "
+            f"decision={attempt.detection_decision} attempt={attempt.id}"
+        ),
+        # Idempotency key ties the action to this exact login attempt, so a
+        # redelivery after a timeout is a no-op rather than a second revoke.
+        "idempotency_key": f"detection:{attempt.id}:{action}",
+    }
+    if alert_id is not None:
+        payload["alert_id"] = str(alert_id)
+    if risk_level in ("high", "critical"):
+        payload["severity"] = risk_level
+
+    try:
+        async with httpx.AsyncClient(timeout=ACTION_ENFORCE_TIMEOUT_SECONDS) as client:
+            response = await client.post(
+                f"{core_app_url()}/api/v1/internal/actions",
+                json=payload,
+                headers={"X-Internal-Secret": internal_secret()},
+            )
+    except httpx.HTTPError as exc:
+        logger.warning(
+            "core-app unreachable, action %s not enforced for attempt %s: %s",
+            action, attempt.id, exc.__class__.__name__,
+        )
+        return False
+
+    if response.status_code >= 400:
+        logger.warning(
+            "core-app rejected action %s for attempt %s: HTTP %s",
+            action, attempt.id, response.status_code,
+        )
+        return False
+
+    logger.info("enforced %s in core-app for attempt %s", action, attempt.id)
+    return True
+
+
+async def rescore_failed_attempts(db, limit: int = 50) -> int:
+    """Re-score attempts left in ``failed`` by an earlier crash.
+
+    When ``process_attempt`` throws, the attempt is parked on ``status =
+    "failed"`` with no assessment and no alert. Nothing else ever revisits
+    it, so that login silently escapes detection forever. This is the
+    reconciliation pass that closes the gap; it is safe to run repeatedly
+    because each attempt is re-fetched and only genuinely failed rows are
+    touched.
+
+    Returns the number of attempts recovered.
+    """
+    failed = (
+        db.query(LoginAttempt)
+        .filter(LoginAttempt.status == "failed")
+        .order_by(LoginAttempt.timestamp)
+        .limit(limit)
+        .all()
+    )
+    if not failed:
+        return 0
+
+    recovered = 0
+    for attempt in failed:
+        request_id = attempt.request_id or uuid4()
+        try:
+            result = await process_attempt(db, attempt, request_id)
+        except Exception:  # noqa: BLE001 - one bad row must not stop the sweep
+            logger.exception("rescore still failing for attempt %s", attempt.id)
+            db.rollback()
+            continue
+        await enforce_action_in_core(attempt, result.risk_level, result.alert_id)
+        recovered += 1
+
+    logger.info("rescored %s/%s failed login attempts", recovered, len(failed))
+    return recovered
+
+
 def _matched_value(features: Dict[str, Any], rule_name: str, rules: Any) -> Any:
     """Helper for logging which feature value caused a rule to trigger."""
     if not isinstance(rules, list):
@@ -717,7 +841,7 @@ async def receive_login_event(
                 )
 
     try:
-        await process_attempt(db, attempt, request_id)
+        result = await process_attempt(db, attempt, request_id)
     except Exception:  # noqa: BLE001 - never let scoring kill the endpoint
         logger.exception("detection failed for event %s", payload.event_id)
         db.rollback()
@@ -734,6 +858,11 @@ async def receive_login_event(
                 )
             )
             db.commit()
+    else:
+        # The verdict is committed; now let Core App enforce it. Runs after
+        # the commit so a slow or dead Core App cannot roll back the
+        # assessment or the alert we just wrote.
+        await enforce_action_in_core(attempt, result.risk_level, result.alert_id)
 
     return LoginEventResponse(
         status="accepted",
@@ -760,6 +889,77 @@ async def get_login_attempt_status(
         risk_level=attempt.risk_level,
         decision=attempt.detection_decision,
         alert_id=attempt.primary_alert_id,
+    )
+
+
+class PreTokenCheckRequest(BaseModel):
+    """Body of POST /api/v1/internal/pre-token-check (risk-gated login)."""
+    username: str
+    user_id: Optional[UUID] = None
+    ip_address: Optional[str] = None
+    user_agent: Optional[str] = None
+    timestamp: Optional[datetime] = None
+    features: Optional[Dict[str, Any]] = None
+
+
+class PreTokenCheckResponse(BaseModel):
+    """Verdict used by Core App to decide whether to hand out a token yet."""
+    risk_level: str
+    decision: str
+    #: True when Core App should hold the token and demand MFA.
+    require_mfa: bool
+    #: True when the check itself could not run; Core App must fail open.
+    degraded: bool = False
+    reason: Optional[str] = None
+
+
+@router.post("/pre-token-check", response_model=PreTokenCheckResponse)
+async def pre_token_check(
+    payload: PreTokenCheckRequest,
+    x_internal_secret: Optional[str] = Header(None),
+    db=Depends(get_db),
+) -> PreTokenCheckResponse:
+    """Score a login *before* Core App issues a token (phương án C).
+
+    Core App calls this only when it needs a verdict to gate on. The verdict
+    is advisory: Core App fails open if this endpoint is unavailable, because
+    locking every user out when the Detection Engine is down is a worse
+    outcome than letting one login through unscored.
+    """
+    verify_internal_secret(x_internal_secret)
+
+    attempt = LoginAttempt(
+        event_id=uuid4(),
+        user_id=payload.user_id,
+        username_attempted=payload.username,
+        outcome="success",
+        ip_address=payload.ip_address,
+        user_agent=payload.user_agent,
+        timestamp=payload.timestamp or datetime.now(timezone.utc),
+        status="pending",
+    )
+    db.add(attempt)
+    db.commit()
+    db.refresh(attempt)
+
+    try:
+        result = await process_attempt(db, attempt, attempt.request_id or uuid4())
+    except Exception:  # noqa: BLE001 - fail open, never block the login
+        logger.exception("pre-token-check failed for user %s", payload.user_id)
+        db.rollback()
+        return PreTokenCheckResponse(
+            risk_level="unknown",
+            decision="allow",
+            require_mfa=False,
+            degraded=True,
+            reason="scoring_error",
+        )
+
+    return PreTokenCheckResponse(
+        risk_level=result.risk_level,
+        decision=result.decision,
+        require_mfa=result.risk_level in RISK_ACTION_MAP,
+        reason=result.decision,
     )
 
 

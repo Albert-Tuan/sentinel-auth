@@ -7,6 +7,7 @@ title WF-1: Login Flow (v3.3)
 
 participant "User\n(Browser)" as U #D5E8D4
 participant "Core App\n(port 8000)" as CA #DAE8FC
+participant "Detection Engine\n(port 8001)" as DE #FFE6CC
 database "core-db\n(PostgreSQL)" as CDB #F5F5F5
 
 == Login Request ==
@@ -31,19 +32,34 @@ else account LOCKED/SUSPENDED
     CA --> U : **403 Account unavailable**
     deactivate CA
 
-else credentials VALID + MFA DISABLED
-    CA -> CDB : INSERT login_attempt\n(outcome=success)
-    CA -> CDB : INSERT session\n(token_jti, access_hash,\nrefresh_hash, expires_at)
-    note right: core-db.sessions
-    CA --> U : **200 OK**\n{access_token, refresh_token}
-    deactivate CA
+else credentials VALID
+    == Risk gate (đồng bộ, 2026-10-05) ==
+    CA -> DE : **POST /internal/pre-token-check**\n(username, user_id, ip, ua)\n(timeout 3s)
+    activate DE
+    DE --> CA : {risk_level, require_mfa, degraded}
+    deactivate DE
 
-else credentials VALID + MFA REQUIRED
-    CA -> CDB : INSERT login_attempt\n(outcome=mfa_required)
-    CA -> CDB : INSERT mfa_transaction\n(status=pending)
-    note right: core-db.mfa_transactions
-    CA --> U : **200 MFA_REQUIRED**\n{mfa_required: true,\nmfa_type: email_otp|sms_otp|totp}
-    deactivate CA
+    note right
+      FAIL OPEN: lỗi / timeout / degraded
+      → vẫn cấp token, chỉ ghi log.
+      Không bao giờ khoá cả hệ thống
+      vì Detection sập.
+    end note
+
+    alt risk HIGH or CRITICAL
+        CA -> CA : detection_mfa_once = true
+        CA -> CDB : INSERT login_attempt\n(outcome=mfa_required)
+        CA -> CDB : INSERT mfa_transaction\n(status=pending)
+        note right: **Chưa tạo session,\nchưa có token**
+        CA --> U : **200 MFA_REQUIRED**\n{mfa_required: true}
+        deactivate CA
+    else risk LOW or MEDIUM
+        CA -> CDB : INSERT login_attempt\n(outcome=success)
+        CA -> CDB : INSERT session\n(token_jti, access_hash,\nrefresh_hash, expires_at)
+        note right: core-db.sessions
+        CA --> U : **200 OK**\n{access_token, refresh_token}
+        deactivate CA
+    end
 
     == MFA Verify (chi tiết tại WF-4) ==
 
@@ -71,11 +87,16 @@ else credentials VALID + MFA REQUIRED
 end
 
 legend bottom
-  **v3.3 Changes:**
-  - Core App giao tiếp Detection Engine qua HTTP
-  - Login Event KHÔNG gọi detection ngay
-  - Detection chạy async qua Outbox Pattern
-  - Xem WF-2 để biết chi tiết
+  **v3.3:**
+  - Core App giao tiếp Detection Engine qua HTTP (X-Internal-Secret)
+
+  **2026-10-05 (risk gate):**
+  - Core App hỏi /internal/pre-token-check **đồng bộ** trước khi cấp token
+  - chỉ HIGH/CRITICAL bị giữ token và bắt MFA; LOW/MEDIUM cấp token ngay
+  - FAIL OPEN: lỗi/timeout → vẫn cho đăng nhập
+  - Thay đổi này **phá vỡ** mô hình "không gọi detection ngay".
+    Outbox pattern vẫn là thiết kế đích nhưng chưa hiện thực.
+  - Xem WF-2 và DECISIONS-DETECTION-v3.3.md mục 10
 endlegend
 
 @enduml

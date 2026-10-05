@@ -145,6 +145,17 @@ app/services/sony/
 - [ ] `tests/test_sony/conftest.py`
 - [ ] Outbox: publish `LoginEvent` event sau mỗi login attempt
 
+### Trạng thái thực tế (2026-10-05)
+| Deliverable | Trạng thái |
+|-------------|-----------|
+| Routers / models / services | Đã hiện thực dạng module phẳng `app/auth.py` + `app/models.py`, không theo cấu trúc thư mục `sony/` |
+| Outbox publish | **Chưa làm.** `app/auth.py` ghi thẳng `LoginAttempt`, không tạo dòng `outbox_events`, không có poller |
+| Risk gate trước khi cấp token | **Đã làm** (ngoài kế hoạch ban đầu): `POST /api/v1/internal/pre-token-check`, fail open. Xem `docs/DECISIONS-DETECTION-v3.3.md` mục 10 |
+
+> Vì chưa có outbox, sự kiện đã ghi mà Detection không nhận được sẽ mất. Cổng
+> `pre-token-check` giảm thiểu rủi ro ở trường hợp `high`/`critical` nhưng **không** thay
+> thế được outbox cho trường hợp Detection không nhận được sự kiện.
+
 ### Contract với services khác (KHÔNG tự ý sửa, dùng đúng spec)
 ```json
 // Publish to outbox
@@ -160,6 +171,29 @@ app/services/sony/
     "user_agent": "string",
     "timestamp": "ISO 8601"
   }
+}
+```
+
+#### Contract `pre-token-check` (bổ sung 2026-10-05)
+Core App gọi **đồng bộ** trước khi cấp token, timeout 3 giây, **fail open**.
+```json
+// POST {DETECTION_URL}/api/v1/internal/pre-token-check
+{
+  "username": "string",
+  "user_id": "uuid or null",
+  "ip_address": "string",
+  "user_agent": "string",
+  "timestamp": "ISO 8601",
+  "features": { }          // optional
+}
+
+// Response
+{
+  "risk_level": "low|medium|high|critical|unknown",
+  "decision": "allow|challenge|block",
+  "require_mfa": true,      // true khi high|critical
+  "degraded": false,        // true = Detection lỗi → Core App phải cho qua
+  "reason": "string"
 }
 ```
 

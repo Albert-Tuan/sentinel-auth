@@ -190,8 +190,12 @@ Security Manager là người quản lý đội ngũ SOC và chịu trách nhi�
 
 Core App là service chính xử lý authentication. Nó giao tiếp với Detection Engine qua:
 
-- **Gửi:** LoginEvent (sau mỗi login attempt)
-- **Nhận:** Action requests (REQUIRE_MFA, LOCK_USER, etc.)
+- **Gửi:** `pre-token-check` (đồng bộ, trước khi cấp token) và LoginEvent (sau mỗi login attempt)
+- **Nhận:** Action requests (`REQUIRE_MFA`, `REVOKE_SESSIONS`, `LOCK_USER`, `FORCE_LOGOUT`)
+
+> **Cập nhật 2026-10-05:** thêm `pre-token-check` — Core App hỏi verdict **đồng bộ**
+> (timeout 3s, fail open) trước khi quyết định cấp token. Chỉ `high`/`critical` mới bị
+> giữ token và bắt MFA. Xem `DECISIONS-DETECTION-v3.3.md` mục 10.
 
 #### 3.3.3 Giao tiếp
 
@@ -343,9 +347,11 @@ So that I can protect the organization
 ```
 
 **Acceptance Criteria:**
-- Có thể chọn: LOCK_USER, REVOKE_SESSIONS, BLOCK_IP
+- Có thể chọn: `REQUIRE_MFA`, `REVOKE_SESSIONS`, `LOCK_USER`, `FORCE_LOGOUT`
 - Phải nhập reason
 - Action được logged và auditable
+- Mọi action đều trả về `details.sessions_revoked` = số phiên đã thu hồi
+- Gọi lại action đã có hiệu lực trả `already_applied` chứ không lỗi
 
 ---
 

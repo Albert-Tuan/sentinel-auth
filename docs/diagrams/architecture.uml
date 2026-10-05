@@ -13,7 +13,8 @@ package "Core App (port 8000)" <<wf>> {
     rectangle "POST /auth/login" as LOGIN #FFF2CC
     rectangle "POST /auth/mfa/verify" as MFA #FFE6CC
     rectangle "Auth API\n(FastAPI)" as AUTH #DAE8FC
-    rectangle "Outbox Poller" as OP #FFE6CC
+    rectangle "Risk Gate\n(pre-token-check)" as GATE #FF6B6B
+    rectangle "Outbox Poller\n(NOT implemented)" as OP #F5F5F5
     database "core-db\n(13 tables)" as CDB #F5F5F5
 }
 
@@ -39,10 +40,17 @@ AUTH -[#333]-> CDB
 AUTH -[#82B366,bold]-> MFA : if MFA required
 MFA -[#82B366,bold]-> U : access_token
 
-' Outbox pattern
-AUTH -[#D6A656,bold]-> CDB : INSERT outbox_events
-CDB -[#D6A656,bold]-> OP : poll pending
-OP -[#D6A656,bold]-> LER : HTTP POST /login-events
+' Risk gate - SYNCHRONOUS, fail-open (2026-10-05)
+AUTH -[#FF6B6B,bold]-> GATE : if password valid
+GATE -[#FF6B6B,bold]-> LER : HTTP POST /internal/pre-token-check\n(timeout 3s, FAIL OPEN)
+LER -[#FF6B6B,bold]-> GATE : {risk_level, require_mfa}
+GATE -[#FF6B6B,bold]-> AUTH : high/critical → hold token, require MFA
+
+' Login event (direct, NOT via outbox - poller not implemented)
+AUTH -[#D6A656,bold]-> CDB : INSERT login_attempts
+AUTH -[#D6A656,bold]-> LER : HTTP POST /login-events
+OP -[#F5F5F5,dashed]-> CDB : (not implemented)
+OP -[#F5F5F5,dashed]-> LER : (not implemented)
 LER -[#333]-> DDB : INSERT login_attempts
 
 ' Detection pipeline
@@ -56,21 +64,22 @@ MRL -[#333]-> MODEL : load .joblib
 SOCAPI -[#333]-> DDB : alerts CRUD
 SOCAPI -[#9673A6,dashed]-> CDB : validate user via HTTP
 
-' Cross-service actions
-DW -[#D6A656,dashed,bold]-> AUTH : Action: LOCK_USER
+' Cross-service actions (2026-10-05)
+DW -[#D6A656,dashed,bold]-> AUTH : Action: REQUIRE_MFA (high)\nREVOKE_SESSIONS (critical)
 
 legend right
 ||= Color |= Meaning |
 || <back:#FFF2CC>    </back> | HTTP Endpoint |
 || <back:#DAE8FC>    </back> | API / Service |
 || <back:#E1D5E7>    </back> | ML Component |
-|| <back:#F5F5F5>    </back> | Database |
+|| <back:#F5F5F5>    </back> | Database / not implemented |
+|| <back:#FF6B6B>    </back> | Risk gate (synchronous) |
 || <back:#FFE6CC>    </back> | Decision / Async |
 || <back:#D5E8D4>    </back> | User / Success |
 
 |**v3.3 Workflows:**|
-| WF-1: Login (core-app) |
-| WF-2: Detection (async via outbox) |
+| WF-1: Login (core-app, có risk gate) |
+| WF-2: Detection (nhận trực tiếp qua HTTP) |
 | WF-3: SOC (via detection API) |
 | WF-4: MFA (chi tiết các loại) |
 | WF-5: Session (core-app) |
@@ -80,8 +89,12 @@ legend bottom
   - FastAPI + PostgreSQL (3 schemas)
   - 3 separate databases (core + detection + ml-service)
   - HTTP communication between services
-  - Outbox pattern for reliability
   - ML Service: stateless, model in memory
+
+  **2026-10-05 changes:**
+  - Risk gate SYNCHRONOUS trước khi cấp token (fail open)
+  - Detection gọi ngược /actions sau khi commit verdict
+  - Outbox pattern: THIẾT KẾ ĐÍCH, chưa hiện thực (màu xám)
 endlegend
 
 @enduml

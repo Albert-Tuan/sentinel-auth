@@ -9,26 +9,24 @@ skinparam rectangle {
 }
 skinparam ArrowColor black
 skinparam ArrowThickness 1.2
-title WF-2  Detection Engine Flow
+title WF-2  Detection Engine Flow (updated 2026-10-05)
 
 rectangle "Core App" as sys_1 {
-  rectangle "Record login event" as event
-  rectangle "Lock user" as lock
+  rectangle "Verify credentials" as event
+  rectangle "Risk gate\npre-token-check" as gate
+  rectangle "Revoke / require MFA" as lock
 }
 
 rectangle "core-db" as sys_2 {
-  rectangle "Pending outbox event" as outbox
-}
-
-rectangle "Outbox Poller" as sys_3 {
-  rectangle "Poll and publish" as poll
+  rectangle "login_attempts\n(no outbox rows yet)" as outbox
 }
 
 rectangle "Detection Engine" as sys_4 {
   rectangle "HTTP event endpoint" as receive
+  rectangle "pre-token-check handler" as ptc
   rectangle "Rule evaluation" as rules
   rectangle "Combine risk scores" as combine
-  rectangle "Optional LOCK_USER" as action
+  rectangle "Enforce action" as action
 }
 
 rectangle "detection-db" as sys_5 {
@@ -41,39 +39,49 @@ rectangle "ML Service" as sys_6 {
   rectangle "ML anomaly score" as ml
 }
 
-' Core App -> outbox
-event --> outbox : INSERT outbox_events\n<<flow>>
+' ---- Risk gate: synchronous, before any token exists (2026-10-05)
+event --> gate : password valid\n<<flow>>
+gate --> ptc : HTTP POST /internal/pre-token-check\n(timeout 3s)\n<<flow>>
+ptc --> gate : {risk_level, require_mfa, degraded}\n<<flow>>
+note bottom of gate
+  FAIL OPEN: error / timeout / degraded
+  -> allow login, log warning.
+  Only high/critical hold the token.
+end note
 
-' Outbox poller
-outbox --> poll : pending events\n<<flow>>
-poll --> receive : POST /api/v1/internal/login-events\n<<flow>>
+' ---- Login event: direct HTTP, not via outbox
+event --> outbox : INSERT login_attempts\n<<flow>>
+outbox --> receive : HTTP POST /internal/login-events\n<<flow>>
 
-' Detection Engine receives
+' ---- Detection Engine receives
 receive --> attempt : idempotent insert\n<<flow>>
 
-' Worker consumes attempts
-attempt --> rules : worker fetches attempts\n<<flow>>
+' ---- Scoring
+attempt --> rules : await process_attempt()\n<<flow>>
 rules --> dlog : INSERT detection_logs\n(stage=rule_evaluation)\n<<flow>>
 
-' ML call
+' ---- ML call
 rules --> ml : HTTP score request\n<<flow>>
 ml --> combine : anomaly score\n<<flow>>
 rules --> combine : rule score\n<<flow>>
 
-' Risk assessment + alert decision
-combine --> assess : INSERT risk_assessment\n<<flow>>
-combine --> dlog : INSERT detection_logs\n(stage=combine)\n<<flow>>
-assess --> dlog : INSERT detection_logs\n(stage=action_sent)\n<<flow>>
+' ---- Risk assessment + alert decision
+combine --> assess : INSERT risk_assessment\n+ alert\n<<flow>>
+combine --> dlog : INSERT detection_logs\n(stage=scoring)\n<<flow>>
 
-' Optional action back to Core App
+' ---- Action back to Core App, AFTER commit
 assess --> action : risk_level in (high, critical)\n<<flow>>
-action --> lock : critical action via HTTP\n<<flow>>
+action --> lock : POST /api/v1/internal/actions\nREQUIRE_MFA | REVOKE_SESSIONS\n<<flow>>
 
 legend bottom
-  The login response is independent of this background pipeline.
+  The login response IS now dependent on the risk gate (2026-10-05):
+  high/critical hold the token until MFA. low/medium issue it immediately.
+  Scoring still runs inside the login-events request handler (await),
+  so "background pipeline" no longer describes the current code.
   rule_score = min(1.0, SUM(score x weight) / SUM(weight of enabled rules))
   Risk formula: combined = 0.4 x rule_score + 0.6 x ml_score
   Fallback when ML is down or times out (>5s): combined = rule_score
-  Outbox pattern guarantees at-least-once delivery to Detection Engine.
+  Outbox pattern is STILL NOT IMPLEMENTED - login events are sent directly.
+  See DECISIONS-DETECTION-v3.3.md sections 10, 11, 12.
 endlegend
 @enduml

@@ -121,20 +121,29 @@ async def apply_action(
     action = payload.action.value
     already_applied = False
 
-    if action == "REQUIRE_MFA":
-        already_applied = bool(user.detection_mfa_once)
-        user.detection_mfa_once = True
-
-    elif action == "REVOKE_SESSIONS":
-        revoked = (
+    def _revoke_active_sessions() -> int:
+        """Revoke every live session of this user. Returns how many."""
+        return int(
             db.query(Session)
             .filter(
                 Session.user_id == user.id,
                 Session.revoked_at.is_(None),
             )
             .update({Session.revoked_at: _now_utc()}, synchronize_session=False)
+            or 0
         )
-        details["sessions_revoked"] = int(revoked or 0)
+
+    if action == "REQUIRE_MFA":
+        already_applied = bool(user.detection_mfa_once)
+        user.detection_mfa_once = True
+        # The one-time MFA flag only gates the *next* login. Without
+        # revoking the live sessions, a token handed out before detection
+        # ran would keep working until it expired, leaving the requirement
+        # toothless.
+        details["sessions_revoked"] = _revoke_active_sessions()
+
+    elif action == "REVOKE_SESSIONS":
+        details["sessions_revoked"] = _revoke_active_sessions()
         already_applied = details["sessions_revoked"] == 0
 
     elif action == "LOCK_USER":
@@ -142,19 +151,12 @@ async def apply_action(
         if not already_applied:
             user.status = "locked"
             user.locked_at = _now_utc()
+        details["sessions_revoked"] = _revoke_active_sessions()
 
     elif action == "FORCE_LOGOUT":
         # Same effect as REVOKE_SESSIONS; kept separate so the Detection
         # Engine can express intent without implying a lock.
-        revoked = (
-            db.query(Session)
-            .filter(
-                Session.user_id == user.id,
-                Session.revoked_at.is_(None),
-            )
-            .update({Session.revoked_at: _now_utc()}, synchronize_session=False)
-        )
-        details["sessions_revoked"] = int(revoked or 0)
+        details["sessions_revoked"] = _revoke_active_sessions()
         already_applied = details["sessions_revoked"] == 0
 
     db.commit()

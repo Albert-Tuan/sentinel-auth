@@ -4,19 +4,18 @@ SOC Alert Management - Alert CRUD, evidence and timeline.
 Schema v3.3. Canonical decisions: docs/DECISIONS-DETECTION-v3.3.md
 
 Implements the SOC side of Detection Engine:
-- UC-DE-09: Xem bằng chứng Rule/ML/Risk
-- UC-DE-10: Tiếp nhận và điều tra Alert
-- UC-DE-11: Phân loại kết quả điều tra
-- UC-DE-12: Yêu cầu hành động bảo vệ
-- UC-DE-13: Đóng hồ sơ Incident
-- DE-15: Dòng thời gian cảnh báo
+- UC-DE-11: Tạo Alert
+- UC-DE-12: Phân công Alert
+- UC-DE-13: Yêu cầu hành động bảo vệ
+- UC-DE-14: Dữ liệu bảng điều khiển
+- UC-DE-15: Dòng thời gian cảnh báo
 
 All endpoints live under /api/v1/alerts and are authenticated with a
 JWT issued by core-app (SOC_ANALYST / SECURITY_MANAGER roles).
 """
 from datetime import datetime
 from typing import Optional, List
-from uuid import uuid4
+from uuid import uuid4, UUID
 
 from fastapi import APIRouter, HTTPException, Header, Depends, Query
 from pydantic import BaseModel, Field
@@ -602,7 +601,7 @@ async def assign_alert(
 
 @router.post("/alerts/{alert_id}/actions")
 async def request_security_action(
-    alert_id: str,
+    alert_id: UUID,
     request: AlertActionRequest,
     x_internal_token: Optional[str] = Header(None),
     db=Depends(get_db),
@@ -611,7 +610,7 @@ async def request_security_action(
     Request security action for an alert (UC-11).
 
     Per S-QĐ-06: Hành động bảo vệ được audit.
-    Available actions: REQUIRE_MFA, REVOKE_SESSIONS, LOCK_USER
+    Available actions: REQUIRE_MFA, REVOKE_SESSIONS, LOCK_USER, FORCE_LOGOUT
     """
     alert = db.query(Alert).filter(Alert.id == alert_id).first()
     if not alert:
@@ -632,34 +631,62 @@ async def request_security_action(
     action = request.action
     details = {}
 
-    if action == SecurityAction.REQUIRE_MFA:
-        user.admin_mfa_required = True
-        user.detection_mfa_once = True
-        details = {"mfa_enabled": True, "reason": request.reason}
+    def _revoke_user_sessions() -> int:
+        """Revoke every active session of THIS user only.
 
-    elif action == SecurityAction.REVOKE_SESSIONS:
-        from app.models import Session
-        revoked = db.query(Session).filter(
-            Session.user_id == user.id,
-            Session.revoked_at.is_(None)
-        ).all()
-        count = len(revoked)
+        The ``user_id`` filter is load-bearing: without it a single SOC
+        action would revoke sessions for every account in core-db.
+        """
+        revoked = (
+            db.query(Session)
+            .filter(
+                Session.user_id == user.id,
+                Session.revoked_at.is_(None),
+            )
+            .all()
+        )
         for session in revoked:
             session.revoked_at = datetime.utcnow()
-        details = {"revoked_count": count, "reason": request.reason}
+        return len(revoked)
+
+    if action == SecurityAction.REQUIRE_MFA:
+        # Detection-triggered MFA is deliberately ONE-TIME: it must not
+        # touch admin_mfa_required, which is a persistent admin setting.
+        # Clearing it happens on the next successful MFA verification.
+        already_applied = bool(user.detection_mfa_once)
+        user.detection_mfa_once = True
+        # Also cut the live sessions: the flag only gates the next login,
+        # so an already-issued token would otherwise keep working.
+        details = {
+            "mfa_enabled": True,
+            "one_time": True,
+            "already_applied": already_applied,
+            "sessions_revoked": _revoke_user_sessions(),
+            "reason": request.reason,
+        }
+
+    elif action == SecurityAction.REVOKE_SESSIONS:
+        details = {
+            "revoked_count": _revoke_user_sessions(),
+            "reason": request.reason,
+        }
 
     elif action == SecurityAction.LOCK_USER:
         user.status = "locked"
         user.locked_at = datetime.utcnow()
-        # Also revoke sessions
-        from app.models import Session
-        revoked = db.query(Session).filter(
-            Session.user_id == user.id,
-            Session.revoked_at.is_(None)
-        ).all()
-        for session in revoked:
-            session.revoked_at = datetime.utcnow()
-        details = {"status": "locked", "sessions_revoked": len(revoked), "reason": request.reason}
+        details = {
+            "status": "locked",
+            "sessions_revoked": _revoke_user_sessions(),
+            "reason": request.reason,
+        }
+
+    elif action == SecurityAction.FORCE_LOGOUT:
+        # Same effect as REVOKE_SESSIONS; kept as a separate action so SOC
+        # can express intent (end sessions) without implying a lock.
+        details = {
+            "revoked_count": _revoke_user_sessions(),
+            "reason": request.reason,
+        }
 
     else:
         raise HTTPException(
