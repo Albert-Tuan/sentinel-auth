@@ -1,0 +1,78 @@
+@startuml
+skinparam backgroundColor #FFFFFF
+skinparam shadowing false
+skinparam defaultFontName Sans
+skinparam BoxPadding 8
+skinparam roundCorner 5
+skinparam maxMessageSize 200
+skinparam sequenceMessageAlign center
+
+title ST-01: Login thành công — LOW / MEDIUM risk (2026-10-05)
+
+box "User" #D5E8D4
+participant "User\nBrowser/App" as U
+end box
+
+box "Core App" #DAE8FC
+participant "Auth API" as CA
+database "core-db" as CDB
+end box
+
+box "Detection Engine" #FFF2CC
+participant "pre-token-check" as DE
+end box
+
+U -> CA : **POST /api/v1/auth/login**\n(username, password)
+activate CA
+
+CA -> CDB : SELECT users\nWHERE username=?
+activate CDB
+CDB --> CA : user record
+deactivate CDB
+
+CA -> CA : Argon2id.verify(password, hash)
+alt credentials INVALID
+    CA -> CDB : INSERT login_attempt\n(outcome=failure)
+    activate CDB
+    deactivate CDB
+    CA --> U : **401 Invalid credentials**
+    destroy CA
+else credentials VALID
+    CA -> CDB : INSERT login_attempt\n(outcome=success)
+    activate CDB
+    deactivate CDB
+
+    == Risk Gate (SYNCHRONOUS, timeout 3s) ==
+
+    CA -> DE : **POST /internal/pre-token-check**\n(user_id, ip, ua, event_id)
+    activate DE
+    DE -> DE : scoring pipeline\n(no full login context\n→ quick look-up)
+    note right of DE
+      combined < 0.50
+      → risk_level = LOW / MEDIUM
+      → require_mfa = false
+      → degraded = false
+    end note
+    DE --> CA : **200 {risk_level, require_mfa: false,\ndegraded: false}**
+    deactivate DE
+
+    alt require_mfa = false (LOW/MEDIUM)
+        CA -> CDB : INSERT sessions\n(token_jti, hashes, expires_at)
+        activate CDB
+        deactivate CDB
+        CA --> U : **200 OK**\n{access_token, refresh_token}
+        destroy CA
+        note right of U
+          Normal login — no extra delay.
+          Detection is consulted but does NOT block.
+        end note
+    end alt
+end alt
+
+legend bottom
+  **2026-10-05 key points:**
+  - Token issued IMMEDIATELY for LOW/MEDIUM
+  - FAIL OPEN: if /pre-token-check errors → allow login
+  - Response time ~same as before (async is NOT blocking here)
+endlegend
+@enduml

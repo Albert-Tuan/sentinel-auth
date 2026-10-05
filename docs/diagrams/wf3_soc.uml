@@ -127,15 +127,16 @@ DE -> DDB : SELECT COUNT(*) GROUP BY risk_level
 DE --> S : **200 OK**\n{stats: {total, open, by_risk_level}}
 deactivate DE
 
-legend right
-  **Alert State Machine (v3.3):**
-  **open** → acknowledged → **resolved**
-                 ↘ **false_positive**
-  
-  **v3.3 Cross-DB refs:**
-  - alerts.assigned_to_id → soc_analysts.id
-  - soc_analysts.user_id → users.id (core-db, app-level)
-  - alert_timeline.actor_id → users.id (core-db, app-level)
-endlegend
+note over S, DDB
+  **SOC Action Flow (v3.3):**
+  1. SOC → POST /alerts/{id}/actions
+  2. DE validates analyst, calls /internal/actions → Core App
+  3. Core App: REVOKE_SESSIONS → {sessions_revoked: N}
+  4. SOC nhận {status: applied, details.sessions_revoked}
+
+  **Alert State Machine:**
+  open → acknowledged → resolved
+                   ↘ false_positive
+end note
 
 @enduml

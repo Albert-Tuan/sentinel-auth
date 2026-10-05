@@ -1,0 +1,114 @@
+@startuml
+skinparam backgroundColor #FFFFFF
+skinparam shadowing false
+skinparam defaultFontName Sans
+skinparam BoxPadding 8
+skinparam roundCorner 5
+skinparam maxMessageSize 200
+skinparam sequenceMessageAlign center
+
+title ST-02: Login with MFA — Admin/Persistent MFA (no risk gate)
+
+box "User" #D5E8D4
+participant "User\nBrowser/App" as U
+end box
+
+box "Core App" #DAE8FC
+participant "Auth API" as CA
+participant "MFA Service" as MF
+database "core-db" as CDB
+end box
+
+U -> CA : **POST /api/v1/auth/login**\n(username, password)
+activate CA
+
+CA -> CDB : SELECT users WHERE username=?
+activate CDB
+CDB --> CA : user record
+deactivate CDB
+
+CA -> CA : Argon2id.verify(password, hash)
+alt credentials INVALID
+    CA -> CDB : INSERT login_attempt\n(outcome=failure)
+    CA --> U : **401 Invalid credentials**
+    destroy CA
+else credentials VALID
+    note over CA
+      **MFA Trigger Sources (3 paths):**
+      1. admin_mfa_required (persistent admin setting)
+      2. detection_mfa_once (one-time, from risk gate → see ST-03)
+      3. Periodic re-auth (>24h)
+      All three use the SAME machinery.
+    end note
+
+    alt user.mfa_enabled = true
+        CA -> CDB : INSERT login_attempt\n(outcome=mfa_required)
+        activate CDB
+        deactivate CDB
+
+        CA -> CDB : INSERT mfa_transactions\n(status=pending, expires_at+5min)
+        activate CDB
+        deactivate CDB
+
+        alt channel = EMAIL
+            CA -> MF : Send OTP via Email\n(code=123456)
+            activate MF
+            MF --> CA : notification_id
+            deactivate MF
+            CA -> CDB : INSERT mfa_notifications\n(channel=email, hash)
+            activate CDB
+            deactivate CDB
+        end alt
+
+        CA --> U : **200 {mfa_required: true,\nmfa_type: email_otp,\nexpires_in: 300}**
+        destroy CA
+
+        U -> CA : **POST /api/v1/auth/mfa/verify**\n(transaction_id, code)
+        activate CA
+
+        CA -> CDB : SELECT mfa_transactions\nWHERE id=transaction_id
+        activate CDB
+        CDB --> CA : transaction record
+        deactivate CDB
+
+        CA -> CA : Verify OTP:\n- hash compare\n- expiry check\n- IP match
+
+        alt code INVALID / EXPIRED / IP MISMATCH
+            CA -> CDB : UPDATE mfa_transactions\n(status=failed, fail_count+1)
+            activate CDB
+            deactivate CDB
+            alt fail_count >= 3
+                CA -> CDB : UPDATE users\n(status=locked, locked_at=NOW())
+                activate CDB
+                deactivate CDB
+                CA --> U : **423 ACCOUNT_LOCKED**
+            else fail_count < 3
+                CA --> U : **401 MFA_FAILED**\n{attempts_remaining}
+            end alt
+        else code VALID / APPROVED
+            CA -> CDB : UPDATE mfa_transactions\n(status=completed, verified_at=NOW())
+            activate CDB
+            deactivate CDB
+
+            opt trust device
+                U -> CA : **POST /mfa/trust-device**\n{device_fingerprint}
+                CA -> CDB : INSERT user_trusted_devices\n(expires_at=+30d)
+                activate CDB
+                deactivate CDB
+                CA --> U : **200 {trusted: true}**
+            end opt
+
+            CA -> CDB : INSERT sessions
+            activate CDB
+            deactivate CDB
+            CA --> U : **200 OK**\n{access_token, refresh_token}
+            destroy CA
+        end alt
+    end alt
+end alt
+
+legend bottom
+  This ST-02 covers admin/persistent MFA.
+  ST-03 covers risk-gate MFA (detection_mfa_once).
+endlegend
+@enduml

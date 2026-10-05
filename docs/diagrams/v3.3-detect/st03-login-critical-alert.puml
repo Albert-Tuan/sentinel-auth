@@ -1,0 +1,121 @@
+@startuml
+skinparam backgroundColor #FFFFFF
+skinparam shadowing false
+skinparam defaultFontName Sans
+skinparam BoxPadding 8
+skinparam roundCorner 5
+skinparam maxMessageSize 200
+skinparam sequenceMessageAlign center
+skinparam noteFontSize 9
+
+title ST-03: CRITICAL risk — Token HELD, no session created (2026-10-05)
+
+box "Attacker" #F8CECC
+participant "Attacker\n(Stolen credentials)" as A
+end box
+
+box "Core App" #DAE8FC
+participant "Auth API" as CA
+database "core-db" as CDB
+end box
+
+box "Detection Engine" #FFF2CC
+participant "pre-token-check" as DE
+participant "Detection\nPipeline" as DP
+database "detection-db" as DDB
+end box
+
+A -> CA : **POST /api/v1/auth/login**\n(stolen credentials)
+activate CA
+
+CA -> CDB : SELECT users WHERE username=?
+activate CDB
+CDB --> CA : user record
+deactivate CDB
+
+CA -> CA : Argon2id.verify(password, hash)
+alt credentials INVALID
+    CA -> CDB : INSERT login_attempt\n(outcome=failure)
+    CA --> A : **401 Invalid credentials**
+    destroy CA
+else credentials VALID
+    CA -> CDB : INSERT login_attempt\n(outcome=success)
+    activate CDB
+    deactivate CDB
+
+    == Risk Gate (SYNCHRONOUS, timeout 3s) ==
+
+    CA -> DE : **POST /internal/pre-token-check**\n(user_id, ip, ua, event_id)
+    activate DE
+
+    DE -> DE : scoring pipeline\n(hour + fail_count + ML)
+    note right of DE
+      **CRITICAL signal detected:**
+      combined >= 0.75
+      → risk_level = CRITICAL
+      → require_mfa = true
+      → CREATE ALERT (status=open)
+    end note
+
+    DE -> DDB : INSERT alerts\n(status=open, risk_level=critical)
+    activate DDB
+    deactivate DDB
+
+    DE --> CA : **200 {risk_level: critical,\nrequire_mfa: true}**
+    deactivate DE
+
+    alt require_mfa = true (HIGH / CRITICAL)
+
+        note over CA
+          **KEY CHANGE (2026-10-05):**
+          NO session is created.
+          NO token is issued.
+          User must pass MFA first.
+        end note
+
+        CA -> CDB : UPDATE login_attempt\n(outcome=mfa_required,\nrisk_level=critical)
+        activate CDB
+        deactivate CDB
+
+        CA -> CDB : UPDATE users\n(detection_mfa_once=true)
+        activate CDB
+        deactivate CDB
+
+        CA --> A : **200 {mfa_required: true}**
+        destroy CA
+
+        note over A
+          Attacker has NO token.
+          Cannot act on the system.
+          Must pass MFA (which is sent to victim email).
+        end note
+    end alt
+end alt
+
+== After scoring: Detection Engine sends action to Core ==
+
+DP -> CDB : **POST /api/v1/internal/actions**\n(action=REVOKE_SESSIONS,\nidempotency_key=detection:attempt_id:REVOKE_SESSIONS)
+activate CDB
+
+CDB -> CDB : UPDATE sessions\nSET revoked_at=NOW()\nWHERE user_id=?
+note right
+  **REVOKE_SESSIONS** (not LOCK_USER):
+  If ML was wrong (false positive),
+  user re-authenticates + passes MFA.
+  LOCK_USER would require admin unlock.
+end note
+
+CDB --> DP : **200 {status: applied,\ndetails: {sessions_revoked: 3}}**
+deactivate CDB
+
+legend bottom
+  **Before 2026-10-05:**
+  Token was created first → action came async → attacker had 1-hour window.
+
+  **After 2026-10-05:**
+  Token is HELD before it exists → attacker cannot act.
+
+  **CRITICAL intentionally uses REVOKE_SESSIONS, NOT LOCK_USER:**
+  false positives are common; LOCK_USER would block the real user.
+endlegend
+@enduml

@@ -10,7 +10,7 @@ skinparam ArrowColor #343A40
 skinparam ArrowThickness 1.2
 skinparam titleFontSize 18
 
-title Bốn loại hành động bảo vệ gửi về Core App
+title Bốn loại hành động bảo vệ gửi về Core App (cập nhật 2026-10-05)
 
 left to right direction
 
@@ -25,21 +25,19 @@ rectangle "CORE APP\nthực thi" as CORE #DAE8FC {
 }
 
 rectangle "HỆ QUẢ" as RES {
-  rectangle "Lần đăng nhập kế\ntiếp phải có MFA" as R1
+  rectangle "Lần đăng nhập kế\ntiếp phải có MFA\n+ mọi phiên cũ bị thu hồi" as R1 #FFF2CC
   rectangle "Mọi phiên cũ chết\nngay lập tức" as R2
   rectangle "Không đăng nhập\nđược nữa" as R3
   rectangle "Phiên hiện tại bị\nkết thúc, buộc\nđăng nhập lại" as R4
 }
 
-DEC --> A1 : mức CAO\nnghĩa là "challenge"
-DEC --> A2 : mức NGHIÊM TRỌNG\nnghĩa là "block"
-DEC --> A3 : mức NGHIÊM TRỌNG\nnghĩa là "block"
-DEC --> A4 : mức NGHIÊM TRỌNG\nkhi cần thu hồi mềm
+DEC --> A1 : mức CAO\n
+DEC --> A2 : mức NGHIÊM TRỌNG\n
+A3 --> R3 : (SOC thủ công)
+A4 --> R4 : (SOC thủ công)
 
 A1 --> R1
 A2 --> R2
-A3 --> R3
-A4 --> R4
 
 note bottom of DEC
   **Giao thức (contract):**
@@ -47,37 +45,40 @@ note bottom of DEC
   Header khoá nội bộ `X-Internal-Secret`.
 
   **Body (bắt buộc):**
-  `action` (một trong 4 giá trị ở trên)
-  `target_user_id` · `reason`
+    `action` (một trong 4 giá trị ở trên)
+    `target_user_id` · `reason`
 
   **Body (tuỳ chọn):**
-  `alert_id` · `severity` · `idempotency_key`
+    `alert_id` · `severity` · `idempotency_key`
 
   **Phản hồi:** `status` = `applied` hoặc `already_applied`
   → an toàn khi giao việc bị gửi lại nhiều lần.
 
-  **Vòng lặp này là "đóng băng" ngay cả khi quyết định
-  đã được đưa ra sau khi người dùng đã đăng nhập xong**
-  (vì detection chạy nền).
+  **Thay đổi 2026-10-05:**
+  `REQUIRE_MFA` bây giờ cũng THU HỒI MỌI PHIÊN
+  (`sessions_revoked` = số phiên đã thu hồi).
+  Trước đây chỉ đặt cờ one-time, token cũ vẫn dùng được.
 end note
 
 note bottom of CORE
   Mọi hành động đều được ghi vào `audit_logs` ở core-db
   và `detection_logs` (giai đoạn `action_sent`) ở detection-db.
+  Mọi action đều trả `details.sessions_revoked`.
 end note
 
 legend bottom
-**Phân biệt 2 cặp hành động trùng tác dụng:**
+  **Phân biệt 2 cặp hành động trùng tác dụng:**
 
 | Cặp       | Khác biệt                                     |
 |-----------|-----------------------------------------------|
 | `REVOKE_SESSIONS` vs `FORCE_LOGOUT` | Kết quả giống nhau: đặt `revoked_at` cho mọi phiên đang mở. Tách hai tên để Detection Engine nói rõ **ý định**: chặn hàng loạt, hay chỉ buộc phiên hiện tại rời đi. |
 | `LOCK_USER` vs `REVOKE_SESSIONS` | `LOCK_USER` ghi `status = 'locked'` + `locked_at` (chặn trọn vẹn). `REVOKE_SESSIONS` chỉ đóng phiên, tài khoản vẫn đăng nhập lại được. |
 
-**Lưu ý ở v3.3:** hành động **luôn nhắm vào người dùng**
-(`target_user_id` là trường bắt buộc).
-Chưa có hành động giới hạn theo địa chỉ IP
-dù bảng `rate_limits` ở core-db đã có sẵn.
-endlegend
+**CRITICAL cố ý KHÔNG dùng LOCK_USER** (2026-10-05):
+false positive của ML là tình huống thường gặp; khoá tài khoản
+sẽ chặn oan người dùng tới khi admin mở khoá.
+`REVOKE_SESSIONS` cắt quyền kẻ tấn công nhưng đảo ngược được.
 
+**Hành động chỉ dùng THỦ CÔNG (SOC):** `LOCK_USER`, `FORCE_LOGOUT`
+endlegend
 @enduml

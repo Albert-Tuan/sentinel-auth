@@ -1,0 +1,112 @@
+@startuml
+skinparam backgroundColor #FFFFFF
+skinparam shadowing false
+skinparam defaultFontName Sans
+skinparam BoxPadding 8
+skinparam roundCorner 5
+skinparam maxMessageSize 200
+skinparam sequenceMessageAlign center
+skinparam noteFontSize 9
+
+title ST-06: ML Service timeout — graceful degradation (2026-10-05)
+
+box "User" #D5E8D4
+participant "User" as U
+end box
+
+box "Core App" #DAE8FC
+participant "Auth API" as CA
+end box
+
+box "Detection Engine" #FFF2CC
+participant "pre-token-check" as PT
+participant "Detection\nPipeline" as DP
+database "detection-db" as DDB
+end box
+
+box "ML Service" #E1D5E7
+participant "ML Inference API" as ML
+end box
+
+U -> CA : **POST /auth/login**\n(username, password)
+CA -> CA : verify password\n+ INSERT login_attempt
+CA -> PT : **POST /internal/pre-token-check**
+activate PT
+PT --> CA : {risk_level, require_mfa: false}
+deactivate PT
+
+CA -> DDB : INSERT login_attempt (status=pending)
+CA -> DP : **POST /internal/login-events**
+activate DP
+
+DP -> DDB : INSERT login_attempts (status=pending)
+
+== Detection pipeline (runs in handler, no worker) ==
+
+DP -> DP : Calculate rule_score\n(no full context yet,\nquick look-up)
+note right
+  **Rule-based scoring only:**
+  hour_of_day, fail_count_24h,
+  ip_change_rate, new_device,
+  login_interval, deviation
+end note
+
+DP -> ML : **POST /api/v1/internal/ml/score**\n(features_vector)
+activate ML
+
+note over ML
+  **ML failure scenarios:**
+  1. OUTAGE: connection refused
+  2. TIMEOUT: >5 seconds
+  3. ERROR: HTTP 500
+end note
+ML -x ML : [ML unavailable]
+
+ML -->> DP : **ERROR / TIMEOUT**\n{ml_status: unavailable}
+deactivate ML
+
+DP -> DDB : INSERT risk_assessments\n(ml_status=unavailable,\nml_score=NULL)
+activate DDB
+deactivate DDB
+
+DP -> DP : Graceful degradation:\ncombined_score = rule_score
+note right of DP
+  NOT: combined = 0 (wrong)
+  NOT: combined = rule x 0.4 (wrong)
+  Just use rule_score as-is.
+end note
+
+DP -> DDB : rule_score >= 0.75 ?
+alt YES - HIGH rule signal
+    DP -> DDB : INSERT alerts\n(status=open, risk_level=critical)
+    activate DDB
+    deactivate DDB
+
+    DP -> CA : **POST /internal/actions**\n(action=REVOKE_SESSIONS)
+    activate CA
+    CA -> CA : UPDATE sessions\nSET revoked_at=NOW()\nWHERE user_id=?
+    CA --> DP : **200 {sessions_revoked: 3}**
+    deactivate CA
+else NO - no alert
+    note over DP
+      No alert. Login proceeds.
+      Detection Engine degraded gracefully.
+    end note
+end alt
+
+DP -> DDB : UPDATE login_attempts (status=processed)
+DP --> CA : **202 Accepted**
+deactivate DP
+
+CA --> U : **200 OK**\n(access_token)
+deactivate CA
+
+legend bottom
+  **Key insight:** ML is a signal, not the sole gatekeeper.
+  A strong rule hit alone (rule_score >= 0.75) can reach CRITICAL.
+
+  **Statistics:** ML failures are logged with ml_status = "unavailable".
+  Monitor: SELECT COUNT(*) FROM risk_assessments
+  WHERE ml_status != 'success'
+endlegend
+@enduml

@@ -9,7 +9,7 @@ skinparam rectangle {
 }
 skinparam ArrowColor black
 skinparam ArrowThickness 1.2
-title WF-1  Login Flow
+title WF-1  Login Flow (updated 2026-10-05)
 
 actor "User" as user
 
@@ -17,9 +17,14 @@ rectangle "Core App" as sys_1 {
   rectangle "Login request" as request
   rectangle "Password and account check" as check
   rectangle "Record login attempt" as attempt
+  rectangle "Risk Gate\n(pre-token-check)" as gate #FF6B6B
   rectangle "Create MFA challenge" as mfa
   rectangle "Verify MFA code" as verify
   rectangle "Create session and tokens" as session
+}
+
+rectangle "Detection Engine" as sys_3 {
+  rectangle "pre-token-check handler" as ptc
 }
 
 rectangle "core-db" as sys_2 {
@@ -32,12 +37,24 @@ rectangle "core-db" as sys_2 {
 user --> request : credentials\n<<flow>>
 request --> find : SELECT user\n<<flow>>
 find --> check : user record\n<<flow>>
-check --> attempt : eval outcome\n<<flow>>
-attempt --> stored_attempt : INSERT login_attempt\n<<flow>>
 check --> user : 401 / 403 if invalid\n<<flow>>
 
-' MFA branch: if MFA enabled
-check --> mfa : MFA required\n<<flow>>
+' If valid credentials
+check --> attempt : eval outcome\n<<flow>>
+attempt --> stored_attempt : INSERT login_attempt\n<<flow>>
+
+' Risk gate BEFORE token exists (2026-10-05)
+gate --> ptc : POST /internal/pre-token-check\ntimeout 3s\n<<flow>>
+ptc --> gate : {risk_level, require_mfa, degraded}\n<<flow>>
+
+' low / medium / degraded → allow, create session
+gate --> session : low / medium\n<<flow>>
+check --> gate : valid credentials\n<<flow>>
+
+' high / critical → require MFA, no session yet
+gate --> mfa : require_mfa = true\n<<flow>>
+
+' MFA branch
 mfa --> tx : INSERT pending\n<<flow>>
 mfa --> user : 200 MFA_REQUIRED\n<<flow>>
 
@@ -48,12 +65,18 @@ verify --> user : 401 if invalid\n<<flow>>
 
 ' On valid MFA, create session
 verify --> session : valid code\n<<flow>>
-check --> session : MFA disabled\n<<flow>>
+
+' Create session
 session --> stored : INSERT session\n<<flow>>
-session --> user : access + refresh tokens\n<<flow>>
+stored --> user : access + refresh tokens\n<<flow>>
 
 legend bottom
-  Login returns before asynchronous detection; WF-2 handles the outbox event.
-  Outcomes: success | failure | locked | mfa_required | mfa_success
+  **2026-10-05 changes:**
+  - Core App calls /internal/pre-token-check SYNCHRONOUSLY before creating a session
+  - HIGH/CRITICAL: token HELD, user must pass MFA first
+  - LOW/MEDIUM: token issued immediately
+  - FAIL OPEN: error/timeout → allow login, log warning
+  - Login response is no longer fully independent of detection
+  - Detection Engine calls back /internal/actions after scoring (see WF-2)
 endlegend
 @enduml

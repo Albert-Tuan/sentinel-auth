@@ -10,10 +10,11 @@ skinparam ArrowColor #343A40
 skinparam ArrowThickness 1.2
 skinparam titleFontSize 18
 
-title Mười tình huống xử lý sự cố (Dữ liệu bị từ chối)
+title Mười một tình huống xử lý sự cố (cập nhật 2026-10-05)
 
 left to right direction
 
+' Row 1: 1-4
 rectangle "1. Gửi trùng sự kiện" as S1
 rectangle "→ 202 Đã nhận, kèm id\nlần đăng nhập đã có\nKHÔNG tạo bản ghi mới" as R1
 S1 --> R1
@@ -30,34 +31,45 @@ rectangle "4. ML Service không phản hồi" as S4
 rectangle "→ ghi nhật ký ml_call\n→ chấm điểm CHỈ BẰNG QUY TẮC\n→ hệ thống KHÔNG sập" as R4 #FFF2CC
 S4 --> R4
 
-rectangle "5. Detection Engine sập giữa lúc xử lý" as S5
-rectangle "→ lần đăng nhập còn ở trạng thái\n'chờ xử lý' trong DB\n→ khi khởi động lại sẽ nhặt lại xử lý" as R5
+' Row 2: 5-8
+rectangle "5. Detection sập giữa xử lý" as S5
+rectangle "→ attempt ở status='failed'\n→ HÀM rescore_failed_attempts()\nquét lại (chưa có worker)" as R5 #FFF2CC
 S5 --> R5
 
-rectangle "6. Core App sập sau khi tạo phiên" as S6
-rectangle "→ sự kiện ĐÃ nằm trong outbox_events\n(cùng lần ghi với phiên)\n→ bộ gom sẽ gửi lại" as R6
+rectangle "6. Core không nhận được sự kiện login" as S6
+rectangle "→ ⚠ Sự kiện MẤT\n→ chưa có cơ chế gửi lại\n(outbox chưa hiện thực)" as R6 #F8CECC
 S6 --> R6
 
-rectangle "7. Core App không nhận được lệnh khoá" as S7
-rectangle "→ ghi nhật ký hành động\n→ thử lại\n→ cảnh báo vẫn còn để SOC xử lý" as R7
+rectangle "7. Detection không gửi được /actions về Core" as S7
+rectangle "→ nuốt lỗi, ghi log\n→ false, cảnh báo vẫn còn\ncho SOC xử lý" as R7 #FFF2CC
 S7 --> R7
 
-rectangle "8. Analyst tiếp nhận cảnh báo\nđã có người khác xử lý" as S8
-rectangle "→ 409 Xung đột\nHệ thống chặn tranh chấp" as R8
+rectangle "8. pre-token-check lỗi / timeout" as S8 #FF6B6B
+rectangle "→ FAIL OPEN: cho đăng nhập\n→ ghi log cảnh báo\n→ user không bị chặn" as R8 #FF6B6B
 S8 --> R8
 
-rectangle "9. Analyst cố kết luận\ncảnh báo đã báo nhầm" as S9
-rectangle "→ 400 Yêu cầu sai\nMáy trạng thái chặn" as R9
+' Row 3: 9-11
+rectangle "9. Analyst nhận cảnh báo\nđã có người xử lý" as S9
+rectangle "→ 409 Xung đột\nHệ thống chặn tranh chấp" as R9
 S9 --> R9
 
-rectangle "10. Tham chiếu tới người dùng\nở DB khác" as S10
-rectangle "→ KHÔNG có khoá ngoại\n→ phải kiểm tra qua API\n→ phải có tiến trình\nđối chiếu định kỳ" as R10 #F8CECC
+rectangle "10. Analyst cố kết luận\ncảnh báo đã báo nhầm" as S10
+rectangle "→ 400 Yêu cầu sai\nMáy trạng thái chặn" as R10
 S10 --> R10
 
+rectangle "11. Tham chiếu tới user\nở DB khác" as S11
+rectangle "→ KHÔNG có khoá ngoại\n→ phải kiểm tra qua API\n→ phải có tiến trình\nđối chiếu định kỳ" as R11 #F8CECC
+S11 --> R11
+
 legend bottom
-**Nguyên tắc chung của cả 10 tình huống:**
+**Nguyên tắc chung của 11 tình huống:**
 Không để lỗi ở một thành phần làm hỏng trải nghiệm
 đăng nhập của người dùng, và không để mất dữ liệu.
-endlegend
 
+**Thay đổi 2026-10-05:**
+- Case 5: Detection sập → attempt 'failed', quét lại bằng hàm (chưa có worker định kỳ)
+- Case 6: CORE không nhận sự kiện → ⚠ MẤT vĩnh viễn (outbox chưa hiện thực)
+- Case 7: /actions gửi lỗi → nuốt, không raise
+- Case 8: pre-token-check lỗi → FAIL OPEN, cho đăng nhập
+endlegend
 @enduml

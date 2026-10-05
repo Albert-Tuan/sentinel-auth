@@ -1,0 +1,83 @@
+@startuml
+skinparam backgroundColor #FFFFFF
+skinparam shadowing false
+skinparam defaultFontName Sans
+skinparam BoxPadding 8
+skinparam roundCorner 5
+skinparam maxMessageSize 200
+skinparam sequenceMessageAlign center
+skinparam noteFontSize 9
+
+title ST-04: SOC nhận cảnh báo → action → Core App (2026-10-05)
+
+box "SOC Analyst" #D5E8D4
+participant "SOC Analyst" as S
+end box
+
+box "Detection Engine" #FFF2CC
+participant "Alerts API" as DE
+participant "Actions API" as ACT
+end box
+
+box "Core App" #DAE8FC
+participant "Internal API" as CA
+database "core-db" as CDB
+end box
+
+S -> DE : **GET /api/v1/alerts**\n?status=open&risk_level=high
+activate DE
+DE -> DE : SELECT alerts WHERE status=open
+DE --> S : **200 [{id, risk_level, created_at, ...}]**
+deactivate DE
+
+S -> DE : **GET /api/v1/alerts/{id}**
+activate DE
+DE -> DE : SELECT alert + login_attempt + risk_assessment
+DE --> S : **200 {alert, context, reason_codes, ...}**
+deactivate DE
+
+note over S
+  **SOC có thể thực hiện 4 action:**
+  1. REQUIRE_MFA — Bắt buộc MFA lần tới
+  2. REVOKE_SESSIONS — Thu hồi mọi phiên
+  3. LOCK_USER — Khoá tài khoản (THỦ CÔNG)
+  4. FORCE_LOGOUT — Buộc đăng xuất (THỦ CÔNG)
+end note
+
+== SOC takes action ==
+
+S -> ACT : **POST /api/v1/alerts/{id}/actions**\n{action: "REVOKE_SESSIONS", reason: "attacker confirmed", severity: "high"}
+activate ACT
+
+ACT -> ACT : Validate analyst JWT + user_id
+ACT -> CDB : **POST /api/v1/internal/actions**\n(action=REVOKE_SESSIONS,\ntarget_user_id, reason,\nidempotency_key, alert_id)
+activate CA
+activate CDB
+
+CDB -> CDB : UPDATE sessions\nSET revoked_at=NOW()\nWHERE user_id=?\nAND revoked_at IS NULL
+note right
+  Sessions are revoked for THIS user only.
+  Other users' sessions are untouched.
+end note
+
+CDB --> CA : **200 {status: applied,\ndetails: {sessions_revoked: 3}}**
+deactivate CA
+deactivate CDB
+
+CA --> ACT : **200 {status: applied,\ndetails: {sessions_revoked: 3}}**
+ACT --> S : **200 {status: applied,\ndetails: {sessions_revoked: 3}}**
+deactivate ACT
+
+S -> DE : **PATCH /api/v1/alerts/{id}**\n{status: "acknowledged", notes}
+activate DE
+DE --> S : **200 {alert: {status: acknowledged}}**
+deactivate DE
+
+legend bottom
+  **2026-10-05 changes:**
+  - Every action returns {sessions_revoked: N}
+  - REQUIRE_MFA now ALSO revokes sessions
+  - LOCK_USER is manual-only (SOC decision, not auto-ML)
+  - Idempotency: re-sending same action is safe (already_applied)
+endlegend
+@enduml

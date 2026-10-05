@@ -1,0 +1,102 @@
+@startuml
+skinparam backgroundColor #FFFFFF
+skinparam shadowing false
+skinparam defaultFontName Sans
+skinparam BoxPadding 8
+skinparam roundCorner 5
+skinparam maxMessageSize 200
+skinparam sequenceMessageAlign center
+skinparam noteFontSize 9
+
+title ST-05: Security Admin cấu hình Rule trong Policy (2026-10-05)
+
+box "Security Admin" #D5E8D4
+participant "Admin\nBrowser" as A
+end box
+
+box "Detection Engine" #FFF2CC
+participant "Policy API" as PA
+database "detection-db" as DDB
+end box
+
+A -> PA : **GET /api/v1/policies**
+activate PA
+PA -> DDB : SELECT policies\nORDER BY created_at DESC
+activate DDB
+DDB --> PA : [policy1, policy2]
+deactivate DDB
+PA --> A : **200 [{id, version, is_active, ...}]**
+deactivate PA
+
+A -> PA : **POST /api/v1/policies**\n(JSON body)
+activate PA
+PA -> PA : Validate JSON schema\n+ field names + operators
+note right
+  **Policy structure (v3.3):**
+  {
+    "version": "v1.1",
+    "rules": [
+      {
+        "name": "unusual_hour",
+        "field": "hour_of_day",
+        "operator": "not_between",
+        "value": [7, 22],
+        "weight": 0.30,
+        "score": 0.80,
+        "enabled": true
+      }
+    ],
+    "config": {
+      "weights": {"rule": 0.4, "ml": 0.6},
+      "thresholds": {"low": 0.25, "medium": 0.50, "high": 0.75}
+    }
+  }
+end note
+PA -> DDB : INSERT policies\n(version, rules, config)
+activate DDB
+DDB --> PA : policy record
+deactivate DDB
+PA --> A : **201 Created {policy_id}**
+deactivate PA
+
+A -> PA : **POST /api/v1/policies/{id}/activate**
+activate PA
+PA -> DDB : UPDATE old_policy\n(is_active=false)
+PA -> DDB : UPDATE new_policy\n(is_active=true, activated_at=NOW())
+activate DDB
+DDB --> PA : updated
+deactivate DDB
+PA --> A : **200 OK**
+deactivate PA
+
+note over PA
+  **Activation is IMMEDIATE:**
+  Next login will use the new policy.
+  No restart or reload required.
+end note
+
+== Policy takes effect on next login ==
+
+box "User (login)" #FFFFFF
+participant "User" as U
+participant "Core App" as CA
+end box
+
+U -> CA : **POST /auth/login**\n(username, password)
+CA -> PA : **POST /internal/pre-token-check**\n(user_id, ip, ua, event_id)
+PA -> DDB : SELECT active_policy\n(newly activated v1.1)
+note right
+  **New policy is used:**
+  - "unusual_hour" rule: outside [7-22] → +0.80 × 0.30
+  - Thresholds: high >= 0.75
+end note
+PA --> CA : {risk_level: HIGH,\nrequire_mfa: true}
+CA --> U : **200 {mfa_required: true}**
+
+legend bottom
+  **6 valid rule fields:** hour_of_day, fail_count_24h, ip_change_rate_7d,
+  new_device, average_login_interval_seconds, deviation_score
+
+  **7 valid operators:** ==, !=, >, >=, <, <=, in, between, not_between
+endlegend
+@enduml
