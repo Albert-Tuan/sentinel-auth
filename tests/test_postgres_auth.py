@@ -1,10 +1,10 @@
-"""PostgreSQL auth integration tests for P0-02.
+"""PostgreSQL auth integration tests for P0-02 and P0-03.
 
-These tests exercise the successful login flow (no MFA) against a real PostgreSQL
-database.
+These tests exercise the authentication flow (no MFA and MFA-required)
+against a real PostgreSQL database.
 
-IMPORTANT: These tests do NOT test MFA because P0-03 (bound_ip INET type
-mismatch) is not yet fixed.
+IMPORTANT: MFA tests cover only the P0-03 fix. The P0-05 concurrency
+race (atomic OTP consumption) is not tested here.
 
 Run with:
     pytest tests/test_postgres_auth.py -v
@@ -450,3 +450,306 @@ class TestPostgresLoginState:
         assert len(rows) == 1
         assert rows[0].revoked_at is None
         assert rows[0].expires_at is not None
+
+
+# ---------------------------------------------------------------------------
+# MFA tests
+# ---------------------------------------------------------------------------
+
+class TestPostgresMfaLogin:
+    """Real MFA flow against PostgreSQL via FastAPI — P0-03 fix verification."""
+
+    def test_mfa_login_returns_mfa_required_and_creates_transaction(
+        self, pg_conn, orm_session
+    ):
+        """POST /api/v1/auth/login with MFA-required user returns mfa_required=true.
+
+        Verifies:
+        - HTTP 200 (challenge issued)
+        - mfa_required == True
+        - access_token == ""
+        - refresh_token == ""
+        - session_id is the mfa_txn.id
+        - MfaTransaction created in PostgreSQL (no DataError)
+        - MfaNotification created
+        - NO active Session yet
+        """
+        # Setup: create user with MFA required
+        user_id = _create_user_sql(pg_conn, "mfa_user1", "testpass")
+        pg_conn.execute(
+            text("UPDATE users SET admin_mfa_required = TRUE WHERE id = :uid"),
+            {"uid": user_id},
+        )
+        pg_conn.execute(
+            text("""
+                INSERT INTO ip_addresses (ip_address)
+                VALUES ('127.0.0.1'::inet)
+                ON CONFLICT (ip_address) DO NOTHING
+            """),
+        )
+
+        import app.auth as _auth_mod
+        from fastapi.testclient import TestClient
+        from app.main import app
+
+        # Store originals
+        orig_get_client_ip = _auth_mod.get_client_ip
+        orig_run_pre_token = _auth_mod.RUN_PRE_TOKEN_CHECK
+
+        def _get_db_override():
+            yield orm_session
+
+        try:
+            _auth_mod.get_client_ip = lambda req: "127.0.0.1"
+            _auth_mod.RUN_PRE_TOKEN_CHECK = "0"
+            app.dependency_overrides[_auth_mod.get_db] = _get_db_override
+
+            with TestClient(app) as client:
+                resp = client.post(
+                    "/api/v1/auth/login",
+                    json={"username": "mfa_user1", "password": "testpass"},
+                )
+
+            assert resp.status_code == 200, resp.json()
+            data = resp.json()
+            assert data["mfa_required"] is True
+            assert data["access_token"] == ""
+            assert data["refresh_token"] == ""
+            assert data["session_id"] != ""
+            txn_id = data["session_id"]
+
+        finally:
+            _auth_mod.get_client_ip = orig_get_client_ip
+            _auth_mod.RUN_PRE_TOKEN_CHECK = orig_run_pre_token
+            app.dependency_overrides.clear()
+
+        # Verify PostgreSQL state
+        pg_conn.commit()
+
+        txn_rows = pg_conn.execute(
+            text("""
+                SELECT id, user_id, status, bound_ip, expires_at, notification_id
+                FROM mfa_transactions WHERE id = :tid
+            """),
+            {"tid": txn_id},
+        ).fetchall()
+        assert len(txn_rows) == 1, f"MfaTransaction not found: {txn_id}"
+        txn = txn_rows[0]
+        assert str(txn.user_id) == user_id
+        assert txn.status == "pending"
+        assert txn.bound_ip is not None, "bound_ip must be stored as valid INET"
+        assert txn.expires_at is not None
+        assert txn.notification_id is not None
+
+        # MfaNotification exists
+        notif_rows = pg_conn.execute(
+            text("""
+                SELECT id, mfa_transaction_id, channel, mfa_code_hash
+                FROM mfa_notifications WHERE id = :nid
+            """),
+            {"nid": txn.notification_id},
+        ).fetchall()
+        assert len(notif_rows) == 1
+
+        # NO active Session yet (login returns before session is created)
+        session_rows = pg_conn.execute(
+            text("SELECT id FROM sessions WHERE user_id = :uid"),
+            {"uid": user_id},
+        ).fetchall()
+        assert len(session_rows) == 0, "Session should not be created until MFA verified"
+
+    def test_mfa_verify_success_same_ip(self, pg_conn, orm_session):
+        """MFA verification with correct OTP and same IP succeeds.
+
+        Verifies:
+        - HTTP 200 from /mfa/verify
+        - access_token and refresh_token are returned
+        - MfaTransaction.status == 'completed'
+        - notification.verified_at is set
+        - Session exists
+        - Token works on /sessions endpoint
+        """
+        # Setup: user + MFA login to get transaction
+        user_id = _create_user_sql(pg_conn, "mfa_user2", "testpass2")
+        pg_conn.execute(
+            text("UPDATE users SET admin_mfa_required = TRUE WHERE id = :uid"),
+            {"uid": user_id},
+        )
+        pg_conn.execute(
+            text("""
+                INSERT INTO ip_addresses (ip_address)
+                VALUES ('10.0.0.50'::inet)
+                ON CONFLICT (ip_address) DO NOTHING
+            """),
+        )
+
+        import app.auth as _auth_mod
+        from fastapi.testclient import TestClient
+        from app.main import app
+
+        orig_get_client_ip = _auth_mod.get_client_ip
+        orig_run_pre_token = _auth_mod.RUN_PRE_TOKEN_CHECK
+        orig_generate_otp = _auth_mod.generate_otp
+
+        def _get_db_override():
+            yield orm_session
+
+        try:
+            _auth_mod.RUN_PRE_TOKEN_CHECK = "0"
+            _auth_mod.get_client_ip = lambda req: "10.0.0.50"
+            _auth_mod.generate_otp = lambda: "123456"
+
+            app.dependency_overrides[_auth_mod.get_db] = _get_db_override
+
+            with TestClient(app) as client:
+                # Step 1: login → get mfa challenge
+                login_resp = client.post(
+                    "/api/v1/auth/login",
+                    json={"username": "mfa_user2", "password": "testpass2"},
+                )
+                assert login_resp.status_code == 200
+                txn_id = login_resp.json()["session_id"]
+
+            # Step 2: verify with correct OTP + same IP
+            with TestClient(app) as client:
+                verify_resp = client.post(
+                    "/api/v1/auth/mfa/verify",
+                    json={"session_id": txn_id, "mfa_code": "123456"},
+                )
+
+            assert verify_resp.status_code == 200, verify_resp.json()
+            data = verify_resp.json()
+            assert data["access_token"] != ""
+            assert data["refresh_token"] != ""
+            assert data["session_id"] != ""
+            access_token = data["access_token"]
+
+        finally:
+            _auth_mod.get_client_ip = orig_get_client_ip
+            _auth_mod.RUN_PRE_TOKEN_CHECK = orig_run_pre_token
+            _auth_mod.generate_otp = orig_generate_otp
+            app.dependency_overrides.clear()
+
+        # Verify PostgreSQL state
+        pg_conn.commit()
+
+        txn_rows = pg_conn.execute(
+            text("SELECT status FROM mfa_transactions WHERE id = :tid"),
+            {"tid": txn_id},
+        ).fetchall()
+        assert len(txn_rows) == 1
+        assert txn_rows[0].status == "completed", (
+            f"MfaTransaction should be completed, got: {txn_rows[0].status}"
+        )
+
+        notif_rows = pg_conn.execute(
+            text("SELECT verified_at FROM mfa_notifications WHERE id IN (SELECT notification_id FROM mfa_transactions WHERE id = :tid)"),
+            {"tid": txn_id},
+        ).fetchall()
+        assert len(notif_rows) == 1
+        assert notif_rows[0].verified_at is not None, "notification.verified_at must be set"
+
+        session_rows = pg_conn.execute(
+            text("SELECT id FROM sessions WHERE user_id = :uid AND revoked_at IS NULL"),
+            {"uid": user_id},
+        ).fetchall()
+        assert len(session_rows) == 1, "Session should be created after MFA verify"
+
+        # Token works on /sessions
+        def _get_db_override2():
+            yield orm_session
+
+        try:
+            _auth_mod.get_client_ip = lambda req: "10.0.0.50"
+            app.dependency_overrides[_auth_mod.get_db] = _get_db_override2
+
+            with TestClient(app) as client:
+                sessions_resp = client.get(
+                    "/api/v1/auth/sessions",
+                    headers={"Authorization": f"Bearer {access_token}"},
+                )
+            assert sessions_resp.status_code == 200, sessions_resp.json()
+        finally:
+            _auth_mod.get_client_ip = orig_get_client_ip
+            app.dependency_overrides.clear()
+
+    def test_mfa_verify_wrong_ip_rejected(self, pg_conn, orm_session):
+        """MFA verification from a different IP is rejected (IP binding enforced)."""
+        user_id = _create_user_sql(pg_conn, "mfa_user3", "testpass3")
+        pg_conn.execute(
+            text("UPDATE users SET admin_mfa_required = TRUE WHERE id = :uid"),
+            {"uid": user_id},
+        )
+        pg_conn.execute(
+            text("""
+                INSERT INTO ip_addresses (ip_address)
+                VALUES ('10.0.0.99'::inet), ('192.168.1.1'::inet)
+                ON CONFLICT (ip_address) DO NOTHING
+            """),
+        )
+
+        import app.auth as _auth_mod
+        from fastapi.testclient import TestClient
+        from app.main import app
+
+        orig_get_client_ip = _auth_mod.get_client_ip
+        orig_run_pre_token = _auth_mod.RUN_PRE_TOKEN_CHECK
+        orig_generate_otp = _auth_mod.generate_otp
+
+        def _get_db_override():
+            yield orm_session
+
+        try:
+            _auth_mod.RUN_PRE_TOKEN_CHECK = "0"
+            _auth_mod.get_client_ip = lambda req: "10.0.0.99"
+            _auth_mod.generate_otp = lambda: "123456"
+
+            app.dependency_overrides[_auth_mod.get_db] = _get_db_override
+
+            with TestClient(app) as client:
+                login_resp = client.post(
+                    "/api/v1/auth/login",
+                    json={"username": "mfa_user3", "password": "testpass3"},
+                )
+                assert login_resp.status_code == 200
+                txn_id = login_resp.json()["session_id"]
+
+            # Verify from DIFFERENT IP
+            _auth_mod.get_client_ip = lambda req: "192.168.1.1"
+
+            with TestClient(app) as client:
+                verify_resp = client.post(
+                    "/api/v1/auth/mfa/verify",
+                    json={"session_id": txn_id, "mfa_code": "123456"},
+                )
+
+            assert verify_resp.status_code == 403, (
+                f"Expected 403 for IP mismatch, got {verify_resp.status_code}: {verify_resp.json()}"
+            )
+            assert "IP address" in verify_resp.json()["detail"]
+
+        finally:
+            _auth_mod.get_client_ip = orig_get_client_ip
+            _auth_mod.RUN_PRE_TOKEN_CHECK = orig_run_pre_token
+            _auth_mod.generate_otp = orig_generate_otp
+            app.dependency_overrides.clear()
+
+        # Verify no session was created
+        pg_conn.commit()
+        session_rows = pg_conn.execute(
+            text("SELECT id FROM sessions WHERE user_id = :uid"),
+            {"uid": user_id},
+        ).fetchall()
+        assert len(session_rows) == 0, (
+            "No session should be created when IP binding check fails"
+        )
+
+        # Transaction should remain pending
+        txn_rows = pg_conn.execute(
+            text("SELECT status FROM mfa_transactions WHERE id = :tid"),
+            {"tid": txn_id},
+        ).fetchall()
+        assert len(txn_rows) == 1
+        assert txn_rows[0].status == "pending", (
+            "Transaction should remain pending after rejected verify"
+        )

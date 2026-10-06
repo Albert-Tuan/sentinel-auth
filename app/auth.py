@@ -59,11 +59,6 @@ def generate_otp() -> str:
     return f"{secrets.randbelow(1_000_000):06d}"
 
 
-def hash_ip(ip: str) -> str:
-    """Hash IP address for storage (privacy)."""
-    return hashlib.sha256(ip.encode()).hexdigest()
-
-
 def get_client_ip(request: Request) -> str:
     """Extract client IP from request.
 
@@ -399,7 +394,7 @@ async def login(
             mfa_type=mfa_type,
             expires_at=expires_at,
             status="pending",
-            bound_ip=hash_ip(client_ip),
+            bound_ip=client_ip,
         )
         db.add(mfa_txn)
         db.flush()
@@ -571,6 +566,18 @@ async def mfa_verify(
         db.commit()
 
         raise HTTPException(status_code=401, detail="Invalid MFA code")
+
+    # IP binding check: reject if verification comes from a different IP
+    if mfa_txn.bound_ip and mfa_txn.bound_ip != client_ip:
+        logger.warning(
+            "MFA verify rejected: IP mismatch bound=%s got=%s",
+            mfa_txn.bound_ip,
+            client_ip,
+        )
+        raise HTTPException(
+            status_code=403,
+            detail="MFA verification is bound to the original IP address",
+        )
 
     # OTP verified successfully
     mfa_txn.status = "completed"
