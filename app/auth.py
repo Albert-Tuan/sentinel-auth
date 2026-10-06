@@ -2,13 +2,14 @@
 Authentication endpoints - login, MFA, session management.
 Mirrors infra/postgres/schema-core-v3.3.sql.
 """
+import hashlib
+import ipaddress
 import logging
 import os
+import secrets
 from datetime import datetime, timedelta
 from typing import Optional
 from uuid import uuid4
-import hashlib
-import secrets
 
 import httpx
 from fastapi import APIRouter, HTTPException, status, Depends, Request, Header
@@ -91,6 +92,16 @@ def resolve_ip_address(db, client_ip: str) -> Optional[str]:
     else:
         row.last_seen_at = datetime.utcnow()
     return row.id
+
+
+def normalize_ip(value: str) -> str:
+    """Canonicalise an IP address string to its standard textual form.
+
+    Uses Python's ipaddress module so that equivalent IPv6 representations
+    (e.g. ``2001:db8::1`` and ``2001:0db8:0:0:0:0:0:1``) compare equal.
+    Raises ValueError for any input that is not a valid IPv4 or IPv6 address.
+    """
+    return str(ipaddress.ip_address(value))
 
 
 # =============================================================================
@@ -394,7 +405,7 @@ async def login(
             mfa_type=mfa_type,
             expires_at=expires_at,
             status="pending",
-            bound_ip=client_ip,
+            bound_ip=normalize_ip(client_ip) if client_ip and client_ip != "unknown" else None,
         )
         db.add(mfa_txn)
         db.flush()
@@ -567,17 +578,25 @@ async def mfa_verify(
 
         raise HTTPException(status_code=401, detail="Invalid MFA code")
 
-    # IP binding check: reject if verification comes from a different IP
-    if mfa_txn.bound_ip and mfa_txn.bound_ip != client_ip:
-        logger.warning(
-            "MFA verify rejected: IP mismatch bound=%s got=%s",
-            mfa_txn.bound_ip,
-            client_ip,
-        )
-        raise HTTPException(
-            status_code=403,
-            detail="MFA verification is bound to the original IP address",
-        )
+    # IP binding check: reject if verification comes from a different IP.
+    # Normalise both sides so equivalent IPv6 textual forms compare equal.
+    if mfa_txn.bound_ip:
+        if client_ip == "unknown":
+            logger.warning("MFA verify rejected: client IP is unknown")
+            raise HTTPException(
+                status_code=403,
+                detail="MFA verification is bound to the original IP address",
+            )
+        if normalize_ip(mfa_txn.bound_ip) != normalize_ip(client_ip):
+            logger.warning(
+                "MFA verify rejected: IP mismatch bound=%s got=%s",
+                mfa_txn.bound_ip,
+                client_ip,
+            )
+            raise HTTPException(
+                status_code=403,
+                detail="MFA verification is bound to the original IP address",
+            )
 
     # OTP verified successfully
     mfa_txn.status = "completed"

@@ -753,3 +753,211 @@ class TestPostgresMfaLogin:
         assert txn_rows[0].status == "pending", (
             "Transaction should remain pending after rejected verify"
         )
+
+    def test_mfa_ip_binding_same_ipv4_allowed(self, pg_conn, orm_session):
+        """IPv4: same IP with same textual form → allowed."""
+        user_id = _create_user_sql(pg_conn, "ipv4_same", "pass")
+        pg_conn.execute(
+            text("UPDATE users SET admin_mfa_required = TRUE WHERE id = :uid"),
+            {"uid": user_id},
+        )
+
+        import app.auth as _auth_mod
+        from fastapi.testclient import TestClient
+        from app.main import app
+
+        orig_get_client_ip = _auth_mod.get_client_ip
+        orig_run_pre_token = _auth_mod.RUN_PRE_TOKEN_CHECK
+        orig_generate_otp = _auth_mod.generate_otp
+
+        def _get_db_override():
+            yield orm_session
+
+        try:
+            _auth_mod.RUN_PRE_TOKEN_CHECK = "0"
+            _auth_mod.get_client_ip = lambda req: "8.8.8.8"
+            _auth_mod.generate_otp = lambda: "654321"
+
+            app.dependency_overrides[_auth_mod.get_db] = _get_db_override
+
+            with TestClient(app) as client:
+                login_resp = client.post(
+                    "/api/v1/auth/login",
+                    json={"username": "ipv4_same", "password": "pass"},
+                )
+                assert login_resp.status_code == 200
+                txn_id = login_resp.json()["session_id"]
+
+            with TestClient(app) as client:
+                verify_resp = client.post(
+                    "/api/v1/auth/mfa/verify",
+                    json={"session_id": txn_id, "mfa_code": "654321"},
+                )
+
+            assert verify_resp.status_code == 200, verify_resp.json()
+            assert verify_resp.json()["access_token"] != ""
+
+        finally:
+            _auth_mod.get_client_ip = orig_get_client_ip
+            _auth_mod.RUN_PRE_TOKEN_CHECK = orig_run_pre_token
+            _auth_mod.generate_otp = orig_generate_otp
+            app.dependency_overrides.clear()
+
+    def test_mfa_ip_binding_different_ipv4_rejected(self, pg_conn, orm_session):
+        """IPv4: different IP → rejected."""
+        user_id = _create_user_sql(pg_conn, "ipv4_diff", "pass")
+        pg_conn.execute(
+            text("UPDATE users SET admin_mfa_required = TRUE WHERE id = :uid"),
+            {"uid": user_id},
+        )
+
+        import app.auth as _auth_mod
+        from fastapi.testclient import TestClient
+        from app.main import app
+
+        orig_get_client_ip = _auth_mod.get_client_ip
+        orig_run_pre_token = _auth_mod.RUN_PRE_TOKEN_CHECK
+        orig_generate_otp = _auth_mod.generate_otp
+
+        def _get_db_override():
+            yield orm_session
+
+        try:
+            _auth_mod.RUN_PRE_TOKEN_CHECK = "0"
+            _auth_mod.get_client_ip = lambda req: "1.1.1.1"
+            _auth_mod.generate_otp = lambda: "111111"
+
+            app.dependency_overrides[_auth_mod.get_db] = _get_db_override
+
+            with TestClient(app) as client:
+                login_resp = client.post(
+                    "/api/v1/auth/login",
+                    json={"username": "ipv4_diff", "password": "pass"},
+                )
+                assert login_resp.status_code == 200
+                txn_id = login_resp.json()["session_id"]
+
+            _auth_mod.get_client_ip = lambda req: "2.2.2.2"
+
+            with TestClient(app) as client:
+                verify_resp = client.post(
+                    "/api/v1/auth/mfa/verify",
+                    json={"session_id": txn_id, "mfa_code": "111111"},
+                )
+
+            assert verify_resp.status_code == 403, verify_resp.json()
+            assert "IP address" in verify_resp.json()["detail"]
+
+        finally:
+            _auth_mod.get_client_ip = orig_get_client_ip
+            _auth_mod.RUN_PRE_TOKEN_CHECK = orig_run_pre_token
+            _auth_mod.generate_otp = orig_generate_otp
+            app.dependency_overrides.clear()
+
+    def test_mfa_ip_binding_ipv6_equivalent_forms_allowed(self, pg_conn, orm_session):
+        """IPv6: two equivalent textual forms of the same address → allowed.
+
+        Python's ipaddress module canonicalises both forms to the same string,
+        so ``2001:db8::1`` and ``2001:0db8:0:0:0:0:0:1`` compare equal.
+        """
+        user_id = _create_user_sql(pg_conn, "ipv6_eq", "pass")
+        pg_conn.execute(
+            text("UPDATE users SET admin_mfa_required = TRUE WHERE id = :uid"),
+            {"uid": user_id},
+        )
+
+        import app.auth as _auth_mod
+        from fastapi.testclient import TestClient
+        from app.main import app
+
+        orig_get_client_ip = _auth_mod.get_client_ip
+        orig_run_pre_token = _auth_mod.RUN_PRE_TOKEN_CHECK
+        orig_generate_otp = _auth_mod.generate_otp
+
+        def _get_db_override():
+            yield orm_session
+
+        try:
+            _auth_mod.RUN_PRE_TOKEN_CHECK = "0"
+            # Login uses the fully-expanded form
+            _auth_mod.get_client_ip = lambda req: "2001:0db8:0000:0000:0000:0000:0000:0001"
+            _auth_mod.generate_otp = lambda: "222222"
+
+            app.dependency_overrides[_auth_mod.get_db] = _get_db_override
+
+            with TestClient(app) as client:
+                login_resp = client.post(
+                    "/api/v1/auth/login",
+                    json={"username": "ipv6_eq", "password": "pass"},
+                )
+                assert login_resp.status_code == 200
+                txn_id = login_resp.json()["session_id"]
+
+            # Verify uses the colon-delta (::) form — same address, different string
+            _auth_mod.get_client_ip = lambda req: "2001:db8::1"
+
+            with TestClient(app) as client:
+                verify_resp = client.post(
+                    "/api/v1/auth/mfa/verify",
+                    json={"session_id": txn_id, "mfa_code": "222222"},
+                )
+
+            assert verify_resp.status_code == 200, verify_resp.json()
+            assert verify_resp.json()["access_token"] != ""
+
+        finally:
+            _auth_mod.get_client_ip = orig_get_client_ip
+            _auth_mod.RUN_PRE_TOKEN_CHECK = orig_run_pre_token
+            _auth_mod.generate_otp = orig_generate_otp
+            app.dependency_overrides.clear()
+
+    def test_mfa_ip_binding_ipv6_different_address_rejected(self, pg_conn, orm_session):
+        """IPv6: genuinely different address → rejected."""
+        user_id = _create_user_sql(pg_conn, "ipv6_diff", "pass")
+        pg_conn.execute(
+            text("UPDATE users SET admin_mfa_required = TRUE WHERE id = :uid"),
+            {"uid": user_id},
+        )
+
+        import app.auth as _auth_mod
+        from fastapi.testclient import TestClient
+        from app.main import app
+
+        orig_get_client_ip = _auth_mod.get_client_ip
+        orig_run_pre_token = _auth_mod.RUN_PRE_TOKEN_CHECK
+        orig_generate_otp = _auth_mod.generate_otp
+
+        def _get_db_override():
+            yield orm_session
+
+        try:
+            _auth_mod.RUN_PRE_TOKEN_CHECK = "0"
+            _auth_mod.get_client_ip = lambda req: "2001:db8::1"
+            _auth_mod.generate_otp = lambda: "333333"
+
+            app.dependency_overrides[_auth_mod.get_db] = _get_db_override
+
+            with TestClient(app) as client:
+                login_resp = client.post(
+                    "/api/v1/auth/login",
+                    json={"username": "ipv6_diff", "password": "pass"},
+                )
+                assert login_resp.status_code == 200
+                txn_id = login_resp.json()["session_id"]
+
+            _auth_mod.get_client_ip = lambda req: "2001:db8::2"
+
+            with TestClient(app) as client:
+                verify_resp = client.post(
+                    "/api/v1/auth/mfa/verify",
+                    json={"session_id": txn_id, "mfa_code": "333333"},
+                )
+
+            assert verify_resp.status_code == 403, verify_resp.json()
+            assert "IP address" in verify_resp.json()["detail"]
+
+        finally:
+            _auth_mod.get_client_ip = orig_get_client_ip
+            _auth_mod.RUN_PRE_TOKEN_CHECK = orig_run_pre_token
+            _auth_mod.generate_otp = orig_generate_otp
+            app.dependency_overrides.clear()
