@@ -456,7 +456,9 @@ async def _create_session(
     user_agent: Optional[str],
     db,
 ) -> LoginResponse:
-    """Create a new session and generate JWT tokens."""
+    """Create a new session and generate tokens."""
+    now = datetime.utcnow()
+
     # Generate tokens
     access_token = secrets.token_urlsafe(32)
     refresh_token = secrets.token_urlsafe(32)
@@ -468,15 +470,15 @@ async def _create_session(
         refresh_token_hash=hash_token(refresh_token),
         refresh_token_family=uuid4(),  # New family for this refresh cycle
         token_jti=jti,
-        expires_at=datetime.utcnow() + timedelta(hours=1),
-        last_activity_at=datetime.utcnow(),
+        expires_at=now + timedelta(hours=1),
+        last_activity_at=now,
         ip_address_id=resolve_ip_address(db, client_ip),
         user_agent=user_agent,
     )
     db.add(session)
 
     # Update user last login
-    user.last_login_at = datetime.utcnow()
+    user.last_login_at = now
 
     # Record successful login
     request_id = uuid4()
