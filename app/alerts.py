@@ -3,30 +3,33 @@ SOC Alert Management - Alert CRUD, evidence and timeline.
 
 Schema v3.3. Canonical decisions: docs/DECISIONS-DETECTION-v3.3.md
 
-Implements the SOC side of Detection Engine:
-- UC-DE-11: Tạo Alert
-- UC-DE-12: Phân công Alert
-- UC-DE-13: Yêu cầu hành động bảo vệ
-- UC-DE-14: Dữ liệu bảng điều khiển
-- UC-DE-15: Dòng thời gian cảnh báo
+All endpoints are protected by bearer-token authentication + RBAC.
 
-All endpoints live under /api/v1/alerts and are authenticated with a
-JWT issued by core-app (SOC_ANALYST / SECURITY_MANAGER roles).
+Authorization matrix:
+  - READ  (list, get, evidence, timeline): SOC_ANALYST or SECURITY_MANAGER
+  - WRITE (acknowledge, resolve, assign, actions, add-timeline): SOC_ANALYST or SECURITY_MANAGER
+  - USER role gets 403 on all alert endpoints.
 """
 from datetime import datetime
-from typing import Optional, List
-from uuid import uuid4, UUID
+from typing import List, Optional
+from uuid import UUID, uuid4
 
-from fastapi import APIRouter, HTTPException, Header, Depends, Query
-from pydantic import BaseModel, Field
-from enum import Enum
+from fastapi import APIRouter, Depends, HTTPException, Query
+from pydantic import BaseModel, Field, field_validator
+from sqlalchemy.orm import Session as OrmSession
 
 from app.db import get_db
 from app.models import (
     Alert, AlertTimeline, LoginAttempt, RiskAssessment,
-    User, Session, DetectionLog
+    User, Session, DetectionLog, SocAnalyst,
 )
 from app.schemas import SecurityAction
+from app.authz import (
+    AuthContext,
+    get_current_auth_context,
+    require_roles,
+    get_authenticated_user_id,
+)
 
 router = APIRouter(prefix="/api/v1", tags=["soc"])
 
@@ -35,21 +38,14 @@ router = APIRouter(prefix="/api/v1", tags=["soc"])
 # Enums
 # =============================================================================
 
-class AlertStatusEnum(str, Enum):
+class AlertStatusEnum(str):
     OPEN = "open"
     ACKNOWLEDGED = "acknowledged"
     RESOLVED = "resolved"
     FALSE_POSITIVE = "false_positive"
 
 
-class RiskLevelEnum(str, Enum):
-    LOW = "low"
-    MEDIUM = "medium"
-    HIGH = "high"
-    CRITICAL = "critical"
-
-
-class TimelineEventType(str, Enum):
+class TimelineEventType(str):
     CREATED = "created"
     ASSIGNED = "assigned"
     UNASSIGNED = "unassigned"
@@ -83,8 +79,6 @@ class LoginAttemptSummary(BaseModel):
 
 
 class RiskAssessmentSummary(BaseModel):
-    """DECISIONS section 4.1 - ml_score is the only ML score column."""
-
     rule_score: Optional[float] = None
     ml_score: Optional[float] = None
     combined_score: Optional[float] = None
@@ -101,8 +95,6 @@ class RiskAssessmentSummary(BaseModel):
 
 
 class DetectionLogSummary(BaseModel):
-    """DECISIONS section 4.3 - 4 stages, score_contribution replaces score."""
-
     id: str
     stage: str
     stage_detail: Optional[str] = None
@@ -119,7 +111,6 @@ class DetectionLogSummary(BaseModel):
 
 
 class AlertEvidence(BaseModel):
-    """Full evidence for SOC investigation (UC-08)."""
     alert: "AlertItem"
     login_attempt: Optional[LoginAttemptSummary] = None
     risk_assessment: Optional[RiskAssessmentSummary] = None
@@ -131,8 +122,8 @@ class AlertItem(BaseModel):
     id: str
     login_attempt_id: str
     policy_id: Optional[str] = None
-    status: AlertStatusEnum
-    risk_level: Optional[RiskLevelEnum] = None
+    status: str
+    risk_level: Optional[str] = None
     detection_reason: Optional[str] = None
     detection_scores: Optional[dict] = None
     assigned_to_id: Optional[str] = None
@@ -154,18 +145,10 @@ class AlertListResponse(BaseModel):
     limit: int
 
 
-class AlertFilter(BaseModel):
-    status: Optional[AlertStatusEnum] = None
-    risk_level: Optional[RiskLevelEnum] = None
-    assigned_to_id: Optional[str] = None
-    from_date: Optional[datetime] = None
-    to_date: Optional[datetime] = None
-
-
 class TimelineEvent(BaseModel):
     id: str
     alert_id: str
-    event_type: TimelineEventType
+    event_type: str
     actor_id: Optional[str] = None
     actor_type: str = "user"
     old_value: Optional[str] = None
@@ -179,7 +162,7 @@ class TimelineEvent(BaseModel):
 
 
 class TimelineEventCreate(BaseModel):
-    event_type: TimelineEventType
+    event_type: str
     comment: Optional[str] = None
 
 
@@ -216,20 +199,20 @@ class AlertActionResponse(BaseModel):
 
 
 # =============================================================================
-# Helper Functions
+# Helpers
 # =============================================================================
 
-def verify_internal_token(x_internal_token: Optional[str]) -> bool:
-    """Verify internal API token."""
-    if not x_internal_token:
-        return False
-    return x_internal_token == "changeme-in-production"
-
-
-def get_client_ip(request=None) -> Optional[str]:
-    """Extract the client IP for the audit trail."""
-    if request is None:
+def _uuid_to_str(value) -> Optional[str]:
+    """Normalise a UUID to a string for SQLite/PostgreSQL compatibility."""
+    if value is None:
         return None
+    if hasattr(value, "hex"):
+        return str(value)
+    return str(value)
+
+
+def _get_client_ip_from_request(request) -> Optional[str]:
+    """Extract client IP from the request for the audit trail."""
     forwarded = request.headers.get("x-forwarded-for") if hasattr(request, "headers") else None
     if forwarded:
         return forwarded.split(",")[0].strip()
@@ -237,39 +220,79 @@ def get_client_ip(request=None) -> Optional[str]:
     return getattr(client, "host", None)
 
 
-def get_actor_id(request) -> Optional[str]:
-    """Resolve the acting user id for the timeline entry.
+def _alert_to_dict(alert) -> dict:
+    """Convert an Alert ORM object to a dict with string UUIDs.
 
-    The SOC endpoints are authenticated by a core-app JWT. Until that
-    dependency is wired in, the analyst id may be supplied explicitly on
-    the request body; otherwise the entry records a NULL actor_id with
-    actor_type "user".
+    Needed because SQLite UUID columns return Python UUID objects while PostgreSQL
+    UUID columns return UUID objects too. The Pydantic schema expects str fields.
+    Using model_validate() is cleaner but validator inheritance makes it complex;
+    this approach is explicit and works across both DB backends.
     """
-    for field in ("actor_id", "analyst_id", "soc_analyst_id"):
-        value = getattr(request, field, None)
-        if value:
-            return str(value)
-    user = getattr(request, "user", None)
-    if user is not None:
-        return str(getattr(user, "id", user))
-    return None
+    return {
+        "id": str(alert.id),
+        "login_attempt_id": str(alert.login_attempt_id),
+        "policy_id": str(alert.policy_id) if alert.policy_id else None,
+        "status": alert.status,
+        "risk_level": alert.risk_level,
+        "detection_reason": alert.detection_reason,
+        "detection_scores": alert.detection_scores,
+        "assigned_to_id": str(alert.assigned_to_id) if alert.assigned_to_id else None,
+        "resolved_by_id": str(alert.resolved_by_id) if alert.resolved_by_id else None,
+        "resolved_at": alert.resolved_at,
+        "resolution": alert.resolution,
+        "notes": alert.notes,
+        "created_at": alert.created_at,
+        "updated_at": alert.updated_at,
+    }
 
 
-def create_timeline_event(
-    db,
-    alert_id: str,
-    event_type: TimelineEventType,
+def _timeline_to_dict(event) -> dict:
+    """Convert an AlertTimeline ORM object to a dict with string UUIDs."""
+    return {
+        "id": str(event.id),
+        "alert_id": str(event.alert_id),
+        "event_type": event.event_type,
+        "actor_id": str(event.actor_id) if event.actor_id else None,
+        "actor_type": event.actor_type,
+        "old_value": event.old_value,
+        "new_value": event.new_value,
+        "comment": event.comment,
+        "ip_address": str(event.ip_address) if event.ip_address else None,
+        "created_at": event.created_at,
+    }
+
+
+def _detection_log_to_dict(log) -> dict:
+    """Convert a DetectionLog ORM object to a dict with string UUIDs."""
+    return {
+        "id": str(log.id),
+        "stage": log.stage,
+        "stage_detail": log.stage_detail,
+        "rule_name": log.rule_name,
+        "triggered": log.triggered,
+        "score_contribution": log.score_contribution,
+        "decision": log.decision,
+        "reason": log.reason,
+        "details": log.details,
+        "created_at": log.created_at,
+    }
+
+
+def _create_timeline_event(
+    db: OrmSession,
+    alert_id: UUID,
+    event_type: str,
     actor_id: Optional[str] = None,
     actor_type: str = "user",
     old_value: Optional[str] = None,
     new_value: Optional[str] = None,
     comment: Optional[str] = None,
-    ip_address: Optional[str] = None
+    ip_address: Optional[str] = None,
 ) -> AlertTimeline:
-    """Append an immutable entry to the alert timeline (DE-15)."""
+    """Append an immutable entry to the alert timeline."""
     event = AlertTimeline(
         alert_id=alert_id,
-        event_type=event_type.value,
+        event_type=event_type,
         actor_id=actor_id,
         actor_type=actor_type,
         old_value=old_value,
@@ -282,46 +305,36 @@ def create_timeline_event(
 
 
 # =============================================================================
-# Alert CRUD Endpoints
+# Alert READ endpoints — SOC_ANALYST or SECURITY_MANAGER
 # =============================================================================
 
 @router.get("/alerts", response_model=AlertListResponse)
 async def list_alerts(
-    status: Optional[AlertStatusEnum] = Query(None),
-    risk_level: Optional[RiskLevelEnum] = Query(None),
+    ctx: AuthContext = Depends(require_roles("SOC_ANALYST", "SECURITY_MANAGER", "SECURITY_ADMIN")),
+    status: Optional[str] = Query(None),
+    risk_level: Optional[str] = Query(None),
     assigned_to_id: Optional[str] = Query(None),
     page: int = Query(1, ge=1),
     limit: int = Query(20, ge=1, le=100),
-    x_internal_token: Optional[str] = Header(None),
-    db=Depends(get_db),
+    db: OrmSession = Depends(get_db),
 ) -> AlertListResponse:
-    """
-    List alerts with filtering (UC-06: SOC Dashboard data source).
-
-    Per S-QĐ-01: Dashboard chỉ hiển thị dữ liệu mà actor có quyền xem.
-    """
+    """List alerts with filtering."""
     query = db.query(Alert)
 
-    # Apply filters
     if status:
-        query = query.filter(Alert.status == status.value)
+        query = query.filter(Alert.status == status)
     if risk_level:
-        query = query.filter(Alert.risk_level == risk_level.value)
+        query = query.filter(Alert.risk_level == risk_level)
     if assigned_to_id:
         query = query.filter(Alert.assigned_to_id == assigned_to_id)
 
-    # Order by created_at desc
     query = query.order_by(Alert.created_at.desc())
-
-    # Count total
     total = query.count()
-
-    # Paginate
     offset = (page - 1) * limit
     alerts = query.offset(offset).limit(limit).all()
 
     return AlertListResponse(
-        alerts=[AlertItem.model_validate(a) for a in alerts],
+        alerts=[AlertItem.model_validate(_alert_to_dict(a)) for a in alerts],
         total=total,
         page=page,
         limit=limit,
@@ -330,69 +343,67 @@ async def list_alerts(
 
 @router.get("/alerts/{alert_id}", response_model=AlertItem)
 async def get_alert(
-    alert_id: str,
-    x_internal_token: Optional[str] = Header(None),
-    db=Depends(get_db),
+    alert_id: UUID,
+    ctx: AuthContext = Depends(require_roles("SOC_ANALYST", "SECURITY_MANAGER", "SECURITY_ADMIN")),
+    db: OrmSession = Depends(get_db),
 ) -> AlertItem:
     """Get single alert by ID."""
     alert = db.query(Alert).filter(Alert.id == alert_id).first()
     if not alert:
         raise HTTPException(status_code=404, detail="Alert not found")
-    return AlertItem.model_validate(alert)
+    return AlertItem.model_validate(_alert_to_dict(alert))
 
 
 @router.get("/alerts/{alert_id}/evidence", response_model=AlertEvidence)
 async def get_alert_evidence(
-    alert_id: str,
-    x_internal_token: Optional[str] = Header(None),
-    db=Depends(get_db),
+    alert_id: UUID,
+    ctx: AuthContext = Depends(require_roles("SOC_ANALYST", "SECURITY_MANAGER", "SECURITY_ADMIN")),
+    db: OrmSession = Depends(get_db),
 ) -> AlertEvidence:
-    """
-    Get full evidence for alert investigation (UC-08).
-
-    Returns:
-    - Alert details
-    - Login attempt info
-    - Risk assessment scores (rule, ML, combined)
-    - Detection logs (rule hits, ML evaluation)
-    - Timeline events
-
-    Per S-QĐ-03: Hiển thị Rule Score, Anomaly Score và Total Risk Score riêng biệt.
-    """
-    # Get alert
+    """Get full evidence for alert investigation."""
     alert = db.query(Alert).filter(Alert.id == alert_id).first()
     if not alert:
         raise HTTPException(status_code=404, detail="Alert not found")
 
-    # Get login attempt
-    login_attempt = db.query(LoginAttempt).filter(
-        LoginAttempt.id == alert.login_attempt_id
-    ).first()
+    login_attempt = (
+        db.query(LoginAttempt)
+        .filter(LoginAttempt.id == alert.login_attempt_id)
+        .first()
+    )
 
-    # Get risk assessment (1:1 with login attempt)
     risk_assessment = None
     if login_attempt:
-        risk_assessment = db.query(RiskAssessment).filter(
-            RiskAssessment.login_attempt_id == login_attempt.id
-        ).first()
+        risk_assessment = (
+            db.query(RiskAssessment)
+            .filter(RiskAssessment.login_attempt_id == login_attempt.id)
+            .first()
+        )
 
-    # Get detection logs
     detection_logs = []
     if login_attempt:
-        logs = db.query(DetectionLog).filter(
-            DetectionLog.login_attempt_id == login_attempt.id
-        ).order_by(DetectionLog.created_at).all()
-        detection_logs = [DetectionLogSummary.model_validate(l) for l in logs]
+        logs = (
+            db.query(DetectionLog)
+            .filter(DetectionLog.login_attempt_id == login_attempt.id)
+            .order_by(DetectionLog.created_at)
+            .all()
+        )
+        detection_logs = [DetectionLogSummary.model_validate(_detection_log_to_dict(l)) for l in logs]
 
-    # Get timeline
-    timeline_events = db.query(AlertTimeline).filter(
-        AlertTimeline.alert_id == alert_id
-    ).order_by(AlertTimeline.created_at).all()
+    timeline_events = (
+        db.query(AlertTimeline)
+        .filter(AlertTimeline.alert_id == alert_id)
+        .order_by(AlertTimeline.created_at)
+        .all()
+    )
 
-    # Build login attempt summary
     login_summary = None
     if login_attempt:
-        user = db.query(User).filter(User.id == login_attempt.user_id).first() if login_attempt.user_id else None
+        user = (
+            db.query(User)
+            .filter(User.id == login_attempt.user_id)
+            .first()
+            if login_attempt.user_id else None
+        )
         login_summary = LoginAttemptSummary(
             id=str(login_attempt.id),
             event_id=str(login_attempt.event_id),
@@ -409,7 +420,6 @@ async def get_alert_evidence(
             detection_decision=login_attempt.detection_decision,
         )
 
-    # Build risk assessment summary
     risk_summary = None
     if risk_assessment:
         risk_summary = RiskAssessmentSummary(
@@ -426,104 +436,100 @@ async def get_alert_evidence(
         )
 
     return AlertEvidence(
-        alert=AlertItem.model_validate(alert),
+        alert=AlertItem.model_validate(_alert_to_dict(alert)),
         login_attempt=login_summary,
         risk_assessment=risk_summary,
         detection_logs=detection_logs,
-        timeline=[TimelineEvent.model_validate(e) for e in timeline_events],
+        timeline=[TimelineEvent.model_validate(_timeline_to_dict(e)) for e in timeline_events],
     )
 
 
 # =============================================================================
-# Alert Actions
+# Alert WRITE endpoints — SOC_ANALYST or SECURITY_MANAGER
 # =============================================================================
 
 @router.post("/alerts/{alert_id}/acknowledge")
 async def acknowledge_alert(
-    alert_id: str,
+    alert_id: UUID,
     request: AlertAcknowledgeRequest,
-    x_internal_token: Optional[str] = Header(None),
-    db=Depends(get_db),
+    ctx: AuthContext = Depends(require_roles("SOC_ANALYST", "SECURITY_MANAGER", "SECURITY_ADMIN")),
+    db: OrmSession = Depends(get_db),
 ) -> AlertItem:
-    """
-    Acknowledge an alert (UC-09).
-
-    Per S-QĐ-04: Chuyển alert từ open sang acknowledged.
-    """
+    """Acknowledge an open alert."""
     alert = db.query(Alert).filter(Alert.id == alert_id).first()
     if not alert:
         raise HTTPException(status_code=404, detail="Alert not found")
 
-    if alert.status != AlertStatusEnum.OPEN.value:
+    if alert.status != AlertStatusEnum.OPEN:
         raise HTTPException(
             status_code=400,
-            detail=f"Alert is {alert.status}, only open alerts can be acknowledged"
+            detail=f"Alert is {alert.status}, only open alerts can be acknowledged",
         )
 
-    # Update status
     old_status = alert.status
-    alert.status = AlertStatusEnum.ACKNOWLEDGED.value
+    alert.status = AlertStatusEnum.ACKNOWLEDGED
 
-    # Update notes if provided
     if request.notes:
         if alert.notes:
             alert.notes += f"\n---\n{request.notes}"
         else:
             alert.notes = request.notes
 
-    # Create timeline event
-    create_timeline_event(
+    actor_id = get_authenticated_user_id(ctx)
+    client_ip = _get_client_ip_from_request(ctx.request) if ctx.request else None
+
+    _create_timeline_event(
         db=db,
         alert_id=alert_id,
         event_type=TimelineEventType.ACKNOWLEDGED,
-        actor_id=get_actor_id(request),
+        actor_id=actor_id,
         actor_type="user",
         old_value=old_status,
-        new_value=AlertStatusEnum.ACKNOWLEDGED.value,
+        new_value=AlertStatusEnum.ACKNOWLEDGED,
         comment=request.notes,
+        ip_address=client_ip,
     )
 
     db.commit()
     db.refresh(alert)
-    return AlertItem.model_validate(alert)
+    return AlertItem.model_validate(_alert_to_dict(alert))
 
 
 @router.post("/alerts/{alert_id}/resolve")
 async def resolve_alert(
-    alert_id: str,
+    alert_id: UUID,
     request: AlertResolveRequest,
-    x_internal_token: Optional[str] = Header(None),
-    db=Depends(get_db),
+    ctx: AuthContext = Depends(require_roles("SOC_ANALYST", "SECURITY_MANAGER", "SECURITY_ADMIN")),
+    db: OrmSession = Depends(get_db),
 ) -> AlertItem:
-    """
-    Resolve or mark as false positive (UC-10, UC-12).
-
-    Per S-QĐ-04: Alert chỉ được chuyển sang resolved hoặc false_positive.
-    Per S-QĐ-05: Kết quả điều tra được ghi nhận.
-    """
+    """Resolve or mark an alert as false positive."""
     alert = db.query(Alert).filter(Alert.id == alert_id).first()
     if not alert:
         raise HTTPException(status_code=404, detail="Alert not found")
 
-    # "resolution" records the investigation outcome; "status" is derived
     if request.resolution == "false_positive":
-        new_status = AlertStatusEnum.FALSE_POSITIVE.value
+        new_status = AlertStatusEnum.FALSE_POSITIVE
     else:
-        new_status = AlertStatusEnum.RESOLVED.value
+        new_status = AlertStatusEnum.RESOLVED
 
-    # Validate state transition
-    valid_from = [AlertStatusEnum.OPEN.value, AlertStatusEnum.ACKNOWLEDGED.value]
+    valid_from = [AlertStatusEnum.OPEN, AlertStatusEnum.ACKNOWLEDGED]
     if alert.status not in valid_from:
         raise HTTPException(
             status_code=400,
-            detail=f"Cannot resolve alert from status: {alert.status}"
+            detail=f"Cannot resolve alert from status: {alert.status}",
         )
 
-    # Update alert
     old_status = alert.status
     alert.status = new_status
     alert.resolution = request.resolution
-    alert.resolved_by_id = get_actor_id(request)
+
+    # resolved_by_id references soc_analysts.id — only fill if the user is a SocAnalyst
+    analyst = db.query(SocAnalyst).filter(
+        SocAnalyst.user_id == get_authenticated_user_id(ctx)
+    ).first()
+    if analyst:
+        alert.resolved_by_id = analyst.id
+
     alert.resolved_at = datetime.utcnow()
 
     if request.notes:
@@ -532,97 +538,130 @@ async def resolve_alert(
         else:
             alert.notes = f"Resolution: {request.notes}"
 
-    # Create timeline events
-    create_timeline_event(
+    actor_id = get_authenticated_user_id(ctx)
+    client_ip = _get_client_ip_from_request(ctx.request) if ctx.request else None
+
+    _create_timeline_event(
         db=db,
         alert_id=alert_id,
         event_type=TimelineEventType.STATUS_CHANGED,
-        actor_id=get_actor_id(request),
+        actor_id=actor_id,
         actor_type="user",
         old_value=old_status,
         new_value=new_status,
         comment=request.notes,
+        ip_address=client_ip,
     )
 
-    create_timeline_event(
+    _create_timeline_event(
         db=db,
         alert_id=alert_id,
         event_type=(
             TimelineEventType.FALSE_POSITIVE
-            if new_status == AlertStatusEnum.FALSE_POSITIVE.value
+            if new_status == AlertStatusEnum.FALSE_POSITIVE
             else TimelineEventType.RESOLVED
         ),
-        actor_id=get_actor_id(request),
+        actor_id=actor_id,
         actor_type="user",
         old_value=None,
         new_value=request.resolution,
         comment=request.notes,
+        ip_address=client_ip,
     )
 
     db.commit()
     db.refresh(alert)
-    return AlertItem.model_validate(alert)
+    return AlertItem.model_validate(_alert_to_dict(alert))
 
 
 @router.post("/alerts/{alert_id}/assign")
 async def assign_alert(
-    alert_id: str,
+    alert_id: UUID,
     request: AlertAssignRequest,
-    x_internal_token: Optional[str] = Header(None),
-    db=Depends(get_db),
+    ctx: AuthContext = Depends(require_roles("SOC_ANALYST", "SECURITY_MANAGER", "SECURITY_ADMIN")),
+    db: OrmSession = Depends(get_db),
 ) -> AlertItem:
-    """
-    Assign alert to a SOC analyst.
-    """
+    """Assign an alert to a SOC analyst."""
     alert = db.query(Alert).filter(Alert.id == alert_id).first()
     if not alert:
         raise HTTPException(status_code=404, detail="Alert not found")
 
-    old_assignee = alert.assigned_to_id
-    alert.assigned_to_id = request.assigned_to_id
+    # Validate assigned_to_id references an existing active SocAnalyst
+    try:
+        assigned_uuid = UUID(request.assigned_to_id)
+    except ValueError:
+        raise HTTPException(
+            status_code=400,
+            detail="assigned_to_id must be a valid UUID",
+        )
 
-    # Create timeline event
-    event_type = TimelineEventType.ASSIGNED if old_assignee is None else TimelineEventType.STATUS_CHANGED
-    create_timeline_event(
+    analyst = db.query(SocAnalyst).filter(
+        SocAnalyst.id == assigned_uuid,
+        SocAnalyst.is_active == True,  # noqa: E712
+    ).first()
+    if not analyst:
+        raise HTTPException(
+            status_code=400,
+            detail="assigned_to_id must reference an existing active SOC analyst",
+        )
+
+    old_assignee = alert.assigned_to_id
+    # Store as string UUID to match SQLite UUID column (TEXT mode)
+    alert.assigned_to_id = assigned_uuid
+
+    event_type = (
+        TimelineEventType.ASSIGNED if old_assignee is None
+        else TimelineEventType.STATUS_CHANGED
+    )
+    actor_id = get_authenticated_user_id(ctx)
+    client_ip = _get_client_ip_from_request(ctx.request) if ctx.request else None
+
+    _create_timeline_event(
         db=db,
         alert_id=alert_id,
         event_type=event_type,
-        actor_id=get_actor_id(request),
+        actor_id=actor_id,
         actor_type="user",
         old_value=old_assignee,
         new_value=request.assigned_to_id,
         comment=request.notes,
+        ip_address=client_ip,
     )
 
     db.commit()
     db.refresh(alert)
-    return AlertItem.model_validate(alert)
+    return AlertItem.model_validate(_alert_to_dict(alert))
 
 
 @router.post("/alerts/{alert_id}/actions")
 async def request_security_action(
     alert_id: UUID,
     request: AlertActionRequest,
-    x_internal_token: Optional[str] = Header(None),
-    db=Depends(get_db),
+    ctx: AuthContext = Depends(require_roles("SOC_ANALYST", "SECURITY_MANAGER", "SECURITY_ADMIN")),
+    db: OrmSession = Depends(get_db),
 ) -> AlertActionResponse:
-    """
-    Request security action for an alert (UC-11).
+    """Apply a protective action (UC-DE-13 / UC-DE-11).
 
-    Per S-QĐ-06: Hành động bảo vệ được audit.
-    Available actions: REQUIRE_MFA, REVOKE_SESSIONS, LOCK_USER, FORCE_LOGOUT
+    NOTE: The documentation describes this as a SOC analyst "requesting"
+    a protective action. The current implementation directly applies it.
+    This semantic gap (request vs. apply) is a documented design question
+    not resolved in P0-04.
     """
     alert = db.query(Alert).filter(Alert.id == alert_id).first()
     if not alert:
         raise HTTPException(status_code=404, detail="Alert not found")
 
-    # Get associated login attempt
-    login_attempt = db.query(LoginAttempt).filter(
-        LoginAttempt.id == alert.login_attempt_id
-    ).first()
+    login_attempt = (
+        db.query(LoginAttempt)
+        .filter(LoginAttempt.id == alert.login_attempt_id)
+        .first()
+    )
 
     if not login_attempt or not login_attempt.user_id:
-        raise HTTPException(status_code=400, detail="No user associated with this alert")
+        raise HTTPException(
+            status_code=400,
+            detail="No user associated with this alert",
+        )
 
     user = db.query(User).filter(User.id == login_attempt.user_id).first()
     if not user:
@@ -632,11 +671,7 @@ async def request_security_action(
     details = {}
 
     def _revoke_user_sessions() -> int:
-        """Revoke every active session of THIS user only.
-
-        The ``user_id`` filter is load-bearing: without it a single SOC
-        action would revoke sessions for every account in core-db.
-        """
+        """Revoke every active session of THIS user only."""
         revoked = (
             db.query(Session)
             .filter(
@@ -650,13 +685,8 @@ async def request_security_action(
         return len(revoked)
 
     if action == SecurityAction.REQUIRE_MFA:
-        # Detection-triggered MFA is deliberately ONE-TIME: it must not
-        # touch admin_mfa_required, which is a persistent admin setting.
-        # Clearing it happens on the next successful MFA verification.
         already_applied = bool(user.detection_mfa_once)
         user.detection_mfa_once = True
-        # Also cut the live sessions: the flag only gates the next login,
-        # so an already-issued token would otherwise keep working.
         details = {
             "mfa_enabled": True,
             "one_time": True,
@@ -681,8 +711,6 @@ async def request_security_action(
         }
 
     elif action == SecurityAction.FORCE_LOGOUT:
-        # Same effect as REVOKE_SESSIONS; kept as a separate action so SOC
-        # can express intent (end sessions) without implying a lock.
         details = {
             "revoked_count": _revoke_user_sessions(),
             "reason": request.reason,
@@ -690,18 +718,22 @@ async def request_security_action(
 
     else:
         raise HTTPException(
-            status_code=400, detail=f"Unsupported action: {action.value}"
+            status_code=400,
+            detail=f"Unsupported action: {action.value}",
         )
 
-    # Create timeline event
-    create_timeline_event(
+    actor_id = get_authenticated_user_id(ctx)
+    client_ip = _get_client_ip_from_request(ctx.request) if ctx.request else None
+
+    _create_timeline_event(
         db=db,
         alert_id=alert_id,
         event_type=TimelineEventType.NOTE_ADDED,
-        actor_id=get_actor_id(request),
+        actor_id=actor_id,
         actor_type="user",
         new_value=action.value,
         comment=f"Security action applied: {action.value}. Reason: {request.reason}",
+        ip_address=client_ip,
     )
 
     db.commit()
@@ -714,57 +746,57 @@ async def request_security_action(
 
 
 # =============================================================================
-# Alert Timeline Endpoints
+# Alert Timeline READ endpoint — SOC_ANALYST or SECURITY_MANAGER
 # =============================================================================
 
 @router.get("/alerts/{alert_id}/timeline", response_model=List[TimelineEvent])
 async def get_alert_timeline(
-    alert_id: str,
-    x_internal_token: Optional[str] = Header(None),
-    db=Depends(get_db),
+    alert_id: UUID,
+    ctx: AuthContext = Depends(require_roles("SOC_ANALYST", "SECURITY_MANAGER", "SECURITY_ADMIN")),
+    db: OrmSession = Depends(get_db),
 ) -> List[TimelineEvent]:
-    """
-    Get timeline events for an alert.
-    """
+    """Get timeline events for an alert."""
     alert = db.query(Alert).filter(Alert.id == alert_id).first()
     if not alert:
         raise HTTPException(status_code=404, detail="Alert not found")
 
-    events = db.query(AlertTimeline).filter(
-        AlertTimeline.alert_id == alert_id
-    ).order_by(AlertTimeline.created_at.asc()).all()
-
-    return [TimelineEvent.model_validate(e) for e in events]
+    events = (
+        db.query(AlertTimeline)
+        .filter(AlertTimeline.alert_id == alert_id)
+        .order_by(AlertTimeline.created_at.asc())
+        .all()
+    )
+    return [TimelineEvent.model_validate(_timeline_to_dict(e)) for e in events]
 
 
 @router.post("/alerts/{alert_id}/timeline")
 async def add_timeline_event(
-    alert_id: str,
+    alert_id: UUID,
     request: TimelineEventCreate,
-    x_internal_token: Optional[str] = Header(None),
-    db=Depends(get_db),
+    ctx: AuthContext = Depends(require_roles("SOC_ANALYST", "SECURITY_MANAGER", "SECURITY_ADMIN")),
+    db: OrmSession = Depends(get_db),
 ) -> TimelineEvent:
-    """
-    Add a timeline event to an alert.
-    Used for notes, escalations, etc.
-    """
+    """Add a timeline event to an alert."""
     alert = db.query(Alert).filter(Alert.id == alert_id).first()
     if not alert:
         raise HTTPException(status_code=404, detail="Alert not found")
 
-    event = create_timeline_event(
+    actor_id = get_authenticated_user_id(ctx)
+    client_ip = _get_client_ip_from_request(ctx.request) if ctx.request else None
+
+    event = _create_timeline_event(
         db=db,
         alert_id=alert_id,
         event_type=request.event_type,
-        actor_id=get_actor_id(request),
+        actor_id=actor_id,
         actor_type="user",
         comment=request.comment,
+        ip_address=client_ip,
     )
 
     db.commit()
     db.refresh(event)
-    return TimelineEvent.model_validate(event)
+    return TimelineEvent.model_validate(_timeline_to_dict(event))
 
 
-# Update forward references
 AlertEvidence.model_rebuild()

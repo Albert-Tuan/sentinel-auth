@@ -42,6 +42,7 @@ from app.schemas import (
     RANGE_OPERATORS,
     RuleHit,
 )
+from app.authz import AuthContext, get_current_auth_context, require_roles
 
 logger = logging.getLogger(__name__)
 
@@ -980,8 +981,11 @@ async def detection_health(db=Depends(get_db)) -> InternalHealthResponse:
 # =============================================================================
 
 @policy_router.get("", response_model=list)
-async def list_policies(db=Depends(get_db)) -> list:
-    """List every policy, newest first."""
+async def list_policies(
+    ctx: AuthContext = Depends(require_roles("SECURITY_ADMIN", "SECURITY_MANAGER")),
+    db=Depends(get_db),
+) -> list:
+    """List every policy, newest first. SECURITY_ADMIN or SECURITY_MANAGER only."""
     policies = db.query(Policy).order_by(Policy.created_at.desc()).all()
     return [
         {
@@ -1001,9 +1005,10 @@ async def list_policies(db=Depends(get_db)) -> list:
 @policy_router.post("/{policy_id}/activate")
 async def activate_policy(
     policy_id: UUID,
+    ctx: AuthContext = Depends(require_roles("SECURITY_ADMIN")),
     db=Depends(get_db),
 ) -> dict:
-    """Activate a policy, deactivating the previously active one."""
+    """Activate a policy. SECURITY_ADMIN only."""
     policy = db.query(Policy).filter(Policy.id == policy_id).first()
     if policy is None:
         raise HTTPException(status_code=http_status.HTTP_404_NOT_FOUND, detail="Policy not found")

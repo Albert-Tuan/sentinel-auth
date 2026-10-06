@@ -75,6 +75,8 @@ def client(db):
     from app import devices as devices_mod
     from app import internal_actions as internal_actions_mod
 
+    from app import authz as authz_mod
+
     override = _override_get_db(db)
     # Only the modules that actually import get_db need an override entry
     override_targets = [
@@ -83,6 +85,7 @@ def client(db):
         alerts_mod,
         devices_mod,
         internal_actions_mod,
+        authz_mod,
     ]
     app.dependency_overrides = {
         module.get_db: override
