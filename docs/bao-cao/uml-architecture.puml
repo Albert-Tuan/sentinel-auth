@@ -1,0 +1,107 @@
+@startuml
+' Kiến trúc tổng thể của hệ thống cảnh báo đăng nhập bất thường.
+' Bám theo cấu trúc thực tế của mã nguồn: một API FastAPI, một Detection
+' Engine chạy nội bộ, một ML Service riêng, ba cơ sở dữ liệu PostgreSQL.
+skinparam shadowing false
+skinparam componentStyle rectangle
+skinparam defaultFontName "Times New Roman"
+skinparam rectangle {
+  BorderColor #333333
+  FontColor #000000
+}
+skinparam component {
+  BorderColor #333333
+  FontColor #000000
+}
+skinparam database {
+  BorderColor #333333
+  FontColor #000000
+}
+skinparam arrow {
+  FontColor #333333
+}
+skinparam linetype ortho
+
+title Kiến trúc tổng thể của hệ thống cảnh báo đăng nhập bất thường
+
+actor "Người dùng" as User
+actor "SOC Analyst" as Soc
+actor "Security Admin" as Adm
+actor "Security Manager" as Mgr
+
+rectangle "Lớp trình bày" {
+  component "Giao diện web\n(thiết kế, chưa triển khai)" as UI #F5F5F5
+}
+
+rectangle "Lớp ứng dụng - Xác thực và dịch vụ" {
+  component "FastAPI\n28 điểm cuối" as API
+  component "Xác thực\n(đối chiếu mật khẩu)" as Auth
+  component "Quản lý MFA\n(TOTP, thiết bị tin cậy)" as Mfa
+  component "Quản lý phiên\n(JWT + làm mới)" as Sess
+  component "Phân quyền\n(RBAC theo vai trò)" as Rbac
+  component "Nhật ký kiểm toán" as Audit
+}
+
+rectangle "Lớp phát hiện" {
+  component "Hộp thư ra giao dịch\n(Outbox)" as Outbox
+  component "Bộ đọc sự kiện\n(Poller)" as Poller
+  component "Máy chấm điểm quy tắc\n(Rule Engine)" as Rule
+  component "Điểm kiểm duyệt\nrủi ro cổng đăng nhập" as Gate
+}
+
+rectangle "Lớp suy luận" {
+  component "Dịch vụ máy học\n(suy luận ngoài tiến trình)" as ML
+  database "ml-service-db" as MlDb
+}
+
+rectangle "Lớp dữ liệu" {
+  database "core-db" as CoreDb
+  database "detection-db" as DetDb
+}
+
+User --> UI
+UI --> API
+Soc --> UI
+Adm --> UI
+Mgr --> UI
+
+API --> Auth
+API --> Mfa
+API --> Sess
+API --> Gate
+API --> Audit
+
+Auth --> CoreDb
+Mfa --> CoreDb
+Sess --> CoreDb
+Rbac --> CoreDb
+Audit --> CoreDb
+
+Auth --> Outbox
+Outbox --> CoreDb
+
+Poller --> Outbox : đọc sự kiện chưa xử lý
+Poller --> Rule
+Rule --> DetDb
+Rule --> ML : sáu đặc trưng
+ML --> MlDb
+Gate --> ML : hỏi điểm bất thường
+Gate --> CoreDb : ghi kết quả kiểm duyệt
+
+Rule --> DetDb : ghi risk_assessments
+API --> DetDb : đọc và cập nhật cảnh báo
+
+note right of Gate
+  Điểm kiểm duyệt nằm trước khi cấp token.
+  Khi dịch vụ máy học không phản hồi
+  trong 500 ms thì quy trình chuyển sang
+  chỉ dùng điểm quy tắc và ghi nhật ký.
+end note
+
+note bottom of DetDb
+  Ba cơ sở dữ liệu tách biệt theo phạm vi nghiệp vụ.
+  Khóa chính, khóa ngoại chỉ ràng buộc trong một cơ sở dữ liệu;
+  quan hệ xuyên cơ sở dữ liệu được kiểm ở tầng ứng dụng.
+end note
+
+@enduml

@@ -1,0 +1,218 @@
+@startuml ERD_Chen_v3.3_core
+
+' =============================================================================
+' ERD v3.3 - Chen's Notation (Peter Chen) - CORE-DB
+' Sentinel Auth - Core Database
+' =============================================================================
+
+title ERD v3.3 - Chen's Notation - <b>CORE-DB</b>
+
+skinparam dpi 120
+skinparam shadowing false
+
+' ------------------------------------------------------------------------------
+' CORE-DB ENTITIES
+' ------------------------------------------------------------------------------
+
+package "CORE-DB (core-app)" {
+
+    entity "USER" as user {
+        * id : UUID <<PK>>
+        --
+        username : TEXT <<UK>>
+        password_hash : TEXT
+        email : TEXT <<UK>>
+        full_name : TEXT
+        status : TEXT
+        admin_mfa_required : BOOLEAN
+        detection_mfa_once : BOOLEAN
+        last_login_at : TIMESTAMPTZ
+        failed_login_count : INTEGER
+        locked_at : TIMESTAMPTZ
+        created_at : TIMESTAMPTZ
+        updated_at : TIMESTAMPTZ
+    }
+
+    entity "ROLE" as role {
+        * id : TEXT <<PK>>
+        --
+        name : TEXT
+        name_vi : TEXT
+        description : TEXT
+        created_at : TIMESTAMPTZ
+    }
+
+    entity "USER_ROLE" as user_role {
+        * id : UUID <<PK>>
+        --
+        * user_id : UUID <<FK>>
+        * role_id : TEXT <<FK>>
+        assigned_at : TIMESTAMPTZ
+        assigned_by : UUID <<FK>>
+    }
+
+    entity "IP_ADDRESS" as ip_address {
+        * id : UUID <<PK>>
+        --
+        * ip_address : INET <<UK>>
+        country_code : TEXT
+        country_name : TEXT
+        is_proxy : BOOLEAN
+        is_vpn : BOOLEAN
+        is_tor : BOOLEAN
+        first_seen_at : TIMESTAMPTZ
+        last_seen_at : TIMESTAMPTZ
+    }
+
+    entity "SESSION" as session {
+        * id : UUID <<PK>>
+        --
+        * user_id : UUID <<FK>>
+        access_token_hash : TEXT
+        refresh_token_hash : TEXT
+        refresh_token_family : UUID
+        token_jti : TEXT <<UK>>
+        expires_at : TIMESTAMPTZ
+        last_activity_at : TIMESTAMPTZ
+        revoked_at : TIMESTAMPTZ
+        ip_address_id : UUID <<FK>>
+        user_agent : TEXT
+        created_at : TIMESTAMPTZ
+        updated_at : TIMESTAMPTZ
+    }
+
+    entity "MFA_TRANSACTION" as mfa_tx {
+        * id : UUID <<PK>>
+        --
+        * user_id : UUID <<FK>>
+        mfa_type : TEXT
+        status : TEXT
+        bound_ip : INET
+        notification_id : UUID <<FK>>
+        fail_count : INTEGER
+        expires_at : TIMESTAMPTZ
+        created_at : TIMESTAMPTZ
+        updated_at : TIMESTAMPTZ
+    }
+
+    entity "MFA_NOTIFICATION" as mfa_notif {
+        * id : UUID <<PK>>
+        --
+        * mfa_transaction_id : UUID <<FK>>
+        channel : TEXT
+        recipient : TEXT
+        mfa_code_hash : TEXT
+        sent_at : TIMESTAMPTZ
+        delivered_at : TIMESTAMPTZ
+        failed_at : TIMESTAMPTZ
+        failure_reason : TEXT
+        expires_at : TIMESTAMPTZ
+        verified_at : TIMESTAMPTZ
+        created_at : TIMESTAMPTZ
+    }
+
+    entity "AUDIT_LOG" as audit_log {
+        * id : UUID <<PK>>
+        --
+        request_id : UUID
+        actor_id : UUID <<FK>>
+        actor_type : TEXT
+        action : TEXT
+        resource : TEXT
+        resource_id : UUID
+        before_state : JSONB
+        after_state : JSONB
+        change_reason : TEXT
+        ip_address : INET
+        user_agent : TEXT
+        created_at : TIMESTAMPTZ
+    }
+
+    entity "TRUSTED_DEVICE" as trusted_device {
+        * id : UUID <<PK>>
+        --
+        * user_id : UUID <<FK>>
+        * device_fingerprint : TEXT
+        device_name : TEXT
+        last_ip : INET
+        last_user_agent : TEXT
+        last_used_at : TIMESTAMPTZ
+        expires_at : TIMESTAMPTZ
+        created_at : TIMESTAMPTZ
+    }
+
+    entity "SYSTEM_SETTING" as system_setting {
+        * key : TEXT <<PK>>
+        --
+        value : TEXT
+        value_type : TEXT
+        description : TEXT
+        category : TEXT
+        updated_by : UUID <<FK>>
+        updated_at : TIMESTAMPTZ
+    }
+
+    entity "OUTBOX_EVENT" as outbox_event {
+        * id : UUID <<PK>>
+        --
+        aggregate_type : TEXT
+        aggregate_id : UUID
+        event_type : TEXT
+        version : INTEGER
+        payload : JSONB
+        headers : JSONB
+        status : TEXT
+        retry_count : INTEGER
+        max_retries : INTEGER
+        last_error : TEXT
+        created_at : TIMESTAMPTZ
+        published_at : TIMESTAMPTZ
+    }
+
+    entity "USER_NOTIFICATION" as user_notification {
+        * id : UUID <<PK>>
+        --
+        * user_id : UUID <<FK>>
+        type : TEXT
+        title : TEXT
+        body : TEXT
+        link : TEXT
+        priority : TEXT
+        read : BOOLEAN
+        read_at : TIMESTAMPTZ
+        expires_at : TIMESTAMPTZ
+        created_at : TIMESTAMPTZ
+    }
+
+    entity "RATE_LIMIT" as rate_limit {
+        * ip_address : INET <<PK>>
+        * action : TEXT <<PK>>
+        --
+        count : INTEGER
+        max_count : INTEGER
+        window_start : TIMESTAMPTZ
+    }
+
+}
+
+' ------------------------------------------------------------------------------
+' CORE-DB RELATIONSHIPS (Chen Notation with cardinality)
+' ------------------------------------------------------------------------------
+
+user ||--o{ user_role : "HAS (1,N)"
+role ||--o{ user_role : "ASSIGNED_TO (1,N)"
+user_role }o--|| user : "assigned_by (0,1)"
+
+user ||--o{ session : "CREATES (0,N)"
+session }o--|| ip_address : "FROM (0,1)"
+
+user ||--o{ mfa_tx : "INITIATES (0,N)"
+mfa_tx ||--|| mfa_notif : "CREATES (1,1)"
+
+user ||--o{ audit_log : "ACTIONS_BY (0,N)"
+user ||--o{ trusted_device : "REGISTERS (0,N)"
+user ||--o{ user_notification : "RECEIVES (0,N)"
+user ||--o{ system_setting : "UPDATES (0,N)"
+user ||--o{ outbox_event : "EMITS (0,N)"
+
+@enduml

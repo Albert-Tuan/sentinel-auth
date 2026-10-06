@@ -64,16 +64,19 @@ CREATE TABLE IF NOT EXISTS model_versions (
     deployed_at     TIMESTAMPTZ,
     archived_at     TIMESTAMPTZ,
     created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
 
-    CONSTRAINT uq_model_active_production
-        CHECK (
-            NOT (is_production AND EXISTS (
-                SELECT 1 FROM model_versions mv2
-                WHERE mv2.is_production = TRUE AND mv2.id != id AND mv2.status = 'active'
-            ))
-        )
+    -- NOTE: Single-active production model enforcement is handled at the
+    -- application level. The partial unique index below provides a DB-level
+    -- safety net: only one row can have (is_production = TRUE, status = 'active')
+    -- simultaneously.
 );
+
+-- Partial unique index: only ONE model can be simultaneously
+-- is_production = TRUE AND status = 'active'.
+CREATE UNIQUE INDEX idx_model_versions_single_active_production
+    ON model_versions ((1))
+    WHERE is_production = TRUE AND status = 'active';
 
 CREATE TRIGGER trg_model_versions_updated_at
     BEFORE UPDATE ON model_versions

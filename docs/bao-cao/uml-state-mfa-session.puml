@@ -1,0 +1,104 @@
+@startuml
+' Sơ đồ trạng thái - MFA Transaction và Session
+skinparam backgroundColor #FFFFFF
+skinparam shadowing false
+skinparam defaultFontName Sans
+skinparam ArrowColor #343A40
+skinparam ArrowThickness 1.1
+skinparam titleFontSize 15
+
+title Sơ đồ trạng thái - Giao dịch MFA (MFA Transaction)
+
+[*] --> pending : Tạo challenge\n(expires_at = now + 5 phút)
+
+state pending {
+  pending : status = 'pending'
+  pending : fail_count = 0
+}
+pending --> completed : OTP đúng\nhoặc Push được duyệt
+pending --> failed : OTP sai, lần thứ >= 3
+pending --> expired : Quá expires_at
+
+state completed {
+  completed : status = 'completed'
+  completed : verified_at được ghi
+  completed : Nếu one_time →\nxoá detection_mfa_once
+}
+state failed {
+  failed : status = 'failed'
+  failed : fail_count >= 3
+}
+state expired {
+  expired : status = 'expired'
+  expired : Không còn tác dụng
+}
+
+completed --> [*]
+failed --> [*] : Chặn tạo challenge mới
+expired --> [*]
+
+note right of pending
+  **Điều kiện phát sinh challenge:**
+  1. `admin_mfa_required = true` (bền vững)
+  2. `detection_mfa_once = true` (một lần, do risk gate đặt)
+  3. Cả hai dùng chung cơ chế
+end note
+
+note bottom of failed
+  `fail_count` tăng mỗi lần sai.
+  Từ lần thứ 3 trở đi, transaction
+  chuyển `failed` và không thử lại được.
+end note
+
+@enduml
+
+@startuml
+skinparam backgroundColor #FFFFFF
+skinparam shadowing false
+skinparam defaultFontName Sans
+skinparam ArrowColor #343A40
+skinparam ArrowThickness 1.1
+skinparam titleFontSize 15
+
+title Sơ đồ trạng thái - Phiên đăng nhập (Session)
+
+[*] --> active : INSERT sessions\n(token_jti, hash, expires_at)
+
+state active {
+  active : revoked_at IS NULL
+  active : access_token còn hiệu lực
+}
+active --> active : Refresh token\n(xoay token_jti, đổi hash)
+active --> active : Cập nhật last_activity_at
+active --> revoked : Người dùng đăng xuất\nDELETE /sessions/{id}
+active --> expired : Quá expires_at
+active --> revoked : Hành động bảo vệ\n(REVOKE_SESSIONS, REQUIRE_MFA,\nLOCK_USER, FORCE_LOGOUT)
+
+state revoked {
+  revoked : revoked_at = now()
+  revoked : Token không dùng lại được
+}
+state expired {
+  expired : Hết hạn tự nhiên
+}
+
+revoked --> [*]
+expired --> [*]
+
+note right of revoked
+  **Điểm then chốt của thiết kế:**
+  Cột `revoked_at` là điểm kiểm soát
+  duy nhất. Mọi cơ chế thu hồi — dù do
+  người dùng, quản trị viên, hay Detection
+  Engine yêu cầu — đều dẫn về cùng một
+  cập nhật: ghi `revoked_at`.
+end note
+
+note bottom of active
+  Truy vấn xác thực luôn kèm điều kiện
+  `revoked_at IS NULL`, nên một phiên bị
+  thu hồi mất hiệu lực tức thì ở lần
+  gọi kế tiếp, không cần chờ hết hạn.
+end note
+
+@enduml

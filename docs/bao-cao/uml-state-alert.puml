@@ -1,0 +1,65 @@
+@startuml
+' Sơ đồ trạng thái - Alert, MFA Transaction, Session
+skinparam backgroundColor #FFFFFF
+skinparam shadowing false
+skinparam defaultFontName Sans
+skinparam ArrowColor #343A40
+skinparam ArrowThickness 1.1
+skinparam titleFontSize 15
+
+title Sơ đồ trạng thái - Vòng đời cảnh báo SOC (Alert)
+
+[*] --> open : Detection tạo cảnh báo\n(risk_level >= high)
+
+state open {
+  open : status = 'open'
+  open : Chưa có người nhận
+}
+open --> acknowledged : POST /alerts/{id}/acknowledge\n(actor ghi vào timeline)
+open --> resolved : POST /alerts/{id}/resolve\n(có resolution bắt buộc)
+open --> false_positive : Analyst kết luận báo nhầm
+
+state acknowledged {
+  acknowledged : status = 'acknowledged'
+  acknowledged : assigned_to_id = analyst hiện tại
+}
+acknowledged --> resolved : Kết luận xác định\n(ghi resolved_by_id, resolved_at)
+acknowledged --> false_positive : Báo nhầm
+acknowledged --> acknowledged : Ghi chú / chuyển cấp\n(event_type = escalated)
+
+state resolved {
+  resolved : status = 'resolved'
+  resolved : resolved_by_id, resolved_at\nresolution = kết luận
+}
+state false_positive {
+  false_positive : status = 'false_positive'
+  false_positive : Dùng để hiệu chỉnh\nngưỡng chấm điểm
+}
+
+resolved --> [*]
+false_positive --> [*]
+
+note right of open
+  **Điều kiện tạo cảnh báo:**
+  `risk_level` ∈ {high, critical}
+  theo ma trận quyết định.
+
+  Mức `high` cũng tạo cảnh báo dù
+  người dùng đã qua MFA được.
+end note
+
+note right of acknowledged
+  **Chiến lược gán việc:**
+  Round-robin các analyst
+  đang `is_active = true`,
+  tôn trọng `max_alerts`.
+end note
+
+note bottom of false_positive
+  Mỗi lần chuyển trạng thái đều sinh
+  một dòng trong `alert_timeline`
+  với `old_value` / `new_value`
+  và `actor_id`.
+end note
+
+@enduml

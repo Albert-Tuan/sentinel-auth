@@ -1,0 +1,155 @@
+@startuml
+' Sơ đồ hoạt động - Detection + Risk Decision
+skinparam backgroundColor #FFFFFF
+skinparam shadowing false
+skinparam defaultFontName Sans
+skinparam ArrowColor #343A40
+skinparam ArrowThickness 1.1
+skinparam titleFontSize 15
+skinparam activity {
+  BackgroundColor #F8F9FA
+  BorderColor #495057
+  DiamondBackgroundColor #FFF2CC
+  DiamondBorderColor #D6A656
+  FontSize 10
+}
+
+title Sơ đồ hoạt động - Phát hiện bất thường và quyết định rủi ro
+
+start
+:POST /api/v1/internal/login-events\n(X-Internal-Secret);
+:Kiểm tra X-Internal-Secret;
+if (Sai hoặc thiếu khoá?) then (sai)
+  :Trả 401 Unauthorized;
+  stop
+else (đúng)
+endif
+
+:Tra cứu login_attempts\nWHERE event_id = ?;
+if (Đã tồn tại?) then (có)
+  :Trả 202 với login_attempt_id\ncũ và trạng thái hiện tại\n(idempotent theo event_id);
+  stop
+else (không)
+endif
+
+:INSERT login_attempts\n(status = 'pending');
+:Ghi detection_logs\n(stage = rule_evaluation,\nstage_detail = supplied_features)\nnếu Core App gửi kèm features;
+
+partition "Chọn chính sách" {
+  :Tra cứu policies\nWHERE is_active = TRUE;
+  if (Có chính sách active?) then (không)
+    :Ghi detection_logs\n(stage = scoring,\nreason = 'no_policy');
+    :Đặt risk_level = 'low',\ndecision = 'allow',\nstatus = 'processed';
+    :Commit;
+    :Trả 202;
+    stop
+  else (có)
+    :Giữ tham chiếu policy_id;
+  endif
+}
+
+partition "Kiểm tra cấu hình" {
+  :resolve_config(policy.config);
+  if (weights hoặc thresholds sai?) then (sai)
+    :Ghi detection_logs\n(stage = scoring,\nreason = 'invalid_thresholds');
+    :Dùng giá trị mặc định\nrule=0.4, ml=0.6\nlow=0.25, medium=0.50,\nhigh=0.75;
+  else (đúng)
+  endif
+}
+
+partition "Bước 1 - Chấm quy tắc" {
+  :build_features(attempt)\ntruy vấn lịch sử login;
+  :evaluate_rules(policy.rules, features);
+  note right
+    **6 đặc trưng:**
+    hour_of_day, fail_count_24h,
+    ip_change_rate_7d, new_device,
+    average_login_interval_seconds,
+    deviation_score
+  end note
+  if (Có quy tắc cấu hình sai?) then (có)
+    :Bỏ qua quy tắc sai,\nloại khỏi mẫu số;
+    :Ghi detection_logs\nreason = 'unknown_feature'\nhoặc 'invalid_rule';
+  else (không)
+  endif
+  :rule_score = min(1,0,\nΣ(score × weight) / Σ weight\ncủa các quy tắc ĐÃ BẬT);
+  :Ghi detection_logs cho từng rule chạy\n(stage = rule_evaluation,\nscore_contribution đã chuẩn hoá);
+}
+
+partition "Bước 2 - Gọi ML Service" {
+  :POST /api/v1/internal/ml/score\n(timeout 5 giây,\n6 đặc trưng);
+  if (Gọi thành công?) then (có)
+    :ml_score = normalized_anomaly_score\nml_status = 'success';
+  else (không)
+    :ml_score = NULL\nml_status = 'unavailable'\n(timeout) hoặc 'error' (4xx/5xx,\npayload sai);
+    :Ghi detection_logs\n(stage = ml_call,\nreason = ml_timeout | ml_service_http_*\n| ml_service_bad_payload);
+  endif
+}
+
+partition "Bước 3 - Gộp điểm" {
+  if (ml_status = 'success'?) then (có)
+    :combined_score =\nw_rule × rule_score\n+ w_ml × ml_score;
+  else (không)
+    :combined_score = rule_score\n(SUY GIẢM ÊM, không chia lại trọng số);
+  endif
+}
+
+partition "Bước 4 - Xếp mức rủi ro" {
+  if (combined < thresholds.low?) then (thấp)
+    #LightGreen :risk_level = 'low'\ndecision = 'allow';
+  elseif (combined < thresholds.medium?) then (trung bình)
+    #LightGreen :risk_level = 'medium'\ndecision = 'allow';
+  elseif (combined < thresholds.high?) then (cao)
+    #FFEB99 :risk_level = 'high'\ndecision = 'challenge';
+  else (nghiêm trọng)
+    #FFB3B3 :risk_level = 'critical'\ndecision = 'block';
+  endif
+}
+
+:INSERT risk_assessments\n(rule_score, ml_score, combined_score,\nml_status, rule_hits, features,\nrisk_level, decision);
+
+partition "Bước 5 - Tạo cảnh báo" {
+  if (risk_level ∈\n{high, critical}?) then (có)
+    :INSERT alerts\n(status = 'open',\ndetection_reason,\ndetection_scores JSONB);
+    :Đặt login_attempts.primary_alert_id;
+    :Ghi detection_logs\n(stage = action_sent,\nstage_detail = 'alert_created');
+  else (không)
+    :Ghi detection_logs\n(stage = action_sent,\nstage_detail = 'no_alert');
+  endif
+}
+
+:Đặt status = 'processed',\nrisk_level, detection_decision;
+:COMMIT - đã ghi xong\nđánh giá và cảnh báo;
+
+partition "Bước 6 - Gửi hành động về Core App" {
+  if (risk_level ∈\n{high, critical}\nVÀ có user_id?) then (có)
+    :POST /api/v1/internal/actions\n(timeout 3 giây,\nidempotency_key =\ndetection:{attempt_id}:{action});
+    if (Core App phản hồi < 400?) then (thành công)
+      :Ghi log đã thực thi;
+    else (lỗi)
+      :Ghi log cảnh báo,\nnuốt lỗi, trả False\n(không rollback đánh giá đã ghi);
+    endif
+  else (không)
+    :Không gọi - không có hành động;
+  endif
+}
+
+:Trả 202 Accepted\n(khoá event, trạng thái xử lý);
+
+note right
+  **Điểm kiểm chứng quy trình:**
+  1. `login_attempts.status` = `processed` và có
+     đúng một `risk_assessments` tương ứng
+  2. `detection_logs` có 4 nhóm stage:
+     rule_evaluation, ml_call, scoring, action_sent
+  3. Cộng các `score_contribution` cho ra đúng `rule_score`
+  4. Có hàng `alerts` khi risk_level thuộc
+     high hoặc critical
+  5. Gửi lại cùng `event_id` không tạo dòng trùng
+  6. Nếu `process_attempt` ném lỗi: status = `failed`,
+     chờ `rescore_failed_attempts()` chấm lại
+end note
+
+stop
+
+@enduml

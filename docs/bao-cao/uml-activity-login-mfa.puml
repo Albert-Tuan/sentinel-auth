@@ -1,0 +1,113 @@
+@startuml
+' Sơ đồ hoạt động - Đăng nhập + MFA
+skinparam backgroundColor #FFFFFF
+skinparam shadowing false
+skinparam defaultFontName Sans
+skinparam ArrowColor #343A40
+skinparam ArrowThickness 1.1
+skinparam titleFontSize 15
+skinparam activity {
+  BackgroundColor #F8F9FA
+  BorderColor #495057
+  DiamondBackgroundColor #FFF2CC
+  DiamondBorderColor #D6A656
+  FontSize 10
+}
+
+title Sơ đồ hoạt động - Quy trình đăng nhập và xác thực MFA
+
+start
+:Tiếp nhận POST /api/v1/auth/login\n(username, password, IP, User-Agent);
+
+partition "Kiểm soát tần suất" {
+  :Tra cứu rate_limits\n(IP, action='login', window 60s);
+  if (Đã vượt max_count = 5?) then (có)
+    :Ghi login_attempt\noutcome = 'rate_limited';
+    :Trả 429 Too Many Requests;
+    stop
+  else (không)
+    :Tăng bộ đếm\nhoặc tạo bản ghi mới;
+  endif
+}
+
+partition "Xác thực thông tin đăng nhập" {
+  :Tra cứu users\nWHERE username = ?;
+  if (Tìm thấy tài khoản?) then (không)
+    :Ghi login_attempt\noutcome = 'failure'\n(user_id = NULL);
+    :Trả 401 - thông báo chung\n"Không đúng định danh";
+    stop
+  else (có)
+    if (Mật khẩu khớp\n(Argon2id)?) then (sai)
+      :Tăng users.failed_login_count;
+      :Ghi login_attempt\noutcome = 'failure';
+      :Trả 401;
+      stop
+    else (đúng)
+      if (users.status = 'locked'?) then (có)
+        :Ghi login_attempt\noutcome = 'locked';
+        :Trả 423 Account Locked;
+        stop
+      else (không)
+        :Đặt lại\nfailed_login_count = 0;
+      endif
+    endif
+  endif
+}
+
+partition "Cổng kiểm duyệt rủi ro" {
+  :Đặt cờ detection_mfa_once\nchưa cần, chờ kết quả;
+  :Gọi POST /internal/pre-token-check\n(timeout 3 giây);
+
+  note right
+    **Quyết định fail-open:**
+    timeout, lỗi mạng, HTTP ≥ 400,
+    body không phải JSON, hoặc
+    `degraded = true` → coi như
+    KHÔNG có rủi ro, cho qua.
+  end note
+
+  if (Cổng trả về\nrisk_level\n∈ {high, critical}?) then (có)
+    :Đặt users.detection_mfa_once = TRUE;
+    if (Cổng có trả kết quả?) then (rủi ro cao)
+      :Bước tiếp: phát challenge MFA\n(giữ token, KHÔNG tạo session);
+    else (fail-open)
+      :Bỏ qua, tiếp tục cấp token;
+    endif
+  else (không)
+    :Không gate, tiếp tục;
+  endif
+}
+
+partition "Quyết định có cần MFA" {
+  if (admin_mfa_required\nHOẶC detection_mfa_once?) then (có)
+    :INSERT mfa_transactions\n(status=pending, mfa_type,\nexpires_at = now + 5 phút,\nbound_ip = hash(IP));
+    :Sinh OTP 6 chữ số\n(dùng secrets.randbelow);
+    :INSERT mfa_notifications\n(channel=email,\nmfa_code_hash = Argon2id);
+    :Ghi login_attempt\noutcome = 'mfa_required';
+    :Trả 200 {mfa_required: true,\nsession_id = mfa_txn.id};
+    stop
+  else (không)
+    :Tiến hành tạo phiên;
+  endif
+}
+
+partition "Tạo phiên và cấp token" {
+  :Sinh access_token và refresh_token\n(secrets.token_urlsafe(32));
+  :INSERT sessions\n(token_jti, hash SHA-256,\nexpires_at = now + 1 giờ,\nip_address_id, user_agent);
+  :Cập nhật users.last_login_at;
+  :Ghi login_attempt\noutcome = 'success';
+  :Trả 200 (access_token, refresh_token, session_id);
+}
+
+note right
+  **Điểm kiểm chứng:**
+  1. `login_attempts` có đúng một dòng cho mỗi lần gọi endpoint
+  2. Khi cổng trả high hoặc critical:
+     KHÔNG có dòng trong `sessions`
+  3. Cổng lỗi: `sessions` vẫn được tạo (fail-open đúng thiết kế)
+  4. `sessions.token_jti` khớp `jti` nếu sau này chuyển sang JWT
+end note
+
+stop
+
+@enduml

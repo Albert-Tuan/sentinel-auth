@@ -84,17 +84,21 @@ CREATE TABLE IF NOT EXISTS policies (
     is_active           BOOLEAN NOT NULL DEFAULT FALSE,
     created_by          UUID,  -- Reference to users.id in core-db
     created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     activated_at        TIMESTAMPTZ,
-    deactivated_at     TIMESTAMPTZ,
+    deactivated_at     TIMESTAMPTZ
 
-    CONSTRAINT chk_single_active_policy
-        CHECK (
-            NOT (is_active AND EXISTS (
-                SELECT 1 FROM policies p2
-                WHERE p2.is_active = TRUE AND p2.id != id
-            ))
-        )
+    -- NOTE: Single-active policy enforcement is handled at the application level
+    -- (see activate_policy() in app/detection.py). PostgreSQL partial unique
+    -- index below provides a DB-level safety net against concurrent activation.
 );
+
+-- Partial unique index: only ONE policy can have is_active = TRUE at any time.
+-- This is safe for concurrent inserts/updates because PostgreSQL will serialize
+-- the competing transactions and reject all but the first to commit.
+CREATE UNIQUE INDEX idx_policies_single_active
+    ON policies ((1))
+    WHERE is_active = TRUE;
 
 CREATE TRIGGER trg_policies_updated_at
     BEFORE UPDATE ON policies

@@ -1,0 +1,162 @@
+@startuml ERD_Chen_v3.3_detection
+
+' =============================================================================
+' ERD v3.3 - Chen's Notation - DETECTION-DB
+' Sentinel Auth - Detection Engine Database
+' =============================================================================
+
+title ERD v3.3 - Chen's Notation - <b>DETECTION-DB</b>
+
+skinparam dpi 120
+skinparam shadowing false
+
+' ------------------------------------------------------------------------------
+' DETECTION-DB ENTITIES
+' ------------------------------------------------------------------------------
+
+package "DETECTION-DB (detection-engine)" {
+
+    entity "POLICY" as policy {
+        * id : UUID <<PK>>
+        --
+        * version : TEXT <<UK>>
+        name : TEXT
+        description : TEXT
+        rules : JSONB
+        config : JSONB
+        is_active : BOOLEAN
+        created_by : UUID <<FK>>
+        created_at : TIMESTAMPTZ
+        activated_at : TIMESTAMPTZ
+        deactivated_at : TIMESTAMPTZ
+    }
+
+    entity "LOGIN_ATTEMPT" as login_attempt {
+        * id : UUID <<PK>>
+        --
+        * event_id : UUID <<UK>>
+        user_id : UUID <<FK>>
+        username_attempted : TEXT
+        outcome : TEXT
+        mfa_used : BOOLEAN
+        ip_address : INET
+        user_agent : TEXT
+        timestamp : TIMESTAMPTZ
+        status : TEXT
+        policy_id : UUID <<FK>>
+        request_id : UUID
+        primary_alert_id : UUID <<FK>>
+        risk_level : TEXT
+        detection_decision : TEXT
+        created_at : TIMESTAMPTZ
+        updated_at : TIMESTAMPTZ
+    }
+
+    entity "RISK_ASSESSMENT" as risk_assessment {
+        * id : UUID <<PK>>
+        --
+        * login_attempt_id : UUID <<FK,UK>>
+        policy_id : UUID <<FK>>
+        rule_score : NUMERIC
+        ml_score : NUMERIC
+        combined_score : NUMERIC
+        ml_status : TEXT
+        ml_model_version : TEXT
+        rule_hits : JSONB
+        ml_reason_codes : JSONB
+        ml_features_used : JSONB
+        risk_level : TEXT
+        decision : TEXT
+        created_at : TIMESTAMPTZ
+    }
+
+    entity "DETECTION_LOG" as detection_log {
+        * id : UUID <<PK>>
+        --
+        login_attempt_id : UUID <<FK>>
+        request_id : UUID
+        stage : TEXT
+        stage_detail : TEXT
+        rule_id : UUID
+        rule_name : TEXT
+        triggered : BOOLEAN
+        score_contribution : NUMERIC
+        decision : TEXT
+        reason : TEXT
+        details : JSONB
+        created_at : TIMESTAMPTZ
+    }
+
+    entity "SOC_ANALYST" as soc_analyst {
+        * id : UUID <<PK>>
+        --
+        * user_id : UUID <<FK,UK>>
+        display_name : TEXT
+        is_active : BOOLEAN
+        max_alerts : INTEGER
+        created_at : TIMESTAMPTZ
+        updated_at : TIMESTAMPTZ
+    }
+
+    entity "ALERT" as alert {
+        * id : UUID <<PK>>
+        --
+        * login_attempt_id : UUID <<FK>>
+        policy_id : UUID <<FK>>
+        request_id : UUID
+        status : TEXT
+        risk_level : TEXT
+        detection_reason : TEXT
+        detection_scores : JSONB
+        assigned_to_id : UUID <<FK>>
+        resolved_by_id : UUID <<FK>>
+        resolved_at : TIMESTAMPTZ
+        resolution : TEXT
+        notes : TEXT
+        created_at : TIMESTAMPTZ
+        updated_at : TIMESTAMPTZ
+    }
+
+    entity "ALERT_TIMELINE" as alert_timeline {
+        * id : UUID <<PK>>
+        --
+        * alert_id : UUID <<FK>>
+        event_type : TEXT
+        actor_id : UUID <<FK>>
+        actor_type : TEXT
+        old_value : TEXT
+        new_value : TEXT
+        comment : TEXT
+        ip_address : INET
+        created_at : TIMESTAMPTZ
+    }
+
+}
+
+' ------------------------------------------------------------------------------
+' DETECTION-DB RELATIONSHIPS (Chen Notation with cardinality)
+' ------------------------------------------------------------------------------
+
+login_attempt ||--|| risk_assessment : "HAS (1,1)"
+login_attempt ||--o{ detection_log : "GENERATES (0,N)"
+login_attempt ||--o{ alert : "TRIGGERS (0,N)"
+login_attempt }o--|| policy : "EVALUATED_WITH (0,1)"
+login_attempt }o--o| alert : "PRIMARY_ALERT (0,1)"
+
+risk_assessment }o--|| policy : "EVALUATED_WITH (0,1)"
+alert }o--|| policy : "CONTEXT (0,1)"
+
+alert }o--|| soc_analyst : "ASSIGNED_TO (0,1)"
+alert }o--|| soc_analyst : "RESOLVED_BY (0,1)"
+alert ||--o{ alert_timeline : "HAS (0,N)"
+
+' Cross-service reference: soc_analyst.user_id -> user.id (core-db)
+' Represented as informational note
+note right of soc_analyst
+  **Cross-service FK:**
+  soc_analyst.user_id
+  references user.id
+  in core-db
+end note
+
+@enduml

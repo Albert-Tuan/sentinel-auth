@@ -1,0 +1,88 @@
+@startuml ERD_Chen_v3.3_ml
+
+' =============================================================================
+' ERD v3.3 - Chen's Notation - ML-SERVICE-DB
+' Sentinel Auth - ML Service Database
+' =============================================================================
+
+title ERD v3.3 - Chen's Notation - <b>ML-SERVICE-DB</b>
+
+skinparam dpi 120
+skinparam shadowing false
+
+' ------------------------------------------------------------------------------
+' ML-SERVICE-DB ENTITIES
+' ------------------------------------------------------------------------------
+
+package "ML-SERVICE-DB (ml-service)" {
+
+    entity "MODEL_VERSION" as model_version {
+        * id : UUID <<PK>>
+        --
+        name : TEXT
+        * version : TEXT <<UK>>
+        algorithm : TEXT
+        description : TEXT
+        model_path : TEXT
+        config : JSONB
+        status : TEXT
+        is_production : BOOLEAN
+        trained_by : UUID <<FK>>
+        training_date : TIMESTAMPTZ
+        deployed_at : TIMESTAMPTZ
+        archived_at : TIMESTAMPTZ
+        created_at : TIMESTAMPTZ
+        updated_at : TIMESTAMPTZ
+    }
+
+    entity "INFERENCE_LOG" as inference_log {
+        * id : UUID <<PK>>
+        --
+        * request_id : UUID <<UK>>
+        model_version_id : UUID <<FK>>
+        model_version_used : TEXT
+        features : JSONB
+        raw_score : NUMERIC
+        normalized_score : NUMERIC
+        is_anomaly : BOOLEAN
+        reason_codes : JSONB
+        model_status : TEXT
+        processing_time_ms : INTEGER
+        error_message : TEXT
+        ip_address : INET
+        created_at : TIMESTAMPTZ
+    }
+
+    entity "FEATURE_STATISTIC" as feature_statistic {
+        * id : UUID <<PK>>
+        --
+        * feature_name : TEXT
+        timestamp : TIMESTAMPTZ
+        count : BIGINT
+        mean : NUMERIC
+        std : NUMERIC
+        min : NUMERIC
+        max : NUMERIC
+        p25 : NUMERIC
+        p50 : NUMERIC
+        p75 : NUMERIC
+        p95 : NUMERIC
+        anomaly_rate : NUMERIC
+        created_at : TIMESTAMPTZ
+    }
+
+}
+
+' ------------------------------------------------------------------------------
+' ML-SERVICE-DB RELATIONSHIPS (Chen Notation with cardinality)
+' ------------------------------------------------------------------------------
+
+inference_log }o--|| model_version : "REFERENCES (0,1)"
+
+note bottom of model_version
+  **ML Service is stateless.**
+  DB used for model registry,
+  inference logs, and feature stats.
+end note
+
+@enduml

@@ -260,8 +260,12 @@ CREATE TABLE IF NOT EXISTS user_trusted_devices (
 
 CREATE INDEX idx_user_trusted_devices_user ON user_trusted_devices(user_id);
 CREATE INDEX idx_user_trusted_devices_fingerprint ON user_trusted_devices(device_fingerprint);
-CREATE INDEX idx_user_trusted_devices_user_active ON user_trusted_devices(user_id, expires_at)
-    WHERE expires_at IS NULL OR expires_at > NOW();
+
+-- Regular composite index for user+expiry queries.
+-- Note: We intentionally do NOT use a partial index with NOW() because
+-- NOW() is not IMMUTABLE (it returns current time). Instead, application
+-- code filters: WHERE user_id = ? AND (expires_at IS NULL OR expires_at > NOW())
+CREATE INDEX idx_user_trusted_devices_user_expires ON user_trusted_devices(user_id, expires_at);
 
 -- =============================================================================
 -- SYSTEM SETTINGS (Dynamic Configuration)

@@ -1,0 +1,274 @@
+@startuml
+' Sơ đồ lớp - miền nghiệp vụ Sentinel Auth v3.3
+skinparam backgroundColor #FFFFFF
+skinparam shadowing false
+skinparam defaultFontName Sans
+skinparam ArrowColor #343A40
+skinparam ArrowThickness 1.1
+skinparam titleFontSize 16
+skinparam classAttributeIconSize 0
+skinparam class {
+  BackgroundColor #F8F9FA
+  BorderColor #495057
+  ArrowColor #343A40
+}
+
+title Sơ đồ lớp - Miền nghiệp vụ Sentinel Auth v3.3
+
+package "Xác thực (Core App)" #DAE8FC {
+  class "<<entity>>\nUser" as User {
+    +id: UUID
+    +username: String
+    +password_hash: String
+    +status: Status
+    +admin_mfa_required: Boolean
+    +detection_mfa_once: Boolean
+    --
+    +verifyPassword(pwd): Boolean
+    +lock(): void
+    +requestOneTimeMFA(): void
+  }
+
+  class "<<enum>>\nUserStatus" as UserStatus {
+    active
+    suspended
+    locked
+  }
+
+  class "<<entity>>\nSession" as Session {
+    +id: UUID
+    +token_jti: String
+    +access_token_hash: String
+    +refresh_token_hash: String
+    +expires_at: DateTime
+    +revoked_at: DateTime?
+    --
+    +isActive(): Boolean
+    +revoke(): void
+    +rotateToken(): void
+  }
+
+  class "<<entity>>\nMfaTransaction" as MfaTx {
+    +id: UUID
+    +mfa_type: one_time | persistent
+    +status: MfaStatus
+    +fail_count: Integer
+    +expires_at: DateTime
+    --
+    +verify(code): Boolean
+    +expire(): void
+  }
+
+  class "<<control>>\nAuthService" as AuthSvc {
+    +login(req, ip, ua): LoginResult
+    +verifyMfa(sessionId, code): TokenPair
+    +refresh(token): TokenPair
+    +logout(token): void
+    --
+    -checkRateLimit(ip): Boolean
+    -preTokenRisk(user, ip, ua): RiskLevel?
+  }
+
+  class "<<control>>\nSessionService" as SessSvc {
+    +createSession(user, ip, ua): Session
+    +listSessions(userId): List<Session>
+    +revokeSession(id, requesterId): void
+  }
+
+  class "<<entity>>\nAuditLog" as AuditLog {
+    +actor_id: UUID?
+    +actor_type: user | system
+    +action: String
+    +resource: String
+    +before_state: JSON
+    +after_state: JSON
+  }
+}
+
+package "Phát hiện (Detection Engine)" #FFF2CC {
+  class "<<entity>>\nLoginAttempt" as Attempt {
+    +id: UUID
+    +event_id: UUID
+    +user_id: UUID?
+    +outcome: Outcome
+    +status: pending|processed|failed
+    +risk_level: RiskLevel?
+    +detection_decision: Decision?
+    --
+    +markProcessed(): void
+    +markFailed(): void
+  }
+
+  class "<<entity>>\nPolicy" as Policy {
+    +id: UUID
+    +version: String
+    +rules: JSON
+    +config: JSON
+    +is_active: Boolean
+  }
+
+  class "<<entity>>\nRiskAssessment" as Risk {
+    +rule_score: Decimal
+    +ml_score: Decimal?
+    +combined_score: Decimal
+    +ml_status: success|unavailable|error
+    +risk_level: RiskLevel
+    +decision: Decision
+  }
+
+  class "<<entity>>\nAlert" as Alert {
+    +id: UUID
+    +status: AlertStatus
+    +risk_level: RiskLevel
+    +assigned_to_id: UUID?
+    +resolved_by_id: UUID?
+    +resolution: String?
+  }
+
+  class "<<entity>>\nAlertTimeline" as Timeline {
+    +event_type: String
+    +actor_id: UUID?
+    +old_value: String?
+    +new_value: String?
+    +comment: String?
+  }
+
+  class "<<service>>\nRuleEngine" as RuleEngine {
+    +evaluate(rules, features): RuleResult
+  }
+
+  class "<<service>>\nFeatureBuilder" as FeatBuilder {
+    +build(attempt): FeatureVector
+  }
+
+  class "<<service>>\nRiskScoringService" as Scoring {
+    +calculate(rule, ml, config): RiskAssessment
+    +classify(score, thresholds): RiskLevel
+  }
+
+  class "<<service>>\nDetectionService" as DetSvc {
+    +receiveLoginEvent(payload): LoginEventResponse
+    +preTokenCheck(payload): Verdict
+    +rescoreFailedAttempts(limit): Integer
+  }
+
+  class "<<service>>\nActionDispatcher" as Dispatcher {
+    +enforceInCore(attempt, level, alertId): Boolean
+  }
+
+  class "<<service>>\nAlertService" as AlertSvc {
+    +listAlerts(filters): List<Alert>
+    +getEvidence(alertId): Evidence
+    +acknowledge(alertId, actor): Alert
+    +resolve(alertId, actor, resolution): Alert
+    +markFalsePositive(alertId, actor): Alert
+    +escalate(alertId, actor): Alert
+  }
+}
+
+package "Suy luận (ML Service)" #E1D5E7 {
+  class "<<service>>\nMlService" as MlSvc {
+    +score(features): MlResult
+    +health(): MlHealth
+  }
+
+  class "<<model>>\nAnomalyModel" as Model {
+    +model_version: String
+    +predict(features): Score
+  }
+}
+
+package "Hợp đồng nội bộ" #F5F5F5 {
+  class "<<dto>>\nLoginEventRequest" as LoginEvent {
+    +event_id: UUID
+    +user_id: UUID?
+    +outcome: String
+    +ip_address: String?
+    +user_agent: String?
+    +timestamp: DateTime
+  }
+
+  class "<<dto>>\nPreTokenCheckRequest" as PreToken {
+    +username: String
+    +user_id: UUID?
+    +ip_address: String?
+  }
+
+  class "<<dto>>\nPreTokenCheckResponse" as Verdict {
+    +risk_level: String
+    +decision: String
+    +require_mfa: Boolean
+    +degraded: Boolean
+  }
+
+  class "<<dto>>\nActionRequest" as ActionReq {
+    +action: ActionType
+    +target_user_id: UUID
+    +reason: String
+    +idempotency_key: String?
+  }
+
+  class "<<dto>>\nActionResponse" as ActionRes {
+    +status: applied | already_applied
+    +details.sessions_revoked: Integer
+  }
+}
+
+' --- Quan hệ miền xác thực ---
+User "1" --> "0..*" Session : sở hữu >
+User "1" --> "0..*" MfaTx : khởi tạo >
+User "1" --> "0..*" AuditLog : sinh >
+User "1" ..> UserStatus : <<enum>>
+Session "0..1" ..> MfaTx : sinh sau khi >
+
+AuthSvc ..> User : xác thực >
+AuthSvc ..> MfaTx : phát challenge >
+AuthSvc ..> Session : tạo >
+AuthSvc ..> LoginEvent : ghi >
+AuthSvc ..> Verdict : hỏi risk gate >
+SessSvc ..> Session : quản lý >
+
+' --- Quan hệ miền phát hiện ---
+LoginAttempt "1" --> "0..1" RiskAssessment : được chấm >
+LoginAttempt "1" --> "0..*" Alert : sinh >
+LoginAttempt "0..1" ..> Policy : đánh giá bằng >
+Alert "1" --> "0..*" AlertTimeline : ghi nhật >
+Alert "0..1" ..> Policy : ngữ cảnh >
+
+FeatureBuilder ..> LoginAttempt : đọc lịch sử >
+RuleEngine ..> Policy : lấy rules >
+Scoring ..> Risk : tính >
+DetSvc ..> FeatureBuilder : gọi >
+DetSvc ..> RuleEngine : gọi >
+DetSvc ..> Scoring : gọi >
+DetSvc ..> MlSvc : gọi HTTP >
+DetSvc ..> Alert : tạo >
+DetSvc ..> Verdict : trả >
+Dispatcher ..> ActionReq : gửi >
+AlertSvc ..> Alert : cập nhật >
+AlertSvc ..> AlertTimeline : ghi >
+AlertSvc ..> ActionReq : yêu cầu hành động >
+
+MlSvc ..> Model : dùng >
+RuleEngine ..> Model : cùng tham chiếu\n6 đặc trưng >
+
+' --- Hợp đồng ---
+LoginEvent ..> LoginAttempt : ánh xạ >
+PreToken ..> Verdict : sinh >
+ActionReq ..> ActionRes : sinh >
+ActionRes ..> Session : thu hồi >
+ActionRes ..> User : khoá / yêu cầu MFA >
+
+legend bottom
+  **Quy ước ký hiệu:**
+  - `<<entity>>`: thực thể nghiệp vụ
+  - `<<service>>` / `<<control>>`: lớp xử lý
+  - `<<dto>>`: hợp đồng dữ liệu qua HTTP
+  - `<<model>>`: mô hình suy luận
+
+  **Lưu ý:** sơ đồ này thể hiện lớp nghiệp vụ,
+  không phải bảng cơ sở dữ liệu. Ánh xạ sang
+  bảng được trình bày ở mục Thiết kế CSDL.
+endlegend
+
+@enduml

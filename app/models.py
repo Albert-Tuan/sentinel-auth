@@ -477,6 +477,7 @@ class Policy(Base):
     # cross-DB: references users.id in core-db
     created_by: Mapped[Optional[str]] = Column(uuid_type(), nullable=True)
     created_at: Mapped[datetime] = Column(DateTime(timezone=True), nullable=False, default=now_utc)
+    updated_at: Mapped[datetime] = Column(DateTime(timezone=True), nullable=False, default=now_utc, onupdate=now_utc)
     activated_at: Mapped[Optional[datetime]] = Column(DateTime(timezone=True), nullable=True)
     deactivated_at: Mapped[Optional[datetime]] = Column(DateTime(timezone=True), nullable=True)
 
