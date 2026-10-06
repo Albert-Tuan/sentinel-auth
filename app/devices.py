@@ -7,7 +7,7 @@ Per Bảng Yêu Cầu Chức Năng Nghiệp Vụ v2:
 - U-QĐ-05: Quy định thiết bị tin cậy
 
 Features:
-- Register device as trusted (skip MFA)
+    - Register device as trusted (skip MFA)
 - List trusted devices
 - Remove trusted device
 - Auto-expire based on TTL
@@ -24,6 +24,7 @@ from sqlalchemy.orm import Session as DBSession
 
 from app.db import get_db
 from app.models import User, Session, UserTrustedDevice
+from app.authz import get_current_auth_context, AuthContext
 
 router = APIRouter(prefix="/api/v1/devices", tags=["devices"])
 
@@ -68,84 +69,23 @@ class DeviceFingerprint(BaseModel):
 
 
 # =============================================================================
-# Helper Functions
-# =============================================================================
-
-def hash_fingerprint(fingerprint: str) -> str:
-    """Create hash of device fingerprint for storage."""
-    return hashlib.sha256(fingerprint.encode()).hexdigest()
-
-
-def generate_device_fingerprint(request: Request) -> str:
-    """
-    Generate a device fingerprint from request headers.
-    Combines User-Agent and other identifying headers.
-    """
-    user_agent = request.headers.get("User-Agent", "")
-    accept_lang = request.headers.get("Accept-Language", "")
-    accept_enc = request.headers.get("Accept-Encoding", "")
-
-    raw = f"{user_agent}:{accept_lang}:{accept_enc}"
-    return hashlib.sha256(raw.encode()).hexdigest()
-
-
-def get_client_ip(request: Request) -> str:
-    """Extract client IP from request."""
-    forwarded = request.headers.get("X-Forwarded-For")
-    if forwarded:
-        return forwarded.split(",")[0].strip()
-    return request.client.host if request.client else "unknown"
-
-
-def verify_user_token(
-    authorization: Optional[str],
-    db: DBSession
-) -> tuple[User, Session]:
-    """
-    Verify user token and return user + session.
-    Helper for authenticated endpoints.
-    """
-    if not authorization or not authorization.startswith("Bearer "):
-        raise HTTPException(status_code=401, detail="Missing authorization header")
-
-    token = authorization.split(" ")[1]
-    token_hash = hashlib.sha256(token.encode()).hexdigest()
-
-    session = db.query(Session).filter(
-        Session.access_token_hash == token_hash,
-        Session.revoked_at.is_(None),
-        Session.expires_at > datetime.utcnow(),
-    ).first()
-
-    if not session:
-        raise HTTPException(status_code=401, detail="Invalid or expired token")
-
-    user = db.query(User).filter(User.id == session.user_id).first()
-    if not user:
-        raise HTTPException(status_code=401, detail="User not found")
-
-    return user, session
-
-
-# =============================================================================
 # Trusted Device Endpoints
 # =============================================================================
 
 @router.get("", response_model=TrustedDeviceList)
 async def list_trusted_devices(
     request: Request,
-    authorization: Optional[str] = Header(None),
+    ctx: AuthContext = Depends(get_current_auth_context),
     db=Depends(get_db),
 ) -> TrustedDeviceList:
     """
     List all trusted devices for current user (UC-05).
 
     Per U-QĐ-05: User chỉ xem được thiết bị của chính mình.
+    Uses canonical get_current_auth_context() for authentication.
     """
-    user, _ = verify_user_token(authorization, db)
-
     devices = db.query(UserTrustedDevice).filter(
-        UserTrustedDevice.user_id == user.id
+        UserTrustedDevice.user_id == ctx.user.id
     ).order_by(UserTrustedDevice.last_used_at.desc()).all()
 
     return TrustedDeviceList(
@@ -158,7 +98,7 @@ async def list_trusted_devices(
 async def trust_device(
     request: Request,
     body: TrustDeviceRequest,
-    authorization: Optional[str] = Header(None),
+    ctx: AuthContext = Depends(get_current_auth_context),
     db=Depends(get_db),
 ) -> TrustDeviceResponse:
     """
@@ -166,9 +106,8 @@ async def trust_device(
 
     Per U-QĐ-05: Thiết bị được thêm vào danh sách tin cậy.
     Per U-QĐ-07: Trusted device TTL configurable (default: 30 days).
+    Uses canonical get_current_auth_context() for authentication.
     """
-    user, _ = verify_user_token(authorization, db)
-
     # Generate or use provided fingerprint
     fingerprint = generate_device_fingerprint(request)
     fingerprint_hash = hash_fingerprint(fingerprint)
@@ -178,7 +117,7 @@ async def trust_device(
 
     # Check if device already trusted
     existing = db.query(UserTrustedDevice).filter(
-        UserTrustedDevice.user_id == user.id,
+        UserTrustedDevice.user_id == ctx.user.id,
         UserTrustedDevice.device_fingerprint == fingerprint_hash,
     ).first()
 
@@ -206,7 +145,7 @@ async def trust_device(
         expires_at = datetime.utcnow() + timedelta(days=body.remember_for_days)
 
     device = UserTrustedDevice(
-        user_id=user.id,
+        user_id=ctx.user.id,
         device_fingerprint=fingerprint_hash,
         device_name=body.device_name,
         last_ip=client_ip,
@@ -228,19 +167,18 @@ async def trust_device(
 @router.delete("/{device_id}", status_code=204)
 async def untrust_device(
     device_id: str,
-    authorization: Optional[str] = Header(None),
+    ctx: AuthContext = Depends(get_current_auth_context),
     db=Depends(get_db),
 ) -> None:
     """
     Remove a device from trusted list (UC-05).
 
     Per U-QĐ-05: Thiết bị được gỡ khỏi danh sách tin cậy.
+    Uses canonical get_current_auth_context() for authentication.
     """
-    user, _ = verify_user_token(authorization, db)
-
     device = db.query(UserTrustedDevice).filter(
         UserTrustedDevice.id == device_id,
-        UserTrustedDevice.user_id == user.id,
+        UserTrustedDevice.user_id == ctx.user.id,
     ).first()
 
     if not device:
@@ -259,18 +197,35 @@ async def check_device_trusted(
     """
     Check if current device is trusted.
     Used by auth flow to skip MFA for trusted devices.
-    """
-    if not authorization or not authorization.startswith("Bearer "):
-        return {"trusted": False, "reason": "No token"}
 
-    user, _ = verify_user_token(authorization, db)
+    Contract: no token → trusted=false (optional/public authentication).
+    If token is provided, validates it canonically; invalid token → trusted=false.
+    """
+    # Optional authentication: validate token if provided, but never reject
+    user_id = None
+    if authorization and authorization.startswith("Bearer "):
+        token = authorization.split(" ")[1]
+        from app.authz import hash_token as _hash_token
+        token_hash = _hash_token(token)
+        session = db.query(Session).filter(
+            Session.access_token_hash == token_hash,
+            Session.revoked_at.is_(None),
+            Session.expires_at > datetime.utcnow(),
+        ).first()
+        if session:
+            user = db.query(User).filter(User.id == session.user_id).first()
+            if user and user.status == "active":
+                user_id = user.id
+
+    if user_id is None:
+        return {"trusted": False, "reason": "No token"}
 
     fingerprint = generate_device_fingerprint(request)
     fingerprint_hash = hash_fingerprint(fingerprint)
     client_ip = get_client_ip(request)
 
     device = db.query(UserTrustedDevice).filter(
-        UserTrustedDevice.user_id == user.id,
+        UserTrustedDevice.user_id == user_id,
         UserTrustedDevice.device_fingerprint == fingerprint_hash,
     ).first()
 
@@ -298,17 +253,16 @@ async def check_device_trusted(
 
 @router.delete("/all", status_code=204)
 async def untrust_all_devices(
-    authorization: Optional[str] = Header(None),
+    ctx: AuthContext = Depends(get_current_auth_context),
     db=Depends(get_db),
 ) -> None:
     """
     Remove all trusted devices for current user.
     Security feature: allows user to remotely revoke all trusted devices.
+    Uses canonical get_current_auth_context() for authentication.
     """
-    user, _ = verify_user_token(authorization, db)
-
     db.query(UserTrustedDevice).filter(
-        UserTrustedDevice.user_id == user.id
+        UserTrustedDevice.user_id == ctx.user.id
     ).delete()
 
     db.commit()

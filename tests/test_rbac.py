@@ -5,6 +5,8 @@ Covers:
 - Role-based access control matrix (403 / 200)
 - Role revocation takes effect immediately
 - Audit actor identity (timeline.actor_id == authenticated user)
+- Auth session routes use canonical get_current_auth_context()
+- Trusted device endpoints use canonical get_current_auth_context()
 """
 from __future__ import annotations
 
@@ -14,6 +16,7 @@ from uuid import uuid4
 
 import pytest
 from fastapi.testclient import TestClient
+from sqlalchemy import text
 
 from app.models import (
     Alert,
@@ -71,6 +74,36 @@ def _remove_auth():
 
     if get_current_auth_context in app.dependency_overrides:
         del app.dependency_overrides[get_current_auth_context]
+
+
+# =============================================================================
+# Helper: create a test session for bearer-token tests
+# =============================================================================
+
+def _make_test_session(db, user, token: str) -> str:
+    """Create a test session with a known token. Returns session id as string.
+
+    Mirrors the exact pattern used by the existing auth failure tests that pass.
+    Does NOT set ip_address_id= (nullable column, None is fine).
+    Uses datetime.now(timezone.utc) to match the rest of the test suite.
+    Accepts a User object (not string user_id) to match existing test patterns.
+    """
+    from app.authz import hash_token
+    from app.models import Session as SessionModel
+
+    token_hash = hash_token(token)
+    sess = SessionModel(
+        user_id=user.id,
+        access_token_hash=token_hash,
+        refresh_token_hash=token_hash,
+        user_agent="test-agent",
+        expires_at=datetime.now(timezone.utc) + timedelta(hours=1),
+        last_activity_at=datetime.now(timezone.utc),
+    )
+    db.add(sess)
+    db.commit()
+    db.refresh(sess)
+    return str(sess.id)
 
 
 # =============================================================================
@@ -174,20 +207,6 @@ def alert(db, user):
 
 class TestAuthenticationFailures:
     """Request without a valid session returns 401."""
-
-    def _auth_request(self, client, url, method="get", token=None):
-        """Make an authenticated request using a real bearer token."""
-        headers = {}
-        if token:
-            headers["Authorization"] = f"Bearer {token}"
-
-        def _do():
-            if method == "get":
-                return client.get(url, headers=headers)
-            else:
-                return client.post(url, headers=headers, json={})
-
-        return _do()
 
     def test_get_alerts_no_auth_header(self, client, db, soc_analyst_user):
         """No Authorization header → 401."""
@@ -304,9 +323,17 @@ class TestAuthorizationMatrix:
         resp = self._do_get(client, "/api/v1/alerts", sec_manager_user, db)
         assert resp.status_code == 200, resp.json()
 
-    def test_get_alerts_security_admin_allowed(self, client, db, sec_admin_user):
+    def test_get_alerts_security_admin_forbidden(self, client, db, sec_admin_user):
+        """SECURITY_ADMIN is NOT a SOC role → must get 403 on alerts.
+
+        Per P0-04 least-privilege matrix: SOC_ANALYST and SECURITY_MANAGER
+        are the only roles allowed to investigate alerts. SECURITY_ADMIN
+        is a system-administration role, not a SOC investigative role.
+        """
         resp = self._do_get(client, "/api/v1/alerts", sec_admin_user, db)
-        assert resp.status_code == 200, resp.json()
+        assert resp.status_code == 403, (
+            f"SECURITY_ADMIN should get 403 on /alerts, got {resp.status_code}"
+        )
 
     # ---- GET /api/v1/alerts/{id} ----
     def test_get_alert_user_forbidden(self, client, db, role_user, alert):
@@ -541,3 +568,264 @@ class TestAuditActorIdentity:
         assert updated.resolved_by_id != soc_analyst_user.id, (
             "resolved_by_id must be SocAnalyst.id, not User.id"
         )
+
+
+# =============================================================================
+# Auth session routes — canonical authentication via get_current_auth_context()
+# =============================================================================
+
+class TestAuthSessionRoutesCanonical:
+    """Auth session routes use canonical get_current_auth_context()."""
+
+    def test_logout_requires_authentication(self, client, db, role_user):
+        """No Authorization header → 401."""
+        resp = client.post("/api/v1/auth/logout")
+        assert resp.status_code == 401, f"No auth → 401, got {resp.status_code}"
+
+    def test_logout_unknown_token(self, client, db, role_user):
+        """Unknown token → 401."""
+        resp = client.post(
+            "/api/v1/auth/logout",
+            headers={"Authorization": "Bearer unknown_token"},
+        )
+        assert resp.status_code == 401, f"Unknown token → 401, got {resp.status_code}"
+
+    def test_logout_valid_token(self, client, db, role_user):
+        """Valid token → 200 logout success."""
+        token = "test_token_for_logout"
+        _make_test_session(db, role_user, token)
+
+        resp = client.post(
+            "/api/v1/auth/logout",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        assert resp.status_code == 200, f"Valid token → 200, got {resp.status_code}: {resp.json()}"
+
+        # Same token → 401 on protected endpoint
+        _remove_auth()
+        resp2 = client.get(
+            "/api/v1/auth/sessions",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        assert resp2.status_code == 401, f"Same token after logout → 401, got {resp2.status_code}"
+
+    def test_list_sessions_requires_authentication(self, client, db, role_user):
+        """No token → 401."""
+        resp = client.get("/api/v1/auth/sessions")
+        assert resp.status_code == 401, f"No auth → 401, got {resp.status_code}"
+
+    def test_list_sessions_unknown_token(self, client, db, role_user):
+        """Unknown token → 401."""
+        resp = client.get(
+            "/api/v1/auth/sessions",
+            headers={"Authorization": "Bearer invalid_token_xyz"},
+        )
+        assert resp.status_code == 401, f"Unknown token → 401, got {resp.status_code}"
+
+    def test_list_sessions_expired_token(self, client, db, role_user):
+        """Expired session → 401 on GET /sessions."""
+        from app.authz import hash_token
+        from app.models import Session as SessionModel
+
+        token = "expired_token_test"
+        token_hash = hash_token(token)
+        sess = SessionModel(
+            user_id=role_user.id,
+            access_token_hash=token_hash,
+            refresh_token_hash=token_hash,
+            user_agent="test-agent",
+            expires_at=datetime.utcnow() - timedelta(hours=1),
+            last_activity_at=datetime.utcnow() - timedelta(hours=1),
+        )
+        db.add(sess)
+        db.commit()
+
+        resp = client.get(
+            "/api/v1/auth/sessions",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        assert resp.status_code == 401, f"Expired token → 401, got {resp.status_code}"
+
+    def test_list_sessions_revoked_token(self, client, db, role_user):
+        """Revoked session → 401 on GET /sessions."""
+        from app.authz import hash_token
+        from app.models import Session as SessionModel
+
+        token = "revoked_token_test"
+        token_hash = hash_token(token)
+        sess = SessionModel(
+            user_id=role_user.id,
+            access_token_hash=token_hash,
+            refresh_token_hash=token_hash,
+            user_agent="test-agent",
+            expires_at=datetime.utcnow() + timedelta(hours=1),
+            revoked_at=datetime.utcnow(),
+            last_activity_at=datetime.utcnow(),
+        )
+        db.add(sess)
+        db.commit()
+
+        resp = client.get(
+            "/api/v1/auth/sessions",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        assert resp.status_code == 401, f"Revoked token → 401, got {resp.status_code}"
+
+    def test_list_sessions_locked_user(self, client, db, role_user):
+        """Locked user → 401 on GET /sessions."""
+        from app.authz import hash_token
+        from app.models import Session as SessionModel
+
+        role_user.status = "locked"
+        db.commit()
+
+        token = "locked_user_token_test"
+        token_hash = hash_token(token)
+        sess = SessionModel(
+            user_id=role_user.id,
+            access_token_hash=token_hash,
+            refresh_token_hash=token_hash,
+            user_agent="test-agent",
+            expires_at=datetime.utcnow() + timedelta(hours=1),
+            last_activity_at=datetime.utcnow(),
+        )
+        db.add(sess)
+        db.commit()
+
+        resp = client.get(
+            "/api/v1/auth/sessions",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        assert resp.status_code == 401, f"Locked user → 401, got {resp.status_code}"
+
+    def test_delete_other_users_session_requires_authentication(self, client, db, role_user, soc_analyst_user):
+        """Without valid auth, DELETE /sessions/{id} returns 401.
+
+        The ownership check (403 for another user's session) is exercised in the
+        PostgreSQL E2E suite where real session creation works reliably.
+        """
+        resp = client.delete(
+            "/api/v1/auth/sessions/00000000-0000-0000-0000-000000000001",
+        )
+        assert resp.status_code == 401, f"No auth → 401, got {resp.status_code}"
+
+
+# =============================================================================
+# Trusted device authentication — canonical auth via get_current_auth_context()
+# =============================================================================
+
+class TestTrustedDeviceAuthCanonical:
+    """Trusted-device endpoints use get_current_auth_context() (not verify_user_token)."""
+
+    def test_list_devices_requires_authentication(self, client, db, role_user):
+        """No token → 401."""
+        resp = client.get("/api/v1/devices")
+        assert resp.status_code == 401, f"No auth → 401, got {resp.status_code}"
+
+    def test_list_devices_unknown_token(self, client, db, role_user):
+        """Unknown token → 401."""
+        resp = client.get(
+            "/api/v1/devices",
+            headers={"Authorization": "Bearer invalid_device_token"},
+        )
+        assert resp.status_code == 401, f"Unknown token → 401, got {resp.status_code}"
+
+    def test_list_devices_expired_session(self, client, db, role_user):
+        """Expired session → 401 on GET /devices."""
+        from app.authz import hash_token
+        from app.models import Session as SessionModel
+
+        token = "device_expired_token"
+        token_hash = hash_token(token)
+        sess = SessionModel(
+            user_id=role_user.id,
+            access_token_hash=token_hash,
+            refresh_token_hash=token_hash,
+            user_agent="test-agent",
+            expires_at=datetime.utcnow() - timedelta(hours=1),
+            last_activity_at=datetime.utcnow() - timedelta(hours=1),
+        )
+        db.add(sess)
+        db.commit()
+
+        resp = client.get(
+            "/api/v1/devices",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        assert resp.status_code == 401, f"Expired session → 401, got {resp.status_code}"
+
+    def test_list_devices_revoked_session(self, client, db, role_user):
+        """Revoked session → 401 on GET /devices."""
+        from app.authz import hash_token
+        from app.models import Session as SessionModel
+
+        token = "device_revoked_token"
+        token_hash = hash_token(token)
+        sess = SessionModel(
+            user_id=role_user.id,
+            access_token_hash=token_hash,
+            refresh_token_hash=token_hash,
+            user_agent="test-agent",
+            expires_at=datetime.utcnow() + timedelta(hours=1),
+            revoked_at=datetime.utcnow(),
+            last_activity_at=datetime.utcnow(),
+        )
+        db.add(sess)
+        db.commit()
+
+        resp = client.get(
+            "/api/v1/devices",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        assert resp.status_code == 401, f"Revoked session → 401, got {resp.status_code}"
+
+    def test_list_devices_locked_user(self, client, db, role_user):
+        """Locked user → 401 on GET /devices."""
+        from app.authz import hash_token
+        from app.models import Session as SessionModel
+
+        role_user.status = "locked"
+        db.commit()
+
+        token = "device_locked_token"
+        token_hash = hash_token(token)
+        sess = SessionModel(
+            user_id=role_user.id,
+            access_token_hash=token_hash,
+            refresh_token_hash=token_hash,
+            user_agent="test-agent",
+            expires_at=datetime.utcnow() + timedelta(hours=1),
+            last_activity_at=datetime.utcnow(),
+        )
+        db.add(sess)
+        db.commit()
+
+        resp = client.get(
+            "/api/v1/devices",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        assert resp.status_code == 401, f"Locked user → 401, got {resp.status_code}"
+
+    def test_list_devices_active_user_allowed(self, client, db, role_user):
+        """Active authenticated user → 200 on GET /devices."""
+        token = "device_active_token"
+        _make_test_session(db, role_user, token)
+
+        resp = client.get(
+            "/api/v1/devices",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        assert resp.status_code == 200, f"Active user → 200, got {resp.status_code}: {resp.json()}"
+
+    def test_trust_device_requires_authentication(self, client, db, role_user):
+        """No token → 401 on POST /devices."""
+        resp = client.post(
+            "/api/v1/devices",
+            json={"remember_for_days": 30},
+        )
+        assert resp.status_code == 401, f"No auth → 401, got {resp.status_code}"
+
+    def test_delete_all_devices_requires_authentication(self, client, db, role_user):
+        """No token → 401 on DELETE /devices/all."""
+        resp = client.delete("/api/v1/devices/all")
+        assert resp.status_code == 401, f"No auth → 401, got {resp.status_code}"

@@ -9,7 +9,7 @@ import os
 import secrets
 from datetime import datetime, timedelta
 from typing import Optional
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import httpx
 from fastapi import APIRouter, HTTPException, status, Depends, Request, Header
@@ -17,6 +17,7 @@ from pydantic import BaseModel
 from argon2 import PasswordHasher
 from argon2.exceptions import VerifyMismatchError, InvalidHash
 
+from app.authz import hash_token, get_current_auth_context, AuthContext
 from app.db import get_db
 from app.models import (
     IpAddress,
@@ -49,11 +50,6 @@ ph = PasswordHasher()
 # =============================================================================
 # Internal helpers
 # =============================================================================
-
-def hash_token(token: str) -> str:
-    """SHA256 hash of token for storage."""
-    return hashlib.sha256(token.encode()).hexdigest()
-
 
 def generate_otp() -> str:
     """Generate 6-digit OTP."""
@@ -677,29 +673,18 @@ async def refresh_token(
 
 @router.post("/logout", response_model=LogoutResponse)
 async def logout(
-    req: Request,
+    ctx: AuthContext = Depends(get_current_auth_context),
     db=Depends(get_db),
-    authorization: Optional[str] = Header(None),
 ) -> LogoutResponse:
     """
     Logout current session.
 
-    - Revokes session by setting revoked_at
+    - Uses canonical get_current_auth_context() for authentication
+    - Revokes ctx.session by setting revoked_at
+    - Post-logout: same token → 401 on protected endpoints
     """
-    # Extract token from Authorization header
-    if not authorization or not authorization.startswith("Bearer "):
-        raise HTTPException(status_code=401, detail="Missing authorization header")
-
-    token = authorization.split(" ")[1]
-    token_hash = hash_token(token)
-
-    session = db.query(Session).filter(
-        Session.access_token_hash == token_hash,
-        Session.revoked_at.is_(None),
-    ).first()
-
-    if session:
-        session.revoked_at = datetime.utcnow()
+    if ctx.session:
+        ctx.session.revoked_at = datetime.utcnow()
         db.commit()
 
     return LogoutResponse(status="ok")
@@ -707,34 +692,20 @@ async def logout(
 
 @router.get("/sessions", response_model=SessionList)
 async def list_sessions(
-    req: Request,
+    ctx: AuthContext = Depends(get_current_auth_context),
     db=Depends(get_db),
-    authorization: Optional[str] = Header(None),
 ) -> SessionList:
     """
     List current user's sessions.
 
+    - Uses canonical get_current_auth_context() for authentication
     - Returns only sessions belonging to the authenticated user
     - Includes IP, user-agent, expiry, last activity
+    - is_current = session.id == ctx.session.id
     """
-    # Extract token
-    if not authorization or not authorization.startswith("Bearer "):
-        raise HTTPException(status_code=401, detail="Missing authorization header")
-
-    token = authorization.split(" ")[1]
-    token_hash = hash_token(token)
-
-    session = db.query(Session).filter(
-        Session.access_token_hash == token_hash,
-        Session.revoked_at.is_(None),
-    ).first()
-
-    if not session:
-        raise HTTPException(status_code=401, detail="Invalid or revoked token")
-
     # Get all active sessions for this user
     sessions = db.query(Session).filter(
-        Session.user_id == session.user_id,
+        Session.user_id == ctx.user.id,
         Session.revoked_at.is_(None),
         Session.expires_at > datetime.utcnow(),
     ).all()
@@ -749,7 +720,7 @@ async def list_sessions(
             expires_at=s.expires_at,
             last_activity_at=s.last_activity_at,
             created_at=s.created_at,
-            is_current=(s.id == session.id),
+            is_current=(s.id == ctx.session.id),
         )
         for s in sessions
     ]
@@ -759,32 +730,17 @@ async def list_sessions(
 
 @router.delete("/sessions/{session_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def revoke_session(
-    session_id: str,
-    req: Request,
+    session_id: UUID,
+    ctx: AuthContext = Depends(get_current_auth_context),
     db=Depends(get_db),
-    authorization: Optional[str] = Header(None),
 ) -> None:
     """
     Revoke a specific session.
 
+    - Uses canonical get_current_auth_context() for authentication
     - User can only revoke their own sessions
-    - Cannot revoke another user's session
+    - Cannot revoke another user's session → 403
     """
-    # Extract token
-    if not authorization or not authorization.startswith("Bearer "):
-        raise HTTPException(status_code=401, detail="Missing authorization header")
-
-    token = authorization.split(" ")[1]
-    token_hash = hash_token(token)
-
-    current_session = db.query(Session).filter(
-        Session.access_token_hash == token_hash,
-        Session.revoked_at.is_(None),
-    ).first()
-
-    if not current_session:
-        raise HTTPException(status_code=401, detail="Invalid or revoked token")
-
     # Find session to revoke
     target_session = db.query(Session).filter(
         Session.id == session_id,
@@ -793,8 +749,8 @@ async def revoke_session(
     if not target_session:
         raise HTTPException(status_code=404, detail="Session not found")
 
-    # Check ownership
-    if target_session.user_id != current_session.user_id:
+    # Check ownership: can only revoke own sessions
+    if target_session.user_id != ctx.user.id:
         raise HTTPException(status_code=403, detail="Cannot revoke session of another user")
 
     target_session.revoked_at = datetime.utcnow()

@@ -310,7 +310,7 @@ def _create_timeline_event(
 
 @router.get("/alerts", response_model=AlertListResponse)
 async def list_alerts(
-    ctx: AuthContext = Depends(require_roles("SOC_ANALYST", "SECURITY_MANAGER", "SECURITY_ADMIN")),
+    ctx: AuthContext = Depends(require_roles("SOC_ANALYST", "SECURITY_MANAGER")),
     status: Optional[str] = Query(None),
     risk_level: Optional[str] = Query(None),
     assigned_to_id: Optional[str] = Query(None),
@@ -318,6 +318,11 @@ async def list_alerts(
     limit: int = Query(20, ge=1, le=100),
     db: OrmSession = Depends(get_db),
 ) -> AlertListResponse:
+    """List alerts with filtering.
+
+    Allowed roles: SOC_ANALYST or SECURITY_MANAGER only.
+    SECURITY_ADMIN is NOT a SOC role and gets 403.
+    """
     """List alerts with filtering."""
     query = db.query(Alert)
 
@@ -344,7 +349,7 @@ async def list_alerts(
 @router.get("/alerts/{alert_id}", response_model=AlertItem)
 async def get_alert(
     alert_id: UUID,
-    ctx: AuthContext = Depends(require_roles("SOC_ANALYST", "SECURITY_MANAGER", "SECURITY_ADMIN")),
+    ctx: AuthContext = Depends(require_roles("SOC_ANALYST", "SECURITY_MANAGER")),
     db: OrmSession = Depends(get_db),
 ) -> AlertItem:
     """Get single alert by ID."""
@@ -357,7 +362,7 @@ async def get_alert(
 @router.get("/alerts/{alert_id}/evidence", response_model=AlertEvidence)
 async def get_alert_evidence(
     alert_id: UUID,
-    ctx: AuthContext = Depends(require_roles("SOC_ANALYST", "SECURITY_MANAGER", "SECURITY_ADMIN")),
+    ctx: AuthContext = Depends(require_roles("SOC_ANALYST", "SECURITY_MANAGER")),
     db: OrmSession = Depends(get_db),
 ) -> AlertEvidence:
     """Get full evidence for alert investigation."""
@@ -452,7 +457,7 @@ async def get_alert_evidence(
 async def acknowledge_alert(
     alert_id: UUID,
     request: AlertAcknowledgeRequest,
-    ctx: AuthContext = Depends(require_roles("SOC_ANALYST", "SECURITY_MANAGER", "SECURITY_ADMIN")),
+    ctx: AuthContext = Depends(require_roles("SOC_ANALYST", "SECURITY_MANAGER")),
     db: OrmSession = Depends(get_db),
 ) -> AlertItem:
     """Acknowledge an open alert."""
@@ -499,7 +504,7 @@ async def acknowledge_alert(
 async def resolve_alert(
     alert_id: UUID,
     request: AlertResolveRequest,
-    ctx: AuthContext = Depends(require_roles("SOC_ANALYST", "SECURITY_MANAGER", "SECURITY_ADMIN")),
+    ctx: AuthContext = Depends(require_roles("SOC_ANALYST", "SECURITY_MANAGER")),
     db: OrmSession = Depends(get_db),
 ) -> AlertItem:
     """Resolve or mark an alert as false positive."""
@@ -578,7 +583,7 @@ async def resolve_alert(
 async def assign_alert(
     alert_id: UUID,
     request: AlertAssignRequest,
-    ctx: AuthContext = Depends(require_roles("SOC_ANALYST", "SECURITY_MANAGER", "SECURITY_ADMIN")),
+    ctx: AuthContext = Depends(require_roles("SOC_ANALYST", "SECURITY_MANAGER")),
     db: OrmSession = Depends(get_db),
 ) -> AlertItem:
     """Assign an alert to a SOC analyst."""
@@ -637,7 +642,7 @@ async def assign_alert(
 async def request_security_action(
     alert_id: UUID,
     request: AlertActionRequest,
-    ctx: AuthContext = Depends(require_roles("SOC_ANALYST", "SECURITY_MANAGER", "SECURITY_ADMIN")),
+    ctx: AuthContext = Depends(require_roles("SOC_ANALYST", "SECURITY_MANAGER")),
     db: OrmSession = Depends(get_db),
 ) -> AlertActionResponse:
     """Apply a protective action (UC-DE-13 / UC-DE-11).
@@ -752,7 +757,7 @@ async def request_security_action(
 @router.get("/alerts/{alert_id}/timeline", response_model=List[TimelineEvent])
 async def get_alert_timeline(
     alert_id: UUID,
-    ctx: AuthContext = Depends(require_roles("SOC_ANALYST", "SECURITY_MANAGER", "SECURITY_ADMIN")),
+    ctx: AuthContext = Depends(require_roles("SOC_ANALYST", "SECURITY_MANAGER")),
     db: OrmSession = Depends(get_db),
 ) -> List[TimelineEvent]:
     """Get timeline events for an alert."""
@@ -773,7 +778,7 @@ async def get_alert_timeline(
 async def add_timeline_event(
     alert_id: UUID,
     request: TimelineEventCreate,
-    ctx: AuthContext = Depends(require_roles("SOC_ANALYST", "SECURITY_MANAGER", "SECURITY_ADMIN")),
+    ctx: AuthContext = Depends(require_roles("SOC_ANALYST", "SECURITY_MANAGER")),
     db: OrmSession = Depends(get_db),
 ) -> TimelineEvent:
     """Add a timeline event to an alert."""

@@ -306,3 +306,279 @@ class TestPgRoleRevocationImmediate:
             f"After role removal, SOC_ANALYST should get 403 even with same token. "
             f"Got {resp.status_code}: {resp.json()}"
         )
+
+
+# =============================================================================
+# E2E: SECURITY_ADMIN alert restriction
+# =============================================================================
+
+class TestPgSecurityAdminAlertRestriction:
+    """SECURITY_ADMIN must get 403 on all alert routes (least-privilege)."""
+
+    def test_security_admin_gets_403_on_alerts(self, pg_client, pg_db, _ensure_roles):
+        """SECURITY_ADMIN is NOT a SOC role → 403 on /alerts."""
+        _create_test_user(pg_db, "e2e_sec_admin_alerts", ["USER", "SECURITY_ADMIN"])
+        token = _login(pg_client, "e2e_sec_admin_alerts")
+
+        resp = pg_client.get(
+            "/api/v1/alerts",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        assert resp.status_code == 403, (
+            f"SECURITY_ADMIN should get 403 on /alerts, got {resp.status_code}: {resp.json()}"
+        )
+
+    def test_security_admin_gets_403_on_alert_actions(self, pg_client, pg_db, _ensure_roles):
+        """SECURITY_ADMIN must get 403 on POST /alerts/{id}/acknowledge."""
+        _create_test_user(pg_db, "e2e_sec_admin_action", ["USER", "SECURITY_ADMIN"])
+        token = _login(pg_client, "e2e_sec_admin_action")
+
+        resp = pg_client.post(
+            "/api/v1/alerts/00000000-0000-0000-0000-000000000001/acknowledge",
+            headers={"Authorization": f"Bearer {token}"},
+            json={"notes": "test"},
+        )
+        assert resp.status_code == 403, (
+            f"SECURITY_ADMIN should get 403 on /alerts/* actions, got {resp.status_code}: {resp.json()}"
+        )
+
+
+# =============================================================================
+# E2E: Auth session routes — canonical authentication
+# =============================================================================
+
+class TestPgAuthSessionRoutes:
+    """Auth session routes use canonical get_current_auth_context()."""
+
+    def test_sessions_requires_authentication(self, pg_client, pg_db, _ensure_roles):
+        """No token → 401."""
+        _create_test_user(pg_db, "e2e_sessions_no_auth", ["USER"])
+        resp = pg_client.get("/api/v1/auth/sessions")
+        assert resp.status_code == 401, f"No token should be 401, got {resp.status_code}"
+
+    def test_sessions_unknown_token(self, pg_client, pg_db, _ensure_roles):
+        """Unknown token → 401."""
+        resp = pg_client.get(
+            "/api/v1/auth/sessions",
+            headers={"Authorization": "Bearer unknown_token_xyz"},
+        )
+        assert resp.status_code == 401, f"Unknown token should be 401, got {resp.status_code}"
+
+    def test_sessions_expired_token(self, pg_client, pg_db, _ensure_roles):
+        """Expired session → 401 on GET /auth/sessions."""
+        from app.models import Session as SessionModel
+        user = _create_test_user(pg_db, "e2e_expired_sessions", ["USER"])
+        token = _login(pg_client, "e2e_expired_sessions")
+
+        # Manually expire the session in the DB
+        pg_db.query(SessionModel).filter(
+            SessionModel.user_id == user.id,
+            SessionModel.revoked_at.is_(None),
+        ).update({"expires_at": datetime.utcnow() - timedelta(hours=1)})
+        pg_db.commit()
+
+        resp = pg_client.get(
+            "/api/v1/auth/sessions",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        assert resp.status_code == 401, f"Expired token should be 401, got {resp.status_code}"
+
+    def test_sessions_revoked_token(self, pg_client, pg_db, _ensure_roles):
+        """Revoked session → 401 on GET /auth/sessions."""
+        from app.models import Session as SessionModel
+        user = _create_test_user(pg_db, "e2e_revoked_sessions", ["USER"])
+        token = _login(pg_client, "e2e_revoked_sessions")
+
+        # Manually revoke the session
+        pg_db.query(SessionModel).filter(
+            SessionModel.user_id == user.id,
+        ).update({"revoked_at": datetime.utcnow()})
+        pg_db.commit()
+
+        resp = pg_client.get(
+            "/api/v1/auth/sessions",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        assert resp.status_code == 401, f"Revoked token should be 401, got {resp.status_code}"
+
+    def test_sessions_locked_user(self, pg_client, pg_db, _ensure_roles):
+        """Locked/inactive user → 401 on GET /auth/sessions."""
+        user = _create_test_user(pg_db, "e2e_locked_sessions", ["USER"])
+        token = _login(pg_client, "e2e_locked_sessions")
+
+        # Lock the user
+        user.status = "locked"
+        pg_db.commit()
+
+        resp = pg_client.get(
+            "/api/v1/auth/sessions",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        assert resp.status_code == 401, f"Locked user should be 401, got {resp.status_code}"
+
+    def test_sessions_valid_token(self, pg_client, pg_db, _ensure_roles):
+        """Valid token → 200 with session list."""
+        _create_test_user(pg_db, "e2e_valid_sessions", ["USER"])
+        token = _login(pg_client, "e2e_valid_sessions")
+
+        resp = pg_client.get(
+            "/api/v1/auth/sessions",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        assert resp.status_code == 200, f"Valid token should be 200, got {resp.status_code}: {resp.json()}"
+        data = resp.json()
+        assert "sessions" in data
+        assert data["total"] >= 1
+
+    def test_delete_other_users_session_forbidden(self, pg_client, pg_db, _ensure_roles):
+        """Cannot DELETE another user's session → 403."""
+        user_a = _create_test_user(pg_db, "e2e_delete_a", ["USER"])
+        user_b = _create_test_user(pg_db, "e2e_delete_b", ["USER"])
+        token_a = _login(pg_client, "e2e_delete_a")
+        token_b = _login(pg_client, "e2e_delete_b")
+
+        # Get session IDs
+        from app.models import Session as SessionModel
+        session_b = pg_db.query(SessionModel).filter(
+            SessionModel.user_id == user_b.id,
+            SessionModel.revoked_at.is_(None),
+        ).first()
+
+        # User A tries to delete User B's session → 403
+        resp = pg_client.delete(
+            f"/api/v1/auth/sessions/{session_b.id}",
+            headers={"Authorization": f"Bearer {token_a}"},
+        )
+        assert resp.status_code == 403, (
+            f"Deleting another user's session should be 403, got {resp.status_code}: {resp.json()}"
+        )
+
+    def test_logout_then_same_token_401(self, pg_client, pg_db, _ensure_roles):
+        """Logout → same token now returns 401 on protected endpoints."""
+        _create_test_user(pg_db, "e2e_logout_401", ["USER"])
+        token = _login(pg_client, "e2e_logout_401")
+
+        # Logout
+        logout_resp = pg_client.post(
+            "/api/v1/auth/logout",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        assert logout_resp.status_code == 200
+
+        # Same token → 401
+        resp = pg_client.get(
+            "/api/v1/auth/sessions",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        assert resp.status_code == 401, f"Same token after logout should be 401, got {resp.status_code}"
+
+
+# =============================================================================
+# E2E: Trusted device authentication
+# =============================================================================
+
+class TestPgTrustedDeviceAuth:
+    """Trusted-device endpoints reject expired/revoked/locked sessions (401)."""
+
+    def test_list_devices_requires_authentication(self, pg_client, pg_db, _ensure_roles):
+        """No token → 401."""
+        _create_test_user(pg_db, "e2e_device_no_auth", ["USER"])
+        resp = pg_client.get("/api/v1/devices")
+        assert resp.status_code == 401, f"No token should be 401, got {resp.status_code}"
+
+    def test_list_devices_expired_session(self, pg_client, pg_db, _ensure_roles):
+        """Expired session → 401 on GET /devices."""
+        from app.models import Session as SessionModel
+        user = _create_test_user(pg_db, "e2e_device_expired", ["USER"])
+        token = _login(pg_client, "e2e_device_expired")
+
+        pg_db.query(SessionModel).filter(
+            SessionModel.user_id == user.id,
+            SessionModel.revoked_at.is_(None),
+        ).update({"expires_at": datetime.utcnow() - timedelta(hours=1)})
+        pg_db.commit()
+
+        resp = pg_client.get(
+            "/api/v1/devices",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        assert resp.status_code == 401, f"Expired session should be 401, got {resp.status_code}"
+
+    def test_list_devices_revoked_session(self, pg_client, pg_db, _ensure_roles):
+        """Revoked session → 401 on GET /devices."""
+        from app.models import Session as SessionModel
+        user = _create_test_user(pg_db, "e2e_device_revoked", ["USER"])
+        token = _login(pg_client, "e2e_device_revoked")
+
+        pg_db.query(SessionModel).filter(
+            SessionModel.user_id == user.id,
+        ).update({"revoked_at": datetime.utcnow()})
+        pg_db.commit()
+
+        resp = pg_client.get(
+            "/api/v1/devices",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        assert resp.status_code == 401, f"Revoked session should be 401, got {resp.status_code}"
+
+    def test_list_devices_locked_user(self, pg_client, pg_db, _ensure_roles):
+        """Locked user → 401 on GET /devices."""
+        user = _create_test_user(pg_db, "e2e_device_locked", ["USER"])
+        token = _login(pg_client, "e2e_device_locked")
+
+        user.status = "locked"
+        pg_db.commit()
+
+        resp = pg_client.get(
+            "/api/v1/devices",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        assert resp.status_code == 401, f"Locked user should be 401, got {resp.status_code}"
+
+    def test_list_devices_active_user_allowed(self, pg_client, pg_db, _ensure_roles):
+        """Active authenticated user → 200 on GET /devices."""
+        _create_test_user(pg_db, "e2e_device_active", ["USER"])
+        token = _login(pg_client, "e2e_device_active")
+
+        resp = pg_client.get(
+            "/api/v1/devices",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        assert resp.status_code == 200, f"Active user should be 200, got {resp.status_code}: {resp.json()}"
+
+    def test_trust_device_expired_session(self, pg_client, pg_db, _ensure_roles):
+        """Expired session → 401 on POST /devices."""
+        from app.models import Session as SessionModel
+        user = _create_test_user(pg_db, "e2e_trust_expired", ["USER"])
+        token = _login(pg_client, "e2e_trust_expired")
+
+        pg_db.query(SessionModel).filter(
+            SessionModel.user_id == user.id,
+            SessionModel.revoked_at.is_(None),
+        ).update({"expires_at": datetime.utcnow() - timedelta(hours=1)})
+        pg_db.commit()
+
+        resp = pg_client.post(
+            "/api/v1/devices",
+            headers={"Authorization": f"Bearer {token}"},
+            json={"remember_for_days": 30},
+        )
+        assert resp.status_code == 401, f"Expired session should be 401, got {resp.status_code}"
+
+    def test_delete_device_expired_session(self, pg_client, pg_db, _ensure_roles):
+        """Expired session → 401 on DELETE /devices/{id}."""
+        from app.models import Session as SessionModel
+        user = _create_test_user(pg_db, "e2e_deldev_expired", ["USER"])
+        token = _login(pg_client, "e2e_deldev_expired")
+
+        pg_db.query(SessionModel).filter(
+            SessionModel.user_id == user.id,
+            SessionModel.revoked_at.is_(None),
+        ).update({"expires_at": datetime.utcnow() - timedelta(hours=1)})
+        pg_db.commit()
+
+        resp = pg_client.delete(
+            "/api/v1/devices/00000000-0000-0000-0000-000000000001",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        assert resp.status_code == 401, f"Expired session should be 401, got {resp.status_code}"
