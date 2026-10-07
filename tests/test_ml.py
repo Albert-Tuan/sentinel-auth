@@ -6,7 +6,8 @@ from app.main import app
 from app.ml import ANOMALY_THRESHOLD, FEATURE_FIELDS, HeuristicAnomalyModel
 
 client = TestClient(app)
-SECRET = {"X-Internal-Secret": "changeme-in-production"}
+# Must match _TEST_INTERNAL_SECRET in conftest.py.
+SECRET_HEADER = {"X-Internal-Secret": "test-internal-secret-at-least-32-characters-long"}
 
 
 def test_score_requires_internal_secret():
@@ -21,7 +22,7 @@ def test_score_returns_canonical_response_shape():
     response = client.post(
         "/api/v1/internal/ml/score",
         json={"features": {"hour_of_day": 2, "fail_count_24h": 5}},
-        headers=SECRET,
+        headers=SECRET_HEADER,
     )
     assert response.status_code == 200
     body = response.json()
@@ -38,7 +39,7 @@ def test_high_failure_count_scores_anomalous():
     response = client.post(
         "/api/v1/internal/ml/score",
         json={"features": {"fail_count_24h": 6}},
-        headers=SECRET,
+        headers=SECRET_HEADER,
     )
     body = response.json()
     assert body["is_anomaly"] is True
@@ -58,7 +59,7 @@ def test_normal_login_scores_low():
                 "deviation_score": 0.1,
             }
         },
-        headers=SECRET,
+        headers=SECRET_HEADER,
     )
     body = response.json()
     assert body["normalized_anomaly_score"] < 0.25
@@ -68,7 +69,7 @@ def test_normal_login_scores_low():
 def test_empty_features_are_accepted():
     """Missing features must not 500 - the engine degrades gracefully."""
     response = client.post(
-        "/api/v1/internal/ml/score", json={"features": {}}, headers=SECRET
+        "/api/v1/internal/ml/score", json={"features": {}}, headers=SECRET_HEADER
     )
     assert response.status_code == 200
 
@@ -77,7 +78,7 @@ def test_invalid_feature_type_is_rejected():
     response = client.post(
         "/api/v1/internal/ml/score",
         json={"features": {"hour_of_day": 99}},
-        headers=SECRET,
+        headers=SECRET_HEADER,
     )
     assert response.status_code == 422
 

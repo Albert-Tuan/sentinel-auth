@@ -38,10 +38,12 @@ from app.schemas import (
     LogoutResponse, SessionItem, SessionList,
 )
 
-logger = logging.getLogger(__name__)
+from app.internal_auth import (
+    InternalAuthConfigurationError,
+    get_internal_secret,
+)
 
-#: Shared secret with the Detection Engine.
-INTERNAL_SECRET = os.getenv("INTERNAL_SECRET", "changeme-in-production")
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/v1/auth", tags=["auth"])
 ph = PasswordHasher()
@@ -234,7 +236,7 @@ async def _pre_token_risk(user, client_ip: str, user_agent: Optional[str]) -> Op
                     "ip_address": client_ip,
                     "user_agent": user_agent,
                 },
-                headers={"X-Internal-Secret": INTERNAL_SECRET},
+                headers={"X-Internal-Secret": get_internal_secret()},
             )
     except Exception as exc:  # noqa: BLE001 - fail open by design
         logger.warning(

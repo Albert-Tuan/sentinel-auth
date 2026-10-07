@@ -29,6 +29,7 @@ from pydantic import BaseModel
 from sqlalchemy.orm import Session as OrmSession
 
 from app.db import get_db
+from app.internal_auth import get_internal_secret, InternalAuthConfigurationError, verify_internal_secret
 from app.models import Alert, DetectionLog, LoginAttempt, Policy, RiskAssessment
 from app.schemas import (
     ActionRequest,
@@ -69,11 +70,6 @@ DECISION_MATRIX = {
 }
 
 
-def internal_secret() -> str:
-    """Shared secret protecting service-to-service endpoints."""
-    return os.getenv("INTERNAL_SECRET", "changeme-in-production")
-
-
 def ml_service_url() -> str:
     """Base URL of the ML Service, without trailing slash."""
     return os.getenv("ML_SERVICE_URL", "http://localhost:8002").rstrip("/")
@@ -99,15 +95,6 @@ RISK_ACTION_MAP = {
     "high": "REQUIRE_MFA",
     "critical": "REVOKE_SESSIONS",
 }
-
-
-def verify_internal_secret(x_internal_secret: Optional[str]) -> None:
-    """Raise 401 unless the caller presented the correct shared secret."""
-    if not x_internal_secret or x_internal_secret != internal_secret():
-        raise HTTPException(
-            status_code=http_status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid or missing X-Internal-Secret",
-        )
 
 
 # =============================================================================
@@ -443,11 +430,15 @@ async def call_ml_service(features: Dict[str, Any], request_id: UUID) -> MlOutco
         "features": {k: v for k, v in features.items() if v is not None},
     }
     try:
+        headers = {"X-Internal-Secret": get_internal_secret()}
+    except InternalAuthConfigurationError:
+        return MlOutcome(None, "unavailable", error="internal_auth_not_configured")
+    try:
         async with httpx.AsyncClient(timeout=ML_TIMEOUT_SECONDS) as client:
             response = await client.post(
                 url,
                 json=payload,
-                headers={"X-Internal-Secret": internal_secret()},
+                headers=headers,
             )
         if response.status_code >= 500:
             return MlOutcome(None, "error", error=f"ml_service_http_{response.status_code}")
@@ -695,11 +686,20 @@ async def enforce_action_in_core(
         payload["severity"] = risk_level
 
     try:
+        headers = {"X-Internal-Secret": get_internal_secret()}
+    except InternalAuthConfigurationError:
+        logger.warning(
+            "internal secret not configured, action %s not enforced for attempt %s",
+            action, attempt.id,
+        )
+        return False
+
+    try:
         async with httpx.AsyncClient(timeout=ACTION_ENFORCE_TIMEOUT_SECONDS) as client:
             response = await client.post(
                 f"{core_app_url()}/api/v1/internal/actions",
                 json=payload,
-                headers={"X-Internal-Secret": internal_secret()},
+                headers=headers,
             )
     except httpx.HTTPError as exc:
         logger.warning(

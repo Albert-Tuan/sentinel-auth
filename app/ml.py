@@ -22,13 +22,13 @@ Routes (Detection Engine calls this service over HTTP):
 from __future__ import annotations
 
 import logging
-import os
 from typing import Any, Dict, List, Optional
 from uuid import UUID, uuid4
 
-from fastapi import APIRouter, Header, HTTPException, status as http_status
+from fastapi import APIRouter, Header
 from pydantic import BaseModel, Field
 
+from app.internal_auth import verify_internal_secret
 from app.schemas import DetectionFeatureVector
 
 logger = logging.getLogger(__name__)
@@ -47,18 +47,6 @@ FEATURE_FIELDS = (
     "average_login_interval_seconds",
     "deviation_score",
 )
-
-
-def internal_secret() -> str:
-    return os.getenv("INTERNAL_SECRET", "changeme-in-production")
-
-
-def verify_internal_secret(x_internal_secret: Optional[str]) -> None:
-    if not x_internal_secret or x_internal_secret != internal_secret():
-        raise HTTPException(
-            status_code=http_status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid or missing X-Internal-Secret",
-        )
 
 
 # =============================================================================

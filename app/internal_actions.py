@@ -14,7 +14,6 @@ is used because there is no human on the other side of the call.
 from __future__ import annotations
 
 import logging
-import os
 from datetime import datetime, timezone
 from typing import List, Optional
 from uuid import UUID
@@ -24,6 +23,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session as OrmSession
 
 from app.db import get_db
+from app.internal_auth import verify_internal_secret
 from app.models import Role, Session, User, UserRole
 from app.schemas import ActionRequest, ActionResponse
 
@@ -35,20 +35,6 @@ router = APIRouter(prefix="/api/v1/internal", tags=["core-internal"])
 # =============================================================================
 # Helpers
 # =============================================================================
-
-def internal_secret() -> str:
-    """Shared secret protecting service-to-service endpoints."""
-    return os.getenv("INTERNAL_SECRET", "changeme-in-production")
-
-
-def verify_internal_secret(x_internal_secret: Optional[str]) -> None:
-    """Raise 401 unless the caller presented the correct shared secret."""
-    if not x_internal_secret or x_internal_secret != internal_secret():
-        raise HTTPException(
-            status_code=http_status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid or missing X-Internal-Secret",
-        )
-
 
 def _now_utc() -> datetime:
     return datetime.now(timezone.utc)

@@ -3,12 +3,19 @@
 Covers UC-DE-07 (POST /api/v1/internal/actions) and the WF-3 cross-database
 user lookup (GET /api/v1/internal/users/{user_id}). Backed by a real SQLite
 database so the models, constraints and relationships are exercised for real.
+
+``INTERNAL_SECRET`` is set to the test value by the session-scoped autouse
+fixture in ``conftest.py``.
 """
 from uuid import uuid4
 
+import pytest
+
 from app.models import Session, User
 
-SECRET = {"X-Internal-Secret": "changeme-in-production"}
+#: Header dict used by this module's tests.  The session-scoped autouse
+#: fixture in conftest.py sets INTERNAL_SECRET to this exact value.
+SECRET_HEADER = {"X-Internal-Secret": "test-internal-secret-at-least-32-characters-long"}
 
 
 def _post(client, action, user_id, **extra):
@@ -18,7 +25,7 @@ def _post(client, action, user_id, **extra):
         "reason": "suspicious login",
         **extra,
     }
-    return client.post("/api/v1/internal/actions", json=body, headers=SECRET)
+    return client.post("/api/v1/internal/actions", json=body, headers=SECRET_HEADER)
 
 
 # =============================================================================
@@ -193,7 +200,7 @@ def test_missing_reason_returns_422(client, user):
     response = client.post(
         "/api/v1/internal/actions",
         json={"action": "LOCK_USER", "target_user_id": str(user.id)},
-        headers=SECRET,
+        headers=SECRET_HEADER,
     )
     assert response.status_code == 422
 
@@ -203,7 +210,7 @@ def test_missing_reason_returns_422(client, user):
 # =============================================================================
 
 def test_internal_user_returns_roles(client, user):
-    response = client.get(f"/api/v1/internal/users/{user.id}", headers=SECRET)
+    response = client.get(f"/api/v1/internal/users/{user.id}", headers=SECRET_HEADER)
 
     assert response.status_code == 200
     body = response.json()
@@ -215,11 +222,11 @@ def test_internal_user_returns_roles(client, user):
 
 
 def test_internal_user_unknown_returns_404(client):
-    assert client.get(f"/api/v1/internal/users/{uuid4()}", headers=SECRET).status_code == 404
+    assert client.get(f"/api/v1/internal/users/{uuid4()}", headers=SECRET_HEADER).status_code == 404
 
 
 def test_internal_user_never_leaks_password_hash(client, user):
-    response = client.get(f"/api/v1/internal/users/{user.id}", headers=SECRET)
+    response = client.get(f"/api/v1/internal/users/{user.id}", headers=SECRET_HEADER)
 
     assert "argon2-hash" not in response.text
     assert "password" not in response.json()
