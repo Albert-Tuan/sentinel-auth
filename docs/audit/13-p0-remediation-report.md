@@ -181,7 +181,7 @@
 |---|---|---|---|---|
 | All 4 files together | 62 | 37 | 25 | 0 |
 
-*Note: `test_postgres_rbac.py` is skipped when run individually due to missing RBAC seed data fixture (module-scope dependency on `test_postgres_auth.py` bootstrap). This is a pre-existing test infrastructure limitation, not a code defect.*
+*Note: `test_postgres_rbac.py` uses `pytestmark.skipif(not _pg_available())` which returns `True` when any `POSTGRES_HOST`, `POSTGRES_DB`, `POSTGRES_USER`, or `POSTGRES_PASSWORD` environment variable is unset. With all four variables set, the 25 RBAC tests would run and count toward the passed total. This is a test-run environment requirement, not a code or fixture defect.*
 
 ---
 
@@ -226,8 +226,8 @@ These are **NOT** remediated in this audit. Listed for completeness.
 | # | Finding | Location | Classification |
 |---|---|---|---|
 | P1-A | `INTERNAL_SECRET` defaults to `"changeme-in-production"` in all service modules | `app/auth.py:44`, `app/detection.py:74`, `app/internal_actions.py:41`, `app/ml.py:53` | Hardcoded secret default; service-to-service auth is unauthenticated if env var not set |
-| P1-B | `POST /api/v1/alerts/{id}/actions` allows `SECURITY_MANAGER` — spec requires SOC_ANALYST only | `app/alerts.py:641` | Permission scope wider than spec |
-| P1-C | `GET /api/v1/policies` allows `SECURITY_ADMIN + SECURITY_MANAGER` — spec requires `SOC_ANALYST + SECURITY_MANAGER` | `app/detection.py:985` | SOC_ANALYST missing from allowed roles |
+| P1-B | Protective-action authorization / approval workflow unresolved | `app/alerts.py:641` | docs/05 UC-DE-13 names SOC Analyst as primary actor; docs/06 grants SECURITY_MANAGER `APPROVE_ACTION` and lists them as a UC-DE-13 participant; implementation allows both SOC_ANALYST and SECURITY_MANAGER to directly apply actions via `POST /alerts/{id}/actions` — the distinction between requesting an action, approving it, and directly applying it is not enforced |
+| P1-C | Documentation / role-boundary conflict on policy view permissions | `app/detection.py:985` | docs/05 UC-DE-15 assigns primary actor = Security Admin; docs/06 grants SECURITY_MANAGER `MANAGE_POLICIES`/UC-DE-15; Core docs assign rule versioning to Security Administrator; implementation allows SECURITY_ADMIN + SECURITY_MANAGER on GET /policies; SOC_ANALYST has no UC-DE-15 permission in any canonical doc; conflict is between documented role assignments and implementation rather than a missing SOC_ANALYST permission |
 | P1-D | X-Forwarded-For / trusted proxy handling | `app/auth.py:64-66` | No validation of XFF chain; IP spoofing possible behind untrusted proxy |
 
 ### P1 — Medium
