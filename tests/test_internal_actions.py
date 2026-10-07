@@ -13,8 +13,7 @@ import pytest
 
 from app.models import Session, User
 
-#: Header dict used by this module's tests.  The session-scoped autouse
-#: fixture in conftest.py sets INTERNAL_SECRET to this exact value.
+#: Must match TEST_INTERNAL_SECRET in conftest.py.
 SECRET_HEADER = {"X-Internal-Secret": "test-internal-secret-at-least-32-characters-long"}
 
 
@@ -230,3 +229,76 @@ def test_internal_user_never_leaks_password_hash(client, user):
 
     assert "argon2-hash" not in response.text
     assert "password" not in response.json()
+
+
+# =============================================================================
+# P1-A API-level misconfiguration tests (fail-closed)
+# =============================================================================
+
+def test_actions_returns_503_when_internal_secret_not_configured(client, user, monkeypatch):
+    """POST /api/v1/internal/actions returns 503 when INTERNAL_SECRET is absent."""
+    monkeypatch.delenv("INTERNAL_SECRET", raising=False)
+    response = client.post(
+        "/api/v1/internal/actions",
+        json={"action": "LOCK_USER", "target_user_id": str(user.id), "reason": "test"},
+    )
+    assert response.status_code == 503
+    assert "not configured" in response.json()["detail"]
+
+
+def test_actions_returns_401_when_secret_wrong(client, user):
+    """POST /api/v1/internal/actions returns 401 when header is wrong."""
+    response = client.post(
+        "/api/v1/internal/actions",
+        json={"action": "LOCK_USER", "target_user_id": str(user.id), "reason": "test"},
+        headers={"X-Internal-Secret": "wrong-secret-value-here"},
+    )
+    assert response.status_code == 401
+
+
+def test_actions_returns_401_when_header_missing(client, user):
+    """POST /api/v1/internal/actions returns 401 when header is absent."""
+    response = client.post(
+        "/api/v1/internal/actions",
+        json={"action": "LOCK_USER", "target_user_id": str(user.id), "reason": "test"},
+    )
+    assert response.status_code == 401
+
+
+def test_actions_succeeds_with_correct_secret(client, user):
+    """POST /api/v1/internal/actions returns 200 when header is correct."""
+    response = client.post(
+        "/api/v1/internal/actions",
+        json={"action": "LOCK_USER", "target_user_id": str(user.id), "reason": "test"},
+        headers=SECRET_HEADER,
+    )
+    assert response.status_code == 200
+
+
+def test_users_returns_503_when_internal_secret_not_configured(client, user, monkeypatch):
+    """GET /api/v1/internal/users/{id} returns 503 when INTERNAL_SECRET is absent."""
+    monkeypatch.delenv("INTERNAL_SECRET", raising=False)
+    response = client.get(f"/api/v1/internal/users/{user.id}")
+    assert response.status_code == 503
+    assert "not configured" in response.json()["detail"]
+
+
+def test_users_returns_401_when_secret_wrong(client, user):
+    """GET /api/v1/internal/users/{id} returns 401 when header is wrong."""
+    response = client.get(
+        f"/api/v1/internal/users/{user.id}",
+        headers={"X-Internal-Secret": "wrong-secret-value-here"},
+    )
+    assert response.status_code == 401
+
+
+def test_users_returns_401_when_header_missing(client, user):
+    """GET /api/v1/internal/users/{id} returns 401 when header is absent."""
+    response = client.get(f"/api/v1/internal/users/{user.id}")
+    assert response.status_code == 401
+
+
+def test_users_succeeds_with_correct_secret(client, user):
+    """GET /api/v1/internal/users/{id} returns 200 when header is correct."""
+    response = client.get(f"/api/v1/internal/users/{user.id}", headers=SECRET_HEADER)
+    assert response.status_code == 200

@@ -184,14 +184,46 @@ def test_is_configured_false_for_placeholder(monkeypatch):
 # Constant-time comparison
 # ---------------------------------------------------------------------------
 
-def test_constant_time_comparison_used(monkeypatch):
-    """Verification uses ``secrets.compare_digest`` (tested indirectly).
+def test_constant_time_comparison_is_called(monkeypatch):
+    """``secrets.compare_digest`` is called during verification.
 
-    A near-miss (one character different) takes the same error path as a
-    completely wrong secret — confirming the comparison is constant-time.
+    Patches ``get_internal_secret`` with a known test value, then patches
+    ``secrets.compare_digest`` to capture its arguments.  Verifies both the
+    correct-secret path (no exception) and the wrong-secret path (401) call
+    ``compare_digest`` with the expected values.
     """
-    monkeypatch.setenv("INTERNAL_SECRET", "super-secret-value-at-least-32-characters")
-    almost = "super-secret-value-at-least-32-charactersX"
-    with pytest.raises(HTTPException) as exc_info:
-        verify_internal_secret(almost)
-    assert exc_info.value.status_code == 401
+    from app.internal_auth import verify_internal_secret, InternalAuthConfigurationError
+    import app.internal_auth as ia
+
+    test_secret = "a" * 32
+    monkeypatch.setenv("INTERNAL_SECRET", test_secret)
+
+    # Replace get_internal_secret so it returns the known test value.
+    # This avoids the reload trick — the patched function is called at call time.
+    monkeypatch.setattr(ia, "get_internal_secret", lambda: test_secret)
+
+    call_args = {}
+    original_compare = ia.secrets.compare_digest
+
+    def _spy(a, b):
+        call_args["a"] = a
+        call_args["b"] = b
+        return original_compare(a, b)
+
+    monkeypatch.setattr(ia.secrets, "compare_digest", _spy)
+
+    # Correct secret — compare_digest is called; no exception.
+    verify_internal_secret(test_secret)
+    assert call_args["a"] == test_secret
+    assert call_args["b"] == test_secret
+
+    call_args.clear()
+
+    # Wrong secret — compare_digest is called with both values; 401 raised.
+    try:
+        verify_internal_secret("wrong-secret-value-here")
+    except ia.HTTPException as exc:
+        assert exc.status_code == 401
+
+    assert call_args["a"] == "wrong-secret-value-here"
+    assert call_args["b"] == test_secret

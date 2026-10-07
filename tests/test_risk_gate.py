@@ -16,9 +16,8 @@ import pytest
 
 from app import auth as auth_mod
 from app import detection as det_mod
+from app.internal_auth import InternalAuthConfigurationError
 from app.models import LoginAttempt, User
-
-SECRET = "changeme-in-production"
 
 
 @pytest.fixture()
@@ -127,6 +126,54 @@ async def test_gate_fails_open_on_connection_error(monkeypatch):
 
     _mock_post(monkeypatch, boom)
     assert await auth_mod._pre_token_risk(User(id="u1", username="a"), "1.1.1.1", None) is None
+
+
+async def test_gate_fails_open_when_internal_secret_not_configured(monkeypatch):
+    """When INTERNAL_SECRET is absent, _pre_token_risk must not send 'changeme-in-production'.
+
+    It must return None (fail-open) and raise InternalAuthConfigurationError,
+    which is caught by the existing except clause.
+    """
+    from app.internal_auth import InternalAuthConfigurationError
+
+    monkeypatch.setattr(auth_mod, "RUN_PRE_TOKEN_CHECK", "1")
+    monkeypatch.setattr(auth_mod, "DETECTION_URL", "http://det")
+    monkeypatch.delenv("INTERNAL_SECRET", raising=False)
+
+    # Patch get_internal_secret to raise, simulating the absent/invalid secret path.
+    monkeypatch.setattr(
+        auth_mod, "get_internal_secret",
+        lambda: (_ for _ in ()).throw(
+            InternalAuthConfigurationError("INTERNAL_SECRET is not set")
+        ),
+    )
+
+    # No HTTP should be attempted at all.
+    def boom(url, kwargs):
+        raise AssertionError("HTTP must not be called when secret is absent")
+
+    _mock_post(monkeypatch, boom)
+    assert await auth_mod._pre_token_risk(User(id="u1", username="a"), "1.1.1.1", None) is None
+
+
+async def test_gate_sends_correct_secret_header(monkeypatch):
+    """The outbound request to Detection must use the configured secret, not a default."""
+    monkeypatch.setattr(auth_mod, "RUN_PRE_TOKEN_CHECK", "1")
+    monkeypatch.setattr(auth_mod, "DETECTION_URL", "http://det")
+
+    seen_headers = {}
+
+    def handler(url, kwargs):
+        seen_headers.update(kwargs.get("headers", {}))
+        return httpx.Response(
+            200, json={"risk_level": "low", "decision": "allow", "require_mfa": False},
+        )
+
+    _mock_post(monkeypatch, handler)
+
+    assert await auth_mod._pre_token_risk(User(id="u1", username="a"), "1.1.1.1", None) is None
+    assert "X-Internal-Secret" in seen_headers
+    assert seen_headers["X-Internal-Secret"] == "test-internal-secret-at-least-32-characters-long"
 
 
 async def test_gate_fails_open_on_timeout(monkeypatch):

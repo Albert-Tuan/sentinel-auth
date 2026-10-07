@@ -321,3 +321,207 @@ def test_internal_endpoints_require_secret():
     }
     assert client.post("/api/v1/internal/login-events", json=payload).status_code == 401
     assert client.post("/api/v1/internal/ml/score", json={"features": {}}).status_code == 401
+
+
+# =============================================================================
+# P1-A API-level fail-closed tests
+# =============================================================================
+
+def test_login_events_returns_503_when_internal_secret_not_configured(monkeypatch):
+    """POST /api/v1/internal/login-events returns 503 when INTERNAL_SECRET is absent."""
+    monkeypatch.delenv("INTERNAL_SECRET", raising=False)
+    from fastapi.testclient import TestClient
+    from app.main import app
+    client = TestClient(app)
+    payload = {
+        "event_id": str(uuid4()),
+        "username_attempted": "alice",
+        "outcome": "failure",
+        "timestamp": "2026-10-04T12:00:00Z",
+    }
+    response = client.post("/api/v1/internal/login-events", json=payload)
+    assert response.status_code == 503
+    assert "not configured" in response.json()["detail"]
+
+
+def test_login_events_returns_401_when_secret_wrong():
+    """POST /api/v1/internal/login-events returns 401 when header is wrong."""
+    from fastapi.testclient import TestClient
+    from app.main import app
+    client = TestClient(app)
+    payload = {
+        "event_id": str(uuid4()),
+        "username_attempted": "alice",
+        "outcome": "failure",
+        "timestamp": "2026-10-04T12:00:00Z",
+    }
+    response = client.post(
+        "/api/v1/internal/login-events", json=payload,
+        headers={"X-Internal-Secret": "wrong-secret-value-here"},
+    )
+    assert response.status_code == 401
+
+
+async def test_login_events_succeeds_with_correct_secret(client):
+    """POST /api/v1/internal/login-events returns 202 when header is correct.
+
+    Skipped when PostgreSQL is not available because the endpoint requires a DB.
+    The 503 / 401 / wrong-secret cases are already covered without DB access.
+    """
+    pytest.importorskip("psycopg2")
+    payload = {
+        "event_id": str(uuid4()),
+        "username_attempted": "alice",
+        "outcome": "failure",
+        "timestamp": "2026-10-04T12:00:00Z",
+    }
+    response = client.post(
+        "/api/v1/internal/login-events", json=payload,
+        headers={"X-Internal-Secret": "test-internal-secret-at-least-32-characters-long"},
+    )
+    assert response.status_code == 202
+
+
+def test_pre_token_check_returns_503_when_internal_secret_not_configured(monkeypatch):
+    """POST /api/v1/internal/pre-token-check returns 503 when INTERNAL_SECRET is absent."""
+    monkeypatch.delenv("INTERNAL_SECRET", raising=False)
+    from fastapi.testclient import TestClient
+    from app.main import app
+    client = TestClient(app)
+    payload = {"username": "alice", "ip_address": "1.2.3.4"}
+    response = client.post("/api/v1/internal/pre-token-check", json=payload)
+    assert response.status_code == 503
+    assert "not configured" in response.json()["detail"]
+
+
+def test_pre_token_check_returns_401_when_secret_wrong():
+    """POST /api/v1/internal/pre-token-check returns 401 when header is wrong."""
+    from fastapi.testclient import TestClient
+    from app.main import app
+    client = TestClient(app)
+    payload = {"username": "alice", "ip_address": "1.2.3.4"}
+    response = client.post(
+        "/api/v1/internal/pre-token-check", json=payload,
+        headers={"X-Internal-Secret": "wrong-secret-value-here"},
+    )
+    assert response.status_code == 401
+
+
+def test_login_attempt_returns_503_when_internal_secret_not_configured(monkeypatch):
+    """GET /api/v1/internal/login-attempts/{id} returns 503 when INTERNAL_SECRET is absent."""
+    monkeypatch.delenv("INTERNAL_SECRET", raising=False)
+    from fastapi.testclient import TestClient
+    from app.main import app
+    client = TestClient(app)
+    response = client.get(f"/api/v1/internal/login-attempts/{uuid4()}")
+    assert response.status_code == 503
+    assert "not configured" in response.json()["detail"]
+
+
+def test_login_attempt_returns_401_when_secret_wrong():
+    """GET /api/v1/internal/login-attempts/{id} returns 401 when header is wrong."""
+    from fastapi.testclient import TestClient
+    from app.main import app
+    client = TestClient(app)
+    response = client.get(
+        f"/api/v1/internal/login-attempts/{uuid4()}",
+        headers={"X-Internal-Secret": "wrong-secret-value-here"},
+    )
+    assert response.status_code == 401
+
+
+# =============================================================================
+# P1-A outbound configuration tests
+#
+# All three outbound paths (Auth→Detection, Detection→ML, Detection→Core)
+# must NOT send "changeme-in-production" when INTERNAL_SECRET is absent.
+# We test this by patching get_internal_secret to raise, which is the
+# code path that would be taken when the env var is missing or invalid.
+# =============================================================================
+
+def test_ml_outbound_returns_unavailable_when_secret_not_configured(monkeypatch):
+    """Detection → ML: raises InternalAuthConfigurationError → MlOutcome unavailable.
+
+    No HTTP request is made when the secret is not configured, so there is
+    no risk of a fallback credential being sent over the wire.
+    """
+    from app.detection import call_ml_service
+    from app.internal_auth import InternalAuthConfigurationError
+
+    # Prevent any real HTTP from being attempted by patching httpx.AsyncClient.
+    class _NoHttp:
+        async def __aenter__(self):
+            raise RuntimeError("HTTP must not be called when secret is absent")
+
+        async def __aexit__(self, *exc):
+            pass
+
+    import httpx
+    monkeypatch.setattr(httpx, "AsyncClient", _NoHttp)
+    monkeypatch.delenv("INTERNAL_SECRET", raising=False)
+
+    # The environment read path is os.environ.get — the delenv above makes it None.
+    # Now patch the internal helper to also raise, simulating the validation failure.
+    from app import detection as det_mod
+    monkeypatch.setattr(
+        det_mod, "get_internal_secret",
+        lambda: (_ for _ in ()).throw(
+            InternalAuthConfigurationError("INTERNAL_SECRET is not set")
+        ),
+    )
+
+    result = None
+
+    async def _run():
+        nonlocal result
+        result = await call_ml_service(
+            features={"hour_of_day": 10},
+            request_id=uuid4(),
+        )
+
+    import asyncio
+    asyncio.run(_run())
+
+    assert result is not None
+    assert result.status == "unavailable"
+    assert result.error == "internal_auth_not_configured"
+
+
+def test_action_outbound_returns_false_when_secret_not_configured(monkeypatch):
+    """Detection → Core: returns False when INTERNAL_SECRET is not configured.
+
+    The secret check is the first line inside the function (after the `RISK_ACTION_MAP`
+    lookup and `attempt.user_id` guard).  We provide a valid fake attempt and patch
+    ``get_internal_secret`` to raise so the HTTP call is never reached.
+    """
+    from app import detection as det_mod
+    from app.internal_auth import InternalAuthConfigurationError
+
+    # Patch get_internal_secret on the module so the function sees it.
+    monkeypatch.setattr(
+        det_mod, "get_internal_secret",
+        lambda: (_ for _ in ()).throw(
+            InternalAuthConfigurationError("INTERNAL_SECRET is not set")
+        ),
+    )
+
+    # Fake attempt with all attributes the function accesses before the secret check.
+    class _FakeAttempt:
+        id = uuid4()
+        user_id = uuid4()
+        username_attempted = "alice"
+        detection_decision = "REQUIRE_MFA"
+
+    result = None
+
+    async def _run():
+        nonlocal result
+        result = await det_mod.enforce_action_in_core(
+            attempt=_FakeAttempt(),
+            risk_level="critical",
+        )
+
+    import asyncio
+    asyncio.run(_run())
+
+    assert result is False

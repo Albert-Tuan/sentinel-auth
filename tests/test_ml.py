@@ -106,3 +106,67 @@ def test_model_score_always_within_unit_range():
         for failures in (0, 1, 3, 5, 20):
             score, _ = model.predict({"hour_of_day": hour, "fail_count_24h": failures})
             assert 0.0 <= score <= 1.0
+
+
+# =============================================================================
+# P1-A API-level misconfiguration tests (fail-closed)
+# =============================================================================
+
+def test_ml_score_returns_503_when_internal_secret_not_configured(monkeypatch):
+    """POST /api/v1/internal/ml/score returns 503 when INTERNAL_SECRET is absent."""
+    monkeypatch.delenv("INTERNAL_SECRET", raising=False)
+    response = client.post(
+        "/api/v1/internal/ml/score",
+        json={"features": {"hour_of_day": 2}},
+    )
+    assert response.status_code == 503
+    assert "not configured" in response.json()["detail"]
+
+
+def test_ml_score_returns_401_when_secret_wrong():
+    """POST /api/v1/internal/ml/score returns 401 when header is wrong."""
+    response = client.post(
+        "/api/v1/internal/ml/score",
+        json={"features": {"hour_of_day": 2}},
+        headers={"X-Internal-Secret": "wrong-secret-value-here"},
+    )
+    assert response.status_code == 401
+
+
+def test_ml_score_returns_401_when_header_missing():
+    """POST /api/v1/internal/ml/score returns 401 when header is absent."""
+    response = client.post(
+        "/api/v1/internal/ml/score",
+        json={"features": {"hour_of_day": 2}},
+    )
+    assert response.status_code == 401
+
+
+def test_ml_score_succeeds_with_correct_secret():
+    """POST /api/v1/internal/ml/score returns 200 when header is correct."""
+    response = client.post(
+        "/api/v1/internal/ml/score",
+        json={"features": {"hour_of_day": 2}},
+        headers=SECRET_HEADER,
+    )
+    assert response.status_code == 200
+
+
+# =============================================================================
+# P1-A placeholder rejection at API level
+# =============================================================================
+
+def test_ml_score_rejects_placeholder_secret(monkeypatch):
+    """Setting INTERNAL_SECRET to 'changeme-in-production' and sending that header
+    must return 503, NOT 200.
+
+    This proves the placeholder cannot be used to authenticate at the API level.
+    """
+    monkeypatch.setenv("INTERNAL_SECRET", "changeme-in-production")
+    response = client.post(
+        "/api/v1/internal/ml/score",
+        json={"features": {"hour_of_day": 2}},
+        headers={"X-Internal-Secret": "changeme-in-production"},
+    )
+    assert response.status_code == 503
+    assert "not configured" in response.json()["detail"]

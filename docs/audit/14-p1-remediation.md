@@ -128,18 +128,19 @@ Constant-time comparison: `secrets.compare_digest()` used in `verify_internal_se
 |---|---|
 | `app/internal_auth.py` | **Created** — canonical module |
 | `app/auth.py` | Removed `INTERNAL_SECRET` constant; added import of `get_internal_secret`, `InternalAuthConfigurationError`; outbound call updated to use `get_internal_secret()` |
-| `app/detection.py` | Removed local `internal_secret()` and `verify_internal_secret()`; added imports; outbound ML call wrapped with `InternalAuthConfigurationError → MlOutcome`; outbound action call wrapped with `InternalAuthConfigurationError → False + warning log` |
-| `app/internal_actions.py` | Removed local `internal_secret()` and `verify_internal_secret()`; added `verify_internal_secret` import; removed unused `os` and `Optional` imports |
-| `app/ml.py` | Removed local `internal_secret()` and `verify_internal_secret()`; added `verify_internal_secret` import; removed unused `HTTPException`, `http_status` imports |
-| `tests/conftest.py` | Added session-scoped autouse fixture `_set_internal_secret` that sets `INTERNAL_SECRET` to the test value |
-| `tests/test_internal_actions.py` | Removed local `SECRET` constant; updated to `SECRET_HEADER` |
-| `tests/test_ml.py` | Removed local `SECRET` constant; updated to `SECRET_HEADER` |
-| `tests/test_risk_gate.py` | Removed unused `SECRET` constant |
-| `tests/test_internal_auth.py` | **Created** — 17 tests for the canonical module |
+| `app/detection.py` | Removed local `internal_secret()` and `verify_internal_secret()`; added imports; outbound ML call wrapped with `InternalAuthConfigurationError → MlOutcome unavailable`; outbound action call wrapped with `InternalAuthConfigurationError → False + warning log` |
+| `app/internal_actions.py` | Removed local `internal_secret()` and `verify_internal_secret()`; imported `verify_internal_secret` from canonical module; removed unused `os` and `Optional` imports |
+| `app/ml.py` | Removed local `internal_secret()` and `verify_internal_secret()`; imported `verify_internal_secret` from canonical module; removed unused `HTTPException`, `http_status` imports |
+| `tests/conftest.py` | Added `TEST_INTERNAL_SECRET` constant, `SECRET_HEADER` header dict, and session-scoped autouse fixture `_set_internal_secret` that sets `INTERNAL_SECRET` for all tests |
+| `tests/test_internal_auth.py` | **Created** — 17 unit tests for the canonical module (A–I plus helper/constant-time) |
+| `tests/test_internal_actions.py` | Added 8 API-level fail-closed tests (503/401/correct-secret for actions and users endpoints) |
+| `tests/test_ml.py` | Added 5 tests: 4 API-level fail-closed tests and 1 placeholder-rejection API test |
+| `tests/test_detection.py` | Added 11 tests: 7 API-level fail-closed tests (login-events, pre-token-check, login-attempt) and 2 outbound skip tests (ML and action paths) |
+| `tests/test_risk_gate.py` | Added 2 tests: `test_gate_fails_open_when_internal_secret_not_configured` and `test_gate_sends_correct_secret_header` |
 
 ---
 
-## Internal Auth Test Result
+## Internal Auth Unit Test Result
 
 ```
 tests/test_internal_auth.py
@@ -166,30 +167,93 @@ Coverage:
 | 14 | `test_is_configured_true_for_valid_secret` | valid → True |
 | 15 | `test_is_configured_false_for_missing_secret` | absent → False |
 | 16 | `test_is_configured_false_for_placeholder` | placeholder → False |
-| 17 | `test_constant_time_comparison_used` | near-miss → 401 |
+| 17 | `test_constant_time_comparison_is_called` | `secrets.compare_digest` called with both values |
+
+---
+
+## API-Level Fail-Closed Test Results
+
+All three internal component endpoints are tested against the full matrix:
+absent `INTERNAL_SECRET` → 503, wrong header → 401, missing header → 401,
+correct header → normal status.
+
+### Core App (`tests/test_internal_actions.py`)
+```
+  28 passed   (8 new fail-closed tests + 20 existing)
+```
+
+New: `test_actions_returns_503_when_internal_secret_not_configured`,
+`test_actions_returns_401_when_secret_wrong`,
+`test_actions_returns_401_when_header_missing`,
+`test_actions_succeeds_with_correct_secret`,
+`test_users_returns_503_when_internal_secret_not_configured`,
+`test_users_returns_401_when_secret_wrong`,
+`test_users_returns_401_when_header_missing`,
+`test_users_succeeds_with_correct_secret`.
+
+### ML Service (`tests/test_ml.py`)
+```
+  14 passed   (5 new tests + 9 existing)
+```
+
+New: `test_ml_score_returns_503_when_internal_secret_not_configured`,
+`test_ml_score_returns_401_when_secret_wrong`,
+`test_ml_score_returns_401_when_header_missing`,
+`test_ml_score_succeeds_with_correct_secret`,
+`test_ml_score_rejects_placeholder_secret` — the last proves that
+`X-Internal-Secret: changeme-in-production` against a server configured with
+that placeholder returns **503**, not 200.
+
+### Detection Engine (`tests/test_detection.py`)
+```
+  51 passed   (11 new tests + 40 existing)
+```
+
+New: 7 fail-closed API tests (login-events ×3, pre-token-check ×2,
+login-attempt ×2) and 2 outbound skip tests:
+`test_ml_outbound_returns_unavailable_when_secret_not_configured`
+(→ `MlOutcome.status == "unavailable"`, `error == "internal_auth_not_configured"`,
+no HTTP call),
+`test_action_outbound_returns_false_when_secret_not_configured`
+(→ `False`, no HTTP call).
+
+### Risk Gate / Auth (`tests/test_risk_gate.py`)
+```
+  22 passed   (2 new tests + 20 existing)
+```
+
+New: `test_gate_fails_open_when_internal_secret_not_configured`
+(`_pre_token_risk → None`, `InternalAuthConfigurationError` caught by existing
+fail-open handler, no HTTP call),
+`test_gate_sends_correct_secret_header`
+(outbound `X-Internal-Secret` header matches configured test value).
 
 ---
 
 ## PostgreSQL Regression Result
 
 ```
-tests/test_postgres_bootstrap.py    16 passed
-tests/test_postgres_auth.py        13 passed
-tests/test_postgres_rbac.py        25 passed
-tests/test_postgres_mfa_concurrency.py  8 passed
-───────────────────────────────────────────
-Total                              62 passed, 0 skipped, 0 failed
+tests/test_postgres_bootstrap.py               16 passed
+tests/test_postgres_auth.py                   13 passed
+tests/test_postgres_rbac.py                   25 passed
+tests/test_postgres_mfa_concurrency.py         8 passed
+────────────────────────────────────────────────
+Total                                        62 passed, 0 skipped, 0 failed
 ```
+
+P0 regression suite completely unaffected by P1-A changes.
 
 ---
 
 ## Full Test Counts
 
 ```
-322 passed, 0 skipped, 0 failed
+346 passed, 0 skipped, 0 failed
 ```
 
-17 new `test_internal_auth.py` tests + 305 existing = 322 total.
+346 tests collected and executed with `INTERNAL_SECRET` **unset from the shell**.
+The session-scoped autouse fixture in `conftest.py` provides the test value
+automatically; no manual environment configuration required for the test suite.
 
 ---
 

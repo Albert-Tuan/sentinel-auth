@@ -154,3 +154,30 @@ def policy(db) -> Policy:
     db.commit()
     db.refresh(p)
     return p
+
+
+# ---------------------------------------------------------------------------
+# Internal-service authentication
+# ---------------------------------------------------------------------------
+
+import os
+
+#: Must be at least 32 characters to pass ``get_internal_secret`` validation.
+TEST_INTERNAL_SECRET = "test-internal-secret-at-least-32-characters-long"
+
+#: Header dict used by tests that exercise internal endpoints.
+#: Must match the value that ``_set_internal_secret`` writes into the environment.
+SECRET_HEADER = {"X-Internal-Secret": TEST_INTERNAL_SECRET}
+
+
+@pytest.fixture(autouse=True, scope="session")
+def _set_internal_secret():
+    """Ensure ``INTERNAL_SECRET`` is set for every test session.
+
+    Uses session scope so the environment variable is set once before any test
+    runs and cleaned up after the session ends.  Individual test functions do
+    not need to manage the variable.
+    """
+    os.environ.setdefault("INTERNAL_SECRET", TEST_INTERNAL_SECRET)
+    yield
+    os.environ.pop("INTERNAL_SECRET", None)
