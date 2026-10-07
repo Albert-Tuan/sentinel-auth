@@ -7,7 +7,7 @@ import ipaddress
 import logging
 import os
 import secrets
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 from uuid import UUID, uuid4
 
@@ -449,7 +449,9 @@ async def login(
         )
 
     # 5. No MFA - create session directly
-    return await _create_session(user, client_ip, req.headers.get("User-Agent"), db)
+    result, _ = await _create_session(user, client_ip, req.headers.get("User-Agent"), db)
+    db.commit()
+    return result
 
 
 async def _create_session(
@@ -457,9 +459,16 @@ async def _create_session(
     client_ip: str,
     user_agent: Optional[str],
     db,
-) -> LoginResponse:
-    """Create a new session and generate tokens."""
-    now = datetime.utcnow()
+) -> tuple[LoginResponse, LoginAttempt]:
+    """Create a new session and generate tokens.
+
+    Does NOT commit. Caller owns the transaction boundary and must call
+    db.commit() after all related state changes are flushed.
+
+    Returns (LoginResponse, LoginAttempt) so caller can add audit events
+    before the single commit.
+    """
+    now = datetime.now(timezone.utc)
 
     # Generate tokens
     access_token = secrets.token_urlsafe(32)
@@ -494,13 +503,16 @@ async def _create_session(
         user_agent=user_agent,
     )
     db.add(la)
-    db.commit()
+    db.flush()  # Ensure session.id is populated before caller reads it
 
-    return LoginResponse(
-        access_token=access_token,
-        refresh_token=refresh_token,
-        mfa_required=False,
-        session_id=session.id,
+    return (
+        LoginResponse(
+            access_token=access_token,
+            refresh_token=refresh_token,
+            mfa_required=False,
+            session_id=session.id,
+        ),
+        la,
     )
 
 
@@ -511,54 +523,85 @@ async def mfa_verify(
     db=Depends(get_db),
 ) -> MfaVerifyResponse:
     """
-    Verify MFA code for a pre-auth transaction.
+    Verify MFA code for a pre-auth transaction (P0-05: atomic OTP consumption).
 
-    - Validates mfa_txn transaction exists and is pending
-    - Checks ownership (session_id is mfa_txn.id)
-    - Verifies OTP against stored hash
-    - Marks MFA as used (one-time: clears detection_mfa_once flag)
-    - Creates session + tokens
+    Uses SELECT ... FOR UPDATE to prevent concurrent OTP consumption.
+    Only ONE request can succeed per MFA transaction.
+
+    Concurrency semantics after lock acquisition:
+    - status == 'pending'  → proceed with verification
+    - status == 'completed' → 409 Conflict (already consumed)
+    - status == 'failed'    → 409 Conflict
+    - status == 'expired'  → 401 (expired)
     """
     client_ip = get_client_ip(req)
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
 
-    # Find pre-auth transaction
-    mfa_txn = db.query(MfaTransaction).filter(
-        MfaTransaction.id == request.session_id,
-        MfaTransaction.status == "pending",
-        MfaTransaction.expires_at > now,
-    ).first()
+    # ------------------------------------------------------------------
+    # STEP 1: Lock the MFA transaction row with SELECT ... FOR UPDATE.
+    # The losing concurrent request waits here until the winner commits
+    # or rolls back, preventing double-consumption of the same OTP.
+    # ------------------------------------------------------------------
+    mfa_txn = (
+        db.query(MfaTransaction)
+        .filter(MfaTransaction.id == request.session_id)
+        .with_for_update()
+        .first()
+    )
 
     if not mfa_txn:
-        raise HTTPException(status_code=404, detail="Session not found or expired")
+        raise HTTPException(status_code=404, detail="Transaction not found")
 
-    # Find user
+    # ------------------------------------------------------------------
+    # STEP 2: Inspect state after acquiring the lock.
+    # The row lock serializes concurrent requests so we can safely
+    # distinguish "already consumed" from "pending".
+    # ------------------------------------------------------------------
+    if mfa_txn.status == "completed":
+        raise HTTPException(status_code=409, detail="MFA transaction already completed")
+
+    if mfa_txn.status == "failed":
+        raise HTTPException(status_code=409, detail="MFA transaction failed")
+
+    if mfa_txn.status == "expired":
+        raise HTTPException(status_code=401, detail="MFA transaction expired")
+
+    # Check expiry: if OTP has expired, mark expired and reject.
+    if mfa_txn.expires_at <= now:
+        mfa_txn.status = "expired"
+        db.commit()
+        raise HTTPException(status_code=401, detail="MFA code has expired")
+
+    # ------------------------------------------------------------------
+    # STEP 3: Load user and notification while holding the lock.
+    # ------------------------------------------------------------------
     user = db.query(User).filter(User.id == mfa_txn.user_id).first()
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
 
-    # Find MFA notification
-    notification = db.query(MfaNotification).filter(
-        MfaNotification.id == mfa_txn.notification_id,
-    ).first()
-
+    notification = (
+        db.query(MfaNotification)
+        .filter(MfaNotification.id == mfa_txn.notification_id)
+        .first()
+    )
     if not notification:
         raise HTTPException(status_code=404, detail="MFA notification not found")
 
-    if notification.verified_at:
-        raise HTTPException(status_code=400, detail="MFA code already used")
+    if notification.verified_at is not None:
+        raise HTTPException(status_code=409, detail="MFA code already used")
 
-    # Verify OTP
+    # ------------------------------------------------------------------
+    # STEP 4: Verify OTP — wrong attempts are also serialized by the row lock.
+    # ------------------------------------------------------------------
     try:
         ph.verify(notification.mfa_code_hash, request.mfa_code)
     except (VerifyMismatchError, InvalidHash):
-        # Wrong OTP
+        # Wrong OTP: increment fail_count atomically while holding the lock.
         mfa_txn.fail_count += 1
         if mfa_txn.fail_count >= 3:
             mfa_txn.status = "failed"
-        db.commit()
 
-        # Record failed MFA
+        # Record failed MFA attempt
         la = LoginAttempt(
             event_id=uuid4(),
             request_id=uuid4(),
@@ -574,11 +617,14 @@ async def mfa_verify(
 
         raise HTTPException(status_code=401, detail="Invalid MFA code")
 
-    # IP binding check: reject if verification comes from a different IP.
-    # Normalise both sides so equivalent IPv6 textual forms compare equal.
+    # ------------------------------------------------------------------
+    # STEP 5: OTP verified — IP binding check (P0-03, must remain intact).
+    # ------------------------------------------------------------------
     if mfa_txn.bound_ip:
         if client_ip == "unknown":
-            logger.warning("MFA verify rejected: client IP is unknown")
+            logger.warning(
+                "MFA verify rejected: client IP is unknown"
+            )
             raise HTTPException(
                 status_code=403,
                 detail="MFA verification is bound to the original IP address",
@@ -594,18 +640,24 @@ async def mfa_verify(
                 detail="MFA verification is bound to the original IP address",
             )
 
-    # OTP verified successfully
+    # ------------------------------------------------------------------
+    # STEP 6: Mark transaction and notification as consumed.
+    # ------------------------------------------------------------------
     mfa_txn.status = "completed"
     notification.verified_at = now
 
-    # Clear one-time MFA flag
+    # Clear one-time MFA flag if applicable
     if mfa_txn.mfa_type == "one_time":
         user.detection_mfa_once = False
 
-    # Create session
-    result = await _create_session(user, client_ip, req.headers.get("User-Agent"), db)
+    # ------------------------------------------------------------------
+    # STEP 7: Create session and audit event atomically.
+    # All of these commit together or none do.
+    # ------------------------------------------------------------------
+    result, _ = await _create_session(
+        user, client_ip, req.headers.get("User-Agent"), db
+    )
 
-    # Record successful MFA login
     la = LoginAttempt(
         event_id=uuid4(),
         request_id=uuid4(),
