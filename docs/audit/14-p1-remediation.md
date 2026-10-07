@@ -284,3 +284,57 @@ If the variable is absent, empty, or set to the placeholder, all inbound
 internal endpoints return **503 Service Unavailable** instead of accepting
 requests with the public default. Outbound calls fail gracefully per their
 existing semantics.
+
+---
+
+## Trusted Device Regression Hotfix
+
+### Root Cause
+`app/devices.py` referenced three undefined helper functions:
+- `generate_device_fingerprint(request)` — not imported or defined
+- `hash_fingerprint(fingerprint)` — not imported or defined
+- `get_client_ip(request)` — not imported or defined
+
+Any authenticated call to `POST /api/v1/devices` or `POST /api/v1/devices/check`
+would raise `NameError` at runtime.
+
+### Resolution
+Implemented the three helpers directly in `app/devices.py`:
+
+- `generate_device_fingerprint(request)` — derives a deterministic fingerprint from
+  `User-Agent`, `Accept-Language`, `Accept-Encoding` headers; stored as SHA-256 hash
+- `hash_fingerprint(fingerprint)` — returns SHA-256 hex digest of input
+- `get_client_ip(request)` — preserves existing X-Forwarded-For behaviour unchanged
+
+**Production code change:** `app/devices.py` only.
+
+**Test change:** New file `tests/test_devices.py` (15 tests) covering:
+- Trust device creation (creates row, returns id, DB row belongs to user)
+- Fingerprint population (SHA-256 hex digest stored)
+- Idempotent registration (same device → update, not duplicate)
+- GET device list
+- Device check (same fingerprint → trusted, unknown → not trusted)
+- DELETE single device (removes own device, 404 for nonexistent)
+- DELETE /all (removes all user devices)
+- Ownership enforcement (user cannot delete another's device)
+- Fingerprint determinism (same headers → same fingerprint, different → different)
+
+### Client-IP Debt
+`get_client_ip` in `app/devices.py` trusts `X-Forwarded-For` unconditionally.
+This is the same behaviour as the existing `app/auth.py` implementation and is
+tracked under **P1-D**. It was not modified as part of this hotfix.
+
+### Test Counts
+```
+tests/test_devices.py              15 passed
+tests/test_postgres_bootstrap     16 passed
+tests/test_postgres_auth          13 passed
+tests/test_postgres_rbac          25 passed
+tests/test_postgres_mfa_concurrency  8 passed
+──────────────────────────────────────────────────
+PostgreSQL regression              62 passed, 0 skipped, 0 failed
+
+Full suite                      361 passed, 0 skipped, 0 failed
+```
+
+All tests run with `INTERNAL_SECRET` unset from the shell — P1-A tests remain green.

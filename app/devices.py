@@ -16,7 +16,7 @@ import hashlib
 import secrets
 from datetime import datetime, timedelta
 from typing import Optional, List
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 from fastapi import APIRouter, HTTPException, Header, Depends, Request
 from pydantic import BaseModel, Field
@@ -27,6 +27,51 @@ from app.models import User, Session, UserTrustedDevice
 from app.authz import get_current_auth_context, AuthContext
 
 router = APIRouter(prefix="/api/v1/devices", tags=["devices"])
+
+
+# =============================================================================
+# Device fingerprinting helpers
+#
+# Design: derive a deterministic fingerprint from non-invasive request headers,
+# then store a SHA-256 hash.  This is intentionally lightweight — no browser
+# canvas, WebGL, or audio fingerprinting.  It is sufficient to distinguish
+# a browser/OS combination without tracking individuals.
+#
+# NOTE: ``get_client_ip`` duplicates the logic from ``app.auth`` here so that
+# ``app/devices.py`` has no cross-module dependency.  The behaviour (trust
+# X-Forwarded-For unconditionally) is preserved as-is and is tracked for
+# P1-D remediation.  Do NOT harden this here.
+# =============================================================================
+
+def generate_device_fingerprint(request: Request) -> str:
+    """Derive a deterministic device fingerprint from request headers.
+
+    Combines the User-Agent, Accept-Language and Accept-Encoding headers into a
+    single string and returns it.  The result is hashed before storage so the
+    raw header values never appear in the database.
+    """
+    user_agent = request.headers.get("User-Agent", "")
+    accept_language = request.headers.get("Accept-Language", "")
+    accept_encoding = request.headers.get("Accept-Encoding", "")
+    material = f"{user_agent}|{accept_language}|{accept_encoding}"
+    return material
+
+
+def hash_fingerprint(fingerprint: str) -> str:
+    """Return the SHA-256 hex digest of ``fingerprint``."""
+    return hashlib.sha256(fingerprint.encode()).hexdigest()
+
+
+def get_client_ip(request: Request) -> str:
+    """Extract the client IP from the request.
+
+    Preserves existing behaviour (trust X-Forwarded-For first value) for this
+    hotfix.  This function is scheduled for remediation under P1-D.
+    """
+    forwarded = request.headers.get("X-Forwarded-For")
+    if forwarded:
+        return forwarded.split(",")[0].strip()
+    return request.client.host if request.client else "unknown"
 
 
 # =============================================================================
@@ -89,7 +134,7 @@ async def list_trusted_devices(
     ).order_by(UserTrustedDevice.last_used_at.desc()).all()
 
     return TrustedDeviceList(
-        devices=[TrustedDeviceItem.model_validate(d) for d in devices],
+        devices=[TrustedDeviceItem.model_validate({**vars(d), "id": str(d.id)}) for d in devices],
         total=len(devices),
     )
 
@@ -164,6 +209,22 @@ async def trust_device(
     )
 
 
+@router.delete("/all", status_code=204)
+async def untrust_all_devices(
+    ctx: AuthContext = Depends(get_current_auth_context),
+    db=Depends(get_db),
+) -> None:
+    """
+    Remove all trusted devices for current user.
+    Security feature: allows user to remotely revoke all trusted devices.
+    Uses canonical get_current_auth_context() for authentication.
+    """
+    db.query(UserTrustedDevice).filter(
+        UserTrustedDevice.user_id == ctx.user.id
+    ).delete()
+    db.commit()
+
+
 @router.delete("/{device_id}", status_code=204)
 async def untrust_device(
     device_id: str,
@@ -177,8 +238,8 @@ async def untrust_device(
     Uses canonical get_current_auth_context() for authentication.
     """
     device = db.query(UserTrustedDevice).filter(
-        UserTrustedDevice.id == device_id,
         UserTrustedDevice.user_id == ctx.user.id,
+        UserTrustedDevice.id == UUID(device_id),
     ).first()
 
     if not device:

@@ -217,7 +217,7 @@ These are **NOT** remediated in this audit. Listed for completeness.
 
 | # | Finding | Location | Classification |
 |---|---|---|---|
-| P1-A | `INTERNAL_SECRET` falls back to `"changeme-in-production"` when env var unset | `app/auth.py:44`, `app/detection.py:74`, `app/internal_actions.py:41`, `app/ml.py:53` | Unsafe default / fail-open configuration: any actor who knows the hardcoded default value can authenticate as any internal service if the deployment forgets to set `INTERNAL_SECRET` |
+| ~~P1-A~~ ✅ | `INTERNAL_SECRET` falls back to `"changeme-in-production"` when env var unset → **RESOLVED** | `app/auth.py`, `app/detection.py`, `app/internal_actions.py`, `app/ml.py` → now `app/internal_auth.py` | Centralised in `app/internal_auth.py`; `get_internal_secret()` raises `InternalAuthConfigurationError` on missing/empty/placeholder/short values; `verify_internal_secret()` returns 503 on misconfiguration; `secrets.compare_digest()` used; see `docs/audit/14-p1-remediation.md` |
 | P1-B | Protective-action authorization / approval workflow unresolved | `app/alerts.py:641` | docs/05 UC-DE-13 names SOC Analyst as primary actor; docs/06 grants SECURITY_MANAGER `APPROVE_ACTION` and lists them as a UC-DE-13 participant; implementation allows both SOC_ANALYST and SECURITY_MANAGER to directly apply actions via `POST /alerts/{id}/actions` — the distinction between requesting an action, approving it, and directly applying it is not enforced |
 | P1-C | Documentation / role-boundary conflict on policy view permissions | `app/detection.py:985` | docs/05 UC-DE-15 assigns primary actor = Security Admin; docs/06 grants SECURITY_MANAGER `MANAGE_POLICIES`/UC-DE-15; Core docs assign rule versioning to Security Administrator; implementation allows SECURITY_ADMIN + SECURITY_MANAGER on GET /policies; SOC_ANALYST has no UC-DE-15 permission in any canonical doc; conflict is between documented role assignments and implementation rather than a missing SOC_ANALYST permission |
 | P1-D | X-Forwarded-For / trusted proxy handling | `app/auth.py:64-66` | No validation of XFF chain; IP spoofing possible behind untrusted proxy |
@@ -258,4 +258,6 @@ These are **NOT** remediated in this audit. Listed for completeness.
 
 **P0_REMEDIATION_VERIFIED ✅**
 
-All five P0 canonical blockers are independently verified as resolved on HEAD `fee8221`. The implementation is production-ready with respect to P0 scope. The three P1 findings in the RBAC permission matrix (P1-B, P1-C) and the unsafe internal secret default (P1-A) are the highest-priority items for post-audit remediation but are outside P0 scope.
+All five P0 canonical blockers are independently verified as resolved on HEAD `fee8221`. The implementation is production-ready with respect to P0 scope.
+
+P1-A (unsafe default INTERNAL_SECRET) has been remediated: see `docs/audit/14-p1-remediation.md`. The remaining P1 findings (P1-B through P1-K) are outside P0 scope and listed for post-audit prioritisation.
