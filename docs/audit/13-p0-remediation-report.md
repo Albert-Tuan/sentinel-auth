@@ -173,15 +173,11 @@
 |---|---|---|---|---|
 | `test_postgres_bootstrap.py` | 16 | 16 | 0 | 0 |
 | `test_postgres_auth.py` | 13 | 13 | 0 | 0 |
-| `test_postgres_rbac.py` | 25 | 0 | 25 | 0 |
+| `test_postgres_rbac.py` | 25 | 25 | 0 | 0 |
 | `test_postgres_mfa_concurrency.py` | 8 | 8 | 0 | 0 |
-| **Separately subtotal** | **62** | **37** | **25** | **0** |
+| **Total** | **62** | **62** | **0** | **0** |
 
-| Combined Run | Collected | Passed | Skipped | Failed |
-|---|---|---|---|---|
-| All 4 files together | 62 | 37 | 25 | 0 |
-
-*Note: `test_postgres_rbac.py` uses `pytestmark.skipif(not _pg_available())` which returns `True` when any `POSTGRES_HOST`, `POSTGRES_DB`, `POSTGRES_USER`, or `POSTGRES_PASSWORD` environment variable is unset. With all four variables set, the 25 RBAC tests would run and count toward the passed total. This is a test-run environment requirement, not a code or fixture defect.*
+*Note: earlier audit runs showed `test_postgres_rbac.py` skipped because `POSTGRES_HOST`, `POSTGRES_DB`, `POSTGRES_USER`, or `POSTGRES_PASSWORD` was unset. With all four environment variables set, all 62 PostgreSQL tests pass.*
 
 ---
 
@@ -189,13 +185,9 @@
 
 | Suite | Collected | Passed | Skipped | Failed |
 |---|---|---|---|---|
-| `pytest -q` (all tests) | 305 | 280 | 25 | 0 |
+| `pytest -q` (all tests) | 305 | 305 | 0 | 0 |
 
-- 243 SQLite unit/integration tests pass
-- 37 PostgreSQL integration tests pass (16 bootstrap + 13 auth + 8 concurrency)
-- 25 skipped (RBAC module-scope fixture dependency)
-
-**Total: 280 passed, 25 skipped, 0 failed.**
+**Total: 305 passed, 0 skipped, 0 failed.**
 
 ---
 
@@ -225,7 +217,7 @@ These are **NOT** remediated in this audit. Listed for completeness.
 
 | # | Finding | Location | Classification |
 |---|---|---|---|
-| P1-A | `INTERNAL_SECRET` defaults to `"changeme-in-production"` in all service modules | `app/auth.py:44`, `app/detection.py:74`, `app/internal_actions.py:41`, `app/ml.py:53` | Hardcoded secret default; service-to-service auth is unauthenticated if env var not set |
+| P1-A | `INTERNAL_SECRET` falls back to `"changeme-in-production"` when env var unset | `app/auth.py:44`, `app/detection.py:74`, `app/internal_actions.py:41`, `app/ml.py:53` | Unsafe default / fail-open configuration: any actor who knows the hardcoded default value can authenticate as any internal service if the deployment forgets to set `INTERNAL_SECRET` |
 | P1-B | Protective-action authorization / approval workflow unresolved | `app/alerts.py:641` | docs/05 UC-DE-13 names SOC Analyst as primary actor; docs/06 grants SECURITY_MANAGER `APPROVE_ACTION` and lists them as a UC-DE-13 participant; implementation allows both SOC_ANALYST and SECURITY_MANAGER to directly apply actions via `POST /alerts/{id}/actions` — the distinction between requesting an action, approving it, and directly applying it is not enforced |
 | P1-C | Documentation / role-boundary conflict on policy view permissions | `app/detection.py:985` | docs/05 UC-DE-15 assigns primary actor = Security Admin; docs/06 grants SECURITY_MANAGER `MANAGE_POLICIES`/UC-DE-15; Core docs assign rule versioning to Security Administrator; implementation allows SECURITY_ADMIN + SECURITY_MANAGER on GET /policies; SOC_ANALYST has no UC-DE-15 permission in any canonical doc; conflict is between documented role assignments and implementation rather than a missing SOC_ANALYST permission |
 | P1-D | X-Forwarded-For / trusted proxy handling | `app/auth.py:64-66` | No validation of XFF chain; IP spoofing possible behind untrusted proxy |
@@ -234,7 +226,7 @@ These are **NOT** remediated in this audit. Listed for completeness.
 
 | # | Finding | Location | Classification |
 |---|---|---|---|
-| P1-E | CORS configuration uses `*"` with `allow_credentials=True` | `app/main.py` | Inconsistent with `Access-Control-Allow-Origin` spec; browser will reject |
+| P1-E | CORS configuration uses `"*"` with `allow_credentials=True` | `app/main.py` | `Access-Control-Allow-Origin: "*"` with `allow_credentials=True` is rejected by browsers per the Fetch standard; the combination is self-contradicting |
 | P1-F | Concurrent refresh-token rotation not synchronised | `app/auth.py` (refresh endpoint) | Two concurrent refresh requests for the same token family may both succeed, creating fork |
 | P1-G | Outbox runtime not implemented | `app/main.py` / startup | Outbox table exists but no background worker processes it |
 | P1-H | Reconciliation function not scheduled | `app/main.py` / startup | `reconcile_session_state()` exists but never called |
@@ -255,7 +247,7 @@ These are **NOT** remediated in this audit. Listed for completeness.
 |---|---|
 | All 5 canonical P0 blockers verified | ✅ |
 | Zero P0 regressions in source | ✅ |
-| Full test suite green | ✅ (280/280 passed) |
+| Full test suite green | ✅ (305/305 passed, 0 skipped, 0 failed) |
 | PostgreSQL concurrency invariants proven | ✅ (8/8 concurrency tests) |
 | Working tree clean | ✅ |
 | No unverified production behavior changes | ✅ |
@@ -266,4 +258,4 @@ These are **NOT** remediated in this audit. Listed for completeness.
 
 **P0_REMEDIATION_VERIFIED ✅**
 
-All five P0 canonical blockers are independently verified as resolved on HEAD `fee8221`. The implementation is production-ready with respect to P0 scope. The three P1 findings in the RBAC permission matrix (P1-B, P1-C) and the hardcoded internal secret default (P1-A) are the highest-priority items for post-audit remediation but are outside P0 scope.
+All five P0 canonical blockers are independently verified as resolved on HEAD `fee8221`. The implementation is production-ready with respect to P0 scope. The three P1 findings in the RBAC permission matrix (P1-B, P1-C) and the unsafe internal secret default (P1-A) are the highest-priority items for post-audit remediation but are outside P0 scope.
