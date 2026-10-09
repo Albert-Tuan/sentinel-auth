@@ -354,7 +354,88 @@ This is acceptable for v3.3 but must be replaced by outbox for production.
 
 ---
 
-## 8. Implementation Backlog
+## 9. Protective Action Authorization (P1-B / P1-J)
+
+### 9.1 Approved v3.3 Behavior
+
+SOC Analysts may directly execute supported protective actions from an alert.
+Security Managers may also execute supported protective actions in a supervisory role.
+
+There is **no mandatory approval workflow** in v3.3:
+
+```
+SOC Analyst request → Security Manager approval → apply action
+```
+
+This approval-chain pattern is **NOT** part of v3.3. References to `APPROVE_ACTION`,
+`pending action requests`, or manager-approval steps in older documents are
+**FUTURE ENHANCEMENT**.
+
+### 9.2 Supported Actions
+
+| Action | Executor | Notes |
+|--------|----------|-------|
+| `REQUIRE_MFA` | SOC Analyst, Security Manager | Forces MFA on next login |
+| `REVOKE_SESSIONS` | SOC Analyst, Security Manager | Invalidates all active sessions |
+| `LOCK_USER` | SOC Analyst, Security Manager | Prevents login until unlocked |
+| `FORCE_LOGOUT` | SOC Analyst, Security Manager | Revokes the current session |
+
+### 9.3 Rationale
+
+- Keeps university-project scope manageable
+- Matches existing prototype semantics (direct `POST /internal/detection/actions` call)
+- Avoids adding action-request tables and approval state machines
+- Preserves Security Manager supervisory capability
+- Approval workflow may be introduced in a production-oriented future version
+
+### 9.4 Implementation Gap (Known)
+
+The current prototype's `POST /internal/detection/actions` endpoint performs
+no role verification on the calling user. Any authenticated user can trigger any
+action. Role-gated action execution is an **implementation gap** to address
+during the next implementation phase.
+
+---
+
+## 10. Policy Management Authorization (P1-C / P1-K)
+
+### 10.1 Approved Role Matrix
+
+| Role | View Policy | Create Policy | Edit Policy | Activate Policy |
+|------|------------|--------------|------------|----------------|
+| `SECURITY_ADMIN` | ✅ YES | ✅ YES | ✅ YES | ✅ YES |
+| `SECURITY_MANAGER` | ✅ YES | ❌ NO | ❌ NO | ❌ NO |
+| `SOC_ANALYST` | ❌ NO | ❌ NO | ❌ NO | ❌ NO |
+
+### 10.2 Role Descriptions
+
+**SECURITY_ADMIN** — Full policy lifecycle owner. Can create, edit, view, and
+activate policies. Owns the Detection Engine's risk-response configuration.
+
+**SECURITY_MANAGER** — May view policies for oversight and review. May not
+mutate policy state. The `VIEW_POLICIES` permission (not `MANAGE_POLICIES`)
+is the correct terminology. References to `MANAGE_POLICIES` for Security Manager
+in older documents are **STALE**.
+
+**SOC_ANALYST** — Does not access policy management. Focused on alert response
+and protective actions (Section 9).
+
+### 10.3 Rationale
+
+- Separation of concerns: policy owners (Security Admin) vs. policy consumers (SOC Analyst)
+- Security Manager oversight role without mutation prevents self-approval scenarios
+- Matches existing prototype: Security Manager has no policy mutation endpoint coverage
+
+### 10.4 Implementation Gap (Known)
+
+The current prototype has no role-gated policy management endpoints. All role
+checks are currently performed only at the session-authorization level. Policy
+mutation endpoints are not yet protected by role. This is an **implementation gap**
+to address during the next implementation phase.
+
+---
+
+## 11. Implementation Backlog
 
 The following are NOT part of the v3.3 baseline. They are recorded for
 completeness.
@@ -365,8 +446,10 @@ completeness.
 | P1-F | Refresh-token concurrency | Medium | Rotation vs passive semantics |
 | P1-G | Outbox publisher runtime | High | Event delivery reliability |
 | P1-H | Reconciliation scheduler | Medium | Missed event recovery |
-| P1-B | SOC action workflow | Medium | Request vs direct-apply decision |
-| P1-C | Policy management roles | Low | Security Admin vs Manager |
+| P1-B | ~~SOC action workflow~~ | — | ✅ RESOLVED — direct-apply (see Section 9) |
+| P1-C | ~~Policy management roles~~ | — | ✅ RESOLVED — Security Admin only (see Section 10) |
+| — | Role-gated protective actions | High | Enforce executor role on `POST /internal/detection/actions` |
+| — | Role-gated policy management | High | Enforce Security Admin role on policy CRUD endpoints |
 | — | Token introspection endpoint | Low | Future cross-service auth |
 | — | Three independent services | High | Current monolith split |
 

@@ -79,8 +79,8 @@ PostgreSQL bootstrap is verified by `tests/test_postgres_bootstrap.py` (16 tests
 | P1-F | Refresh-token concurrency (rotation vs. passive) | **BACKLOG** |
 | P1-G | Outbox runtime (poller + at-least-once delivery) | **BACKLOG** |
 | P1-H | Reconciliation scheduler (missed detection events) | **BACKLOG** |
-| P1-B | SOC protective-action workflow (request vs. direct-apply) | **BACKLOG — DECISION REQUIRED** |
-| P1-C | Policy role ownership (Security Admin vs. Security Manager) | **BACKLOG — DECISION REQUIRED** |
+| P1-B | SOC protective-action workflow (request vs. direct-apply) | ✅ DECISION RESOLVED — direct-apply (DECISIONS-SYSTEM Section 9); DOWNSTREAM DOC RECONCILIATION PENDING |
+| P1-C | Policy role ownership (Security Admin vs. Security Manager) | ✅ DECISION RESOLVED — Security Admin owns policy mutation (DECISIONS-SYSTEM Section 10); DOWNSTREAM DOC RECONCILIATION PENDING |
 
 ---
 
@@ -594,7 +594,7 @@ architecture decisions.
 
 ### Sequence
 
-#### D1: Canonical Architecture Decisions (No implementation changes)
+#### D1: Canonical Architecture Decisions (✅ COMPLETE)
 
 **Files:** `docs/DECISIONS-SYSTEM-v3.3.md`, `docs/DECISIONS-DETECTION-v3.3.md`, `TASK_ASSIGNMENT.md`
 
@@ -603,12 +603,12 @@ architecture decisions.
 - Update `TASK_ASSIGNMENT.md` header to clarify "v3.3 DESIGN / single-process current implementation"
 - No changes to `app/`, `tests/`, `infra/postgres/`
 
-#### D2: Business Decisions (No implementation changes)
+#### D2: Business Decisions (✅ COMPLETE)
 
-**Files:** `docs/02-dac-ta-use-case-core-app.md`, `docs/06-phan-tich-doi-tuong-su-dung-detection-engine.md`, `docs/audit/12-second-review.md`, `docs/audit/05-trust-boundaries.md`
+**Files:** `docs/DECISIONS-SYSTEM-v3.3.md`, `docs/02-dac-ta-use-case-core-app.md`, `docs/audit/12-second-review.md`, `docs/audit/05-trust-boundaries.md`
 
-- **D2a:** Resolve P1-B: choose OPTION A (SOC Analyst direct-apply). Update UC-DE-13 description.
-- **D2b:** Resolve P1-C: assign policy management to Security Admin only; update role matrix.
+- **D2a:** ✅ RESOLVED — P1-B: SOC Analyst direct-apply (no approval workflow). See DECISIONS-SYSTEM-v3.3.md Section 9.
+- **D2b:** ✅ RESOLVED — P1-C: Security Admin owns policy mutation. See DECISIONS-SYSTEM-v3.3.md Section 10.
 - No changes to `app/`, `tests/`, `infra/postgres/`
 
 #### D3: Requirements / Use-Case Reconciliation
@@ -689,12 +689,17 @@ The following were decided and are now authoritative:
 | 🔴 CRITICAL | No `.env.example` | Created: full env template with all variables |
 | 🔴 CRITICAL | No PostgreSQL init mechanism | Created: `infra/postgres/init/00-init-databases.sh` |
 
-### 🟡 HIGH — Pending decisions
+### ✅ DECISIONS — RESOLVED AT CANONICAL LEVEL
+
+| Priority | Item | Canonical Source | Downstream Reconciliation |
+|----------|------|-----------------|------------------------|
+| ✅ | P1-B: SOC protective-action workflow | DECISIONS-SYSTEM-v3.3.md Section 9 | D3 pass |
+| ✅ | P1-C: Policy management roles | DECISIONS-SYSTEM-v3.3.md Section 10 | D3 pass |
+
+### 🟡 HIGH — Pending documentation reconciliation
 
 | Priority | Issue | Blocks |
 |----------|-------|--------|
-| 🟡 HIGH | P1-B: SOC action workflow (request vs direct-apply) | Implementation |
-| 🟡 HIGH | P1-C: Policy management roles | Implementation |
 | 🟡 HIGH | UML diagrams: JWT → opaque token | Report accuracy |
 | 🟡 HIGH | `schema-core-v3.3.sql` COMMENT says "JWT" | Report accuracy |
 
