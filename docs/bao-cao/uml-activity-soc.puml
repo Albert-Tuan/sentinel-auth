@@ -1,5 +1,5 @@
 @startuml
-' Sơ đồ hoạt động - SOC Investigation
+' Sơ đồ hoạt động - SOC Investigation (v3.3 - CURRENT IMPLEMENTATION)
 skinparam backgroundColor #FFFFFF
 skinparam shadowing false
 skinparam defaultFontName Sans
@@ -14,81 +14,95 @@ skinparam activity {
   FontSize 10
 }
 
-title Sơ đồ hoạt động - Điều tra cảnh báo SOC
+title Sơ đồ hoạt động - Điều tra cảnh báo SOC (v3.3)
 
 start
-:SOC Analyst đăng nhập\nbằng tài khoản có vai trò SOC_ANALYST;
-:Hệ thống kiểm tra opaque bearer token và vai trò;
-if (Vai trò hợp lệ?) then (không)
-  :Trả 403 Forbidden;
-  stop
-else (có)
-endif
+    :SOC Analyst đăng nhập\nbằng tài khoản có vai trò SOC_ANALYST;
+    :Hệ thống kiểm tra opaque bearer token và vai trò;
+    if (Vai trò hợp lệ?) then (không)
+      :Trả 403 Forbidden;
+      stop
+    else (có)
+    endif
 
 partition "Tiếp cận cảnh báo" {
-  :GET /api/v1/alerts\n?status=open&risk_level=high\n+ Bearer token;
-  :Lọc, sắp xếp theo created_at\nDESC, phân trang;
-  :Hiển thị danh sách\n{ id, risk_level, status,\ncreated_at };
+      :GET /api/v1/alerts\n?status=open&risk_level=high\n+ Bearer token;
+      :Lọc, sắp xếp theo created_at\nDESC, phân trang;
+      :Hiển thị danh sách\n{ id, risk_level, status,\ncreated_at };
 }
 
 partition "Thu thập bằng chứng" {
-  :GET /api/v1/alerts/{id}/evidence;
-  :Gộp 4 nguồn dữ liệu;
-  note right
-    1. `alerts` - thông tin cảnh báo
-    2. `login_attempts` - IP, user-agent,
-       outcome, thời điểm
-    3. `risk_assessments` - rule_score,
-       ml_score, combined_score,
-       rule_hits, ml_reason_codes
-    4. `detection_logs` - dấu vết
-       từng giai đoạn chấm điểm
-  end note
-  :Gọi GET /internal/users/{id}\nđể xác minh danh tính\nngười bị nghi ngờ (cross-DB);
-  :Hiển thị hồ sơ điều tra\ncho Analyst đánh giá;
+      :GET /api/v1/alerts/{id}/evidence;
+      :Gộp 4 nguồn dữ liệu;
+      note right
+        1. `alerts` - thông tin cảnh báo
+        2. `login_attempts` - IP, user-agent,
+           outcome, thời điểm
+        3. `risk_assessments` - rule_score,
+           ml_score, combined_score,
+           rule_hits, ml_reason_codes
+        4. `detection_logs` - dấu vết
+           từng giai đoạn chấm điểm
+      end note
+      :Gọi GET /api/v1/internal/users/{id}\nđể xác minh danh tính\nngười bị nghi ngờ (cross-DB);
+      :Hiển thị hồ sơ điều tra\ncho Analyst đánh giá;
 }
 
 partition "Quyết định tiếp nhận" {
-  if (Có người khác\nđã tiếp nhận?) then (có)
-    :Trả 409 Conflict\nngăn tranh chấp;
-    stop
-  else (không)
-  endif
-  :POST /api/v1/alerts/{id}/acknowledge;
-  :UPDATE alerts\nstatus = 'acknowledged',\nassigned_to_id = analyst hiện tại;
-  :INSERT alert_timeline\n(event_type = 'acknowledged',\nold_value = open,\nnew_value = acknowledged);
+      if (Có người khác\nđã tiếp nhận?) then (có)
+        :Trả 409 Conflict\nngăn tranh chấp;
+        stop
+      else (không)
+      endif
+      :POST /api/v1/alerts/{id}/acknowledge;
+      :UPDATE alerts\nstatus = 'acknowledged',\nassigned_to_id = analyst hiện tại;
+      :INSERT alert_timeline\n(event_type = 'acknowledged',\nold_value = open,\nnew_value = acknowledged');
 }
 
 partition "Điều tra và phản ứng" {
-  :Ghi chú điều tra\nPOST /alerts/{id}/timeline\n(event_type = 'note_added');
-  if (Cần hành động\nbảo vệ?) then (có)
-    :POST /api/v1/alerts/{id}/actions\n{ action, reason,\nseverity? };
-    if (Kiểm tra action\nhợp lệ?) then (sai)
-      :Trả 400 Bad Request;
-    else (đúng)
-      :Gửi POST /internal/actions\n→ Core App;
-      :UPDATE sessions\nSET revoked_at = now()\nWHERE user_id = target\nAND revoked_at IS NULL;
-      :Trả sessions_revoked = N;
-      :INSERT alert_timeline\n(event_type = 'status_changed');
-    endif
-  else (không)
-  endif
+      :Ghi chú điều tra\nPOST /api/v1/alerts/{id}/timeline\n(event_type = 'note_added');
+      if (Cần hành động\nbảo vệ?) then (có)
+        :POST /api/v1/alerts/{id}/actions\n{ action, reason };
+        if (Kiểm tra action\nhợp lệ?) then (sai)
+          :Trả 400 Bad Request;
+        else (đúng)
+          :Gửi POST /api/v1/internal/actions\n→ Core App;
+          :UPDATE sessions\nSET revoked_at = now()\nWHERE user_id = target\nAND revoked_at IS NULL;
+          :Trả sessions_revoked = N;
+          :INSERT alert_timeline\n(event_type = 'status_changed');
+        endif
+      else (không)
+      endif
 }
 
 partition "Kết luận" {
-  if (Kết luận\ncủa Analyst?) then (gì)
-    #LightGreen :POST /alerts/{id}/resolve\n{ resolution };
-    :UPDATE alerts\nstatus = 'resolved',\nresolved_by_id, resolved_at;
-    :INSERT alert_timeline\n(event_type = 'resolved');
-  else (leo thang)
-    :PATCH /api/v1/alerts/{id}\n{status: "escalated", notes};
-    :INSERT alert_timeline\n(event_type = 'escalated');
-    :Ghi nhận escalated;\nSecurity Manager giám sát;\nFUTURE ENHANCEMENT: dedicated escalate endpoint;
-  endif
+      if (Kết luận\ncủa Analyst?) then (gì)
+        #LightGreen :POST /api/v1/alerts/{id}/resolve
+{ resolution: "true_attack"|"false_positive"|
+"benign_true_positive"|"insufficient_evidence" };
+        :UPDATE alerts\nstatus = 'resolved',\nresolved_by_id, resolved_at;
+        :INSERT alert_timeline\n(event_type = 'resolved');
+      else (ghi nhận escalated)
+        :POST /api/v1/alerts/{id}/timeline
+{ event_type: "escalated", comment: "..." };
+        :INSERT alert_timeline\n(event_type = 'escalated');
+        note right #FFFACD
+          **Không đổi alert.status.**
+          Chỉ ghi timeline marker.
+          Security Manager giám sát qua view.
+          FUTURE ENHANCEMENT: dedicated escalate endpoint.
+        end note
+      endif
 }
 
-:GET /api/v1/soc/dashboard\n(tổng hợp số liệu);
-:Cập nhật bảng điều khiển;
+partition "Dashboard" {
+      note right #FFFACD
+        **APPROVED DESIGN / IMPLEMENTATION PENDING:**
+        GET /api/v1/soc/dashboard
+        (Security Manager xem số liệu tổng quan)
+      end note
+      :Dashboard: APPROVED DESIGN / IMPLEMENTATION PENDING;
+}
 
 note right
   **Bốn hành động bảo vệ:**
@@ -97,10 +111,16 @@ note right
   LOCK_USER - khoá tài khoản (thủ công)
   FORCE_LOGOUT - buộc rời phiên (thủ công)
 
+  **Alert State Machine (v3.3):**
+  open → acknowledged → resolved
+                    ↘ false_positive
+
   **Điểm kiểm chứng:**
   1. Mọi thay đổi trạng thái sinh dòng `alert_timeline`
   2. Mọi hành động bảo vệ trả `details.sessions_revoked`
   3. Phiên bị thu hồi mất hiệu lực ở lần gọi kế tiếp
+  4. alert.status chỉ nhận: open, acknowledged, resolved, false_positive
+  5. alert_timeline.event_type = escalated là marker, KHÔNG đổi status
 end note
 
 stop

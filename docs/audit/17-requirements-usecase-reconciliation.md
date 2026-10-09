@@ -14,11 +14,13 @@ downstream documents and identifies remaining gaps.
 
 ### 1.1 Token Model
 
-| Topic | Canonical Decision | Source | Affected Docs |
-|-------|-----------------|--------|---------------|
-| Authentication mechanism | Opaque random bearer tokens (not JWT) | DECISIONS-SYSTEM-v3.3.md Section 1 | All use-case and requirements docs |
-| Token storage | SHA-256 hash in `sessions` table | DECISIONS-SYSTEM-v3.3.md Section 1.2 | `schema-core-v3.3.sql` |
-| Session→User→Roles authorization | Bearer token carries session; roles from DB | DECISIONS-SYSTEM-v3.3.md Section 3 | `app/detection.py`, use-case docs |
+| Topic | Canonical Decision | Source |
+|-------|-----------------|--------|
+| Authentication mechanism | Opaque random bearer tokens (not JWT) | DECISIONS-SYSTEM-v3.3.md Section 1 |
+| Token storage | SHA-256 hash in `sessions` table | DECISIONS-SYSTEM-v3.3.md Section 1.2 |
+| Session creation | `access_token = secrets.token_urlsafe(32)`, SHA-256 hash stored, `expires_at = now + 1h` | `app/auth.py` lines 468–479 |
+| Session refresh | Rotates both token values; does NOT extend `expires_at`; valid only while backing session unexpired and not revoked | `app/auth.py` lines 687–716 |
+| Session→User→Roles | Bearer token carries session; roles from DB | DECISIONS-SYSTEM-v3.3.md Section 3 |
 
 ### 1.2 Actor Model
 
@@ -140,6 +142,11 @@ These are not D3 decisions — they are recorded for the next implementation pha
 | Redis Streams consumer | Detection does not consume Redis Streams | DECISIONS-SYSTEM-v3.3.md Section 11 |
 | Three independent services | Core, Detection, ML not yet independently deployable | DECISIONS-SYSTEM-v3.3.md Section 11 |
 | TOTP/SMS/Push MFA | Email OTP only in current implementation | Design docs / schema |
+| SOC Dashboard endpoint | `GET /api/v1/soc/dashboard` — APPROVED DESIGN / IMPLEMENTATION PENDING | DECISIONS-DETECTION-v3.3.md |
+| Dedicated escalate endpoint | `POST /api/v1/alerts/{id}/escalate` — APPROVED DESIGN / IMPLEMENTATION PENDING | DECISIONS-DETECTION-v3.3.md |
+| Policy create endpoint | `POST /api/v1/policies` — APPROVED DESIGN / IMPLEMENTATION PENDING | DECISIONS-SYSTEM-v3.3.md Section 10.4 |
+| Logout All endpoint | `POST /api/v1/auth/logout-all` — APPROVED DESIGN / IMPLEMENTATION PENDING | DECISIONS-SYSTEM-v3.3.md |
+| Admin session revoke endpoint | `POST /api/v1/admin/sessions/{id}/revoke` — APPROVED DESIGN / IMPLEMENTATION PENDING | DECISIONS-SYSTEM-v3.3.md |
 
 ---
 

@@ -276,40 +276,52 @@ sequenceDiagram
 
     CA->>CDB: INSERT sessions<br/>(token_jti, access_hash, refresh_hash,<br/>expires_at=NOW()+1h)
     CA-->>U: 200 {access_token, refresh_token}
-    Note over U,CDB: access_token expiry = 1h (v3.3 prototype)<br/>refresh_token: unlimited until revoked<br/>P1-F: concurrent refresh hardening — IMPLEMENTATION BACKLOG
+    Note over U,CDB: access_token expiry = 1h (fixed, not extended on refresh)<br/>P1-F: concurrent refresh hardening — IMPLEMENTATION BACKLOG
 
     Note over U,CA: Token Refresh
     U->>CA: POST /api/v1/auth/refresh (refresh_token)
-    CA->>CDB: SELECT sessions WHERE refresh_token_hash
-    alt valid + not revoked
-        CA->>CDB: UPDATE sessions (new token_jti, expires_at)
-        CA-->>U: 200 {access_token}
+    CA->>CDB: SELECT sessions WHERE refresh_token_hash=?<br/>AND revoked_at IS NULL AND expires_at >= NOW()
+    alt valid + unexpired + not revoked
+        CA->>CA: Rotate both access and refresh token values<br/>(token_jti also rotates)
+        CA->>CDB: UPDATE sessions<br/>(access_token_hash=hash(new),<br/>refresh_token_hash=hash(new),<br/>token_jti=rotation_id,<br/>last_activity_at=NOW())<br/>NOTE: expires_at UNCHANGED (fixed at login + 1h)
+        CA-->>U: 200 {access_token, refresh_token}
     else expired/revoked
         CA-->>U: 401 TOKEN_EXPIRED
     end
 
-    Note over U,CA: Logout Single
-    U->>CA: POST /api/v1/auth/logout
+    Note over U,CA: Logout
+    U->>CA: POST /api/v1/auth/logout (access_token)
     CA->>CDB: UPDATE sessions (revoked_at=NOW())
     CA->>CDB: INSERT audit_logs (action=logout)
-    CA-->>U: 200 {logged_out: true}
-
-    Note over U,CA: Logout All
-    U->>CA: POST /api/v1/auth/logout-all
-    CA->>CDB: UPDATE sessions WHERE user_id (revoked_at)
-    CA-->>U: 200 {logged_out_all: true, sessions_revoked: N}
+    CA-->>U: 200 {status: "ok"}
 
     Note over U,CA: List Sessions
-    U->>CA: GET /api/v1/sessions
+    U->>CA: GET /api/v1/sessions (access_token)
     CA->>CDB: SELECT sessions WHERE user_id AND revoked_at IS NULL
     CA-->>U: 200 {sessions: [...]}
 
-    Note over U,CA: Admin Revoke
-    U->>CA: POST /api/v1/admin/sessions/{id}/revoke (admin_token)
-    CA->>CA: validate opaque bearer token → Session → User → Roles
-    CA->>CDB: UPDATE sessions (revoked_at)
-    CA->>CDB: INSERT audit_logs (action=session_revoked_by_admin)
-    CA-->>U: 200 {revoked: true}
+    Note over U,CA: Revoke Own Session
+    U->>CA: DELETE /api/v1/sessions/{id} (access_token)
+    CA->>CDB: SELECT + UPDATE sessions WHERE id=? AND user_id=current_user<br/>UPDATE revoked_at=NOW()
+    CA-->>U: 204 No Content
+
+    Note over U,CDB: **APPROVED DESIGN / IMPLEMENTATION PENDING:**
+    Note over U,CDB: - Logout All (revoke all sessions at once)<br/>- Admin Revoke (Security Admin revokes other user's session)<br/>- Background middleware last_activity_at update
+
+    Note over U,CA: Bearer Token Validation
+    U->>CA: Any API request (Bearer access_token)
+    CA->>CDB: SHA-256 hash access_token → lookup session<br/>WHERE access_token_hash=? AND revoked_at IS NULL<br/>Check session.expires_at >= NOW()
+    alt expired
+        CA-->>U: 401 TOKEN_EXPIRED
+        U->>CA: POST /api/v1/auth/refresh (refresh_token)
+    end
+```
+
+**Refresh semantics (v3.3):**
+- Opaque tokens: NO signature, NO embedded exp/jti claims
+- Refresh rotates both access and refresh token values
+- Does NOT extend session.expires_at (always fixed at login time + 1h)
+- Refresh valid only while backing session is unexpired AND not revoked
 ```
 
 ---

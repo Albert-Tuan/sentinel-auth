@@ -45,7 +45,7 @@ SOC Analyst là nhân viên chịu trách nhiệm giám sát các hoạt động
 - Theo dõi các alert mới
 - Tiếp nhận và điều tra incidents
 - Phân loại alerts (true positive / false positive)
-- Yêu cầu hành động bảo vệ khi cần thiết
+- Thực hiện hành động bảo vệ khi cần thiết
 
 #### 3.1.3 Quyền hạn
 
@@ -374,28 +374,37 @@ So that I can assess the security posture
 - Xem team workload distribution
 
 #### US-MGR-02: Review Escalated Cases
+
+> ⚠️ **FUTURE ENHANCEMENT** — dedicated escalate endpoint not implemented in v3.3.
+> Escalation is a timeline marker only (event_type = 'escalated').
+> See UC-DE-13 and DECISIONS-SYSTEM-v3.3.md Section 9.
+
 ```
 As a Security Manager
 I want to review escalated alerts
-So that I can provide guidance or approve actions
+So that I can provide guidance and monitor SOC handling
 ```
 
-**Acceptance Criteria:**
-- Xem tất cả escalated alerts
-- Có thể approve/reject/reassign
-- Timeline đầy đủ
+**Acceptance Criteria (v3.3 — APPROVED DESIGN):**
+- View alerts (SECURITY_MANAGER has VIEW via GET /api/v1/alerts)
+- View alert timeline including escalated markers
+- No approve/reject/reassign of escalated cases in v3.3
 
-#### US-MGR-03: Adjust Detection Policy
+#### US-MGR-03: Review Detection Policy
+
+> ⚠️ **Policy adjustment is SECURITY_ADMIN only in v3.3.** Security Manager has VIEW_POLICIES only.
+> See DECISIONS-SYSTEM-v3.3.md Section 10.
+
 ```
 As a Security Manager
-I want to adjust detection thresholds
-So that we can balance security and user experience
+I want to review detection policy configuration
+So that I can understand current detection thresholds and rules
 ```
 
-**Acceptance Criteria:**
-- Có thể tạo/sửa policies
-- Có thể activate/deactivate policies
-- Thay đổi được audit logged
+**Acceptance Criteria (v3.3):**
+- View policies via GET /api/v1/policies
+- Understand active rule weights and thresholds
+- No create/edit/activate policies
 
 ---
 
@@ -451,21 +460,27 @@ So that we can balance security and user experience
 
 ## 7. PERMISSION MATRIX
 
+> ⚠️ **v3.3 permission matrix.** Sources: DECISIONS-SYSTEM-v3.3.md Section 9–10; verified against `app/alerts.py`, `app/detection.py`.
+>
+> **Security Manager:** oversight/governance. Does NOT normally operate alerts.
+> **SOC Analyst:** primary operational actor for alert handling.
+> **Note:** Current prototype allows SECURITY_MANAGER on acknowledge/resolve. Canonical business role (D3/D4) distinguishes Manager as oversight, not operational.
+
 | Resource | Action | SOC Analyst | Security Manager | Core App | ML Service |
-|----------|--------|------------|------------------|----------|------------|
-| **Dashboard** | View | ✅ | ✅ | ❌ | ❌ |
-| **Alert** | View | Own/Assigned | All | ❌ | ❌ |
-| **Alert** | Acknowledge | ✅ | ✅ | ❌ | ❌ |
-| **Alert** | Resolve | ✅ | ✅ | ❌ | ❌ |
-| **Alert** | Escalate | ✅ | N/A | ❌ | ❌ |
-| **Alert** | Assign | ❌ | ✅ | ❌ | ❌ |
-| **Evidence** | View | ✅ | ✅ | ❌ | ❌ |
-| **Login History** | Search | ✅ | ✅ | ❌ | ❌ |
+|----------|--------|:---:|:---:|:---:|:---:|
+| **Dashboard** | View | ✅ | ✅ *(oversight)* | ❌ | ❌ |
+| **Alert** | View | ✅ | ✅ *(oversight)* | ❌ | ❌ |
+| **Alert** | Acknowledge | ✅ | ⚠️ *(prototype only; not Manager's canonical role)* | ❌ | ❌ |
+| **Alert** | Resolve | ✅ | ⚠️ *(prototype only; not Manager's canonical role)* | ❌ | ❌ |
+| **Alert** | Assign | ✅ | ❌ | ❌ | ❌ |
+| **Alert** | Escalate | ✅ *(timeline marker only)* | ❌ | ❌ | ❌ |
+| **Evidence** | View | ✅ | ✅ *(oversight)* | ❌ | ❌ |
+| **Login History** | Search | ✅ | ✅ *(oversight)* | ❌ | ❌ |
 | **Login History** | Create | ❌ | ❌ | ✅ | ❌ |
-| **Policy** | View | Read-only | ✅ | ❌ | ❌ |
-| **Policy** | Create | ❌ | ✅ | ❌ | ❌ |
-| **Policy** | Activate | ❌ | ✅ | ❌ | ❌ |
-| **Action** | Request | ✅ | ✅ | ❌ | ❌ |
+| **Policy** | View | ❌ | ✅ *(view only — oversight)* | ❌ | ❌ |
+| **Policy** | Create | ❌ | ❌ | ❌ | ❌ |
+| **Policy** | Activate | ❌ | ❌ | ❌ | ❌ |
+| **Action** | Execute | ✅ | ✅ *(supervisory capability only)* | ❌ | ❌ |
 | **ML Score** | Request | ❌ | ❌ | ❌ | N/A |
 
 ---

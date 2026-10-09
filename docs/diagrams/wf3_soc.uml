@@ -17,7 +17,6 @@ CA --> S : **200 OK** {access_token, role=SOC_ANALYST}
 deactivate CA
 
 == List Alerts ==
-
 S -> DE : **GET /api/v1/alerts**\n?status=open&risk_level=high\n+ Bearer {access_token}
 activate DE
 
@@ -26,7 +25,6 @@ DE -> DDB : SELECT alerts\nWHERE status=? AND risk_level=?\nORDER BY created_at 
 activate DDB
 DDB --> DE : [alert1, alert2, ...]
 deactivate DDB
-
 DE --> S : **200 OK**\n{alerts: [{id, login_attempt_id,\nrisk_level, status, created_at}]}
 deactivate DE
 
@@ -49,94 +47,112 @@ DE -> DDB : SELECT risk_assessments WHERE login_attempt_id=?
 activate DDB
 DDB --> DE : risk scoring details
 deactivate DDB
-
 DE --> S : **200 OK**\n{alert, login_attempt, risk_assessment}
 deactivate DE
 
-== Alert Actions ==
+== Alert Actions (v3.3 - CURRENT IMPLEMENTATION) ==
 
 alt Acknowledge Alert
-    S -> DE : **PATCH /api/v1/alerts/{id}**\n{status: "acknowledged", notes: "..."}\n+ Bearer {access_token}
+    S -> DE : **POST /api/v1/alerts/{id}/acknowledge**
+    + Bearer {access_token}
     activate DE
-    
+
     DE -> DE : validate opaque bearer token → Session → User → Roles
-    DE -> CDB : (HTTP) **GET /api/v1/internal/users/{user_id}**\nđể validate SOC analyst
+    DE -> CDB : **GET /api/v1/internal/users/{user_id}**
     activate CDB
     CDB --> DE : user record (role=SOC_ANALYST)
     deactivate CDB
-    
+
     DE -> DDB : UPDATE alerts\n(status=acknowledged, assigned_to_id,\nupdated_at=NOW())
     activate DDB
     DDB --> DE : updated alert
     deactivate DDB
-    
+
     DE -> DDB : INSERT alert_timeline\n(event_type=acknowledged,\nactor_id, old_value=open,\nnew_value=acknowledged, comment)
-    
+
     DE --> S : **200 OK**\n{alert: {status: "acknowledged"}}
     deactivate DE
 
 else Resolve Alert
-    S -> DE : **PATCH /api/v1/alerts/{id}**\n{status: "resolved", resolution: "..."}\n+ Bearer {access_token}
+    S -> DE : **POST /api/v1/alerts/{id}/resolve**
+    {resolution: "true_attack"|"false_positive"|\n"benign_true_positive"|"insufficient_evidence", notes: "..."}
+    + Bearer {access_token}
     activate DE
-    
-    DE -> CDB : validate SOC analyst via HTTP
+
+    DE -> CDB : **GET /api/v1/internal/users/{user_id}**
     DE -> DDB : UPDATE alerts\n(status=resolved, resolved_by_id,\nresolved_at=NOW(), resolution, notes)
     activate DDB
     DDB --> DE : updated alert
     deactivate DDB
-    
+
     DE -> DDB : INSERT alert_timeline\n(event_type=resolved, actor_id,\nresolved_by_id, old_value=acknowledged,\nnew_value=resolved, comment)
-    
+
     DE --> S : **200 OK**\n{alert: {status: "resolved"}}
     deactivate DE
 
-else Mark False Positive
-    S -> DE : **PATCH /api/v1/alerts/{id}**\n{status: "false_positive", notes: "user traveling"}\n+ Bearer {access_token}
+else Assign Alert
+    S -> DE : **POST /api/v1/alerts/{id}/assign**
+    {assigned_to_id: "uuid"}
+    + Bearer {access_token}
     activate DE
-    
-    DE -> DDB : UPDATE alerts\n(status=false_positive, resolved_by_id,\nresolved_at=NOW(), notes)
+
+    DE -> CDB : **GET /api/v1/internal/users/{user_id}**
+    DE -> DDB : UPDATE alerts\n(assigned_to_id=assigned_uuid)
     activate DDB
     DDB --> DE : updated alert
     deactivate DDB
-    
-    DE -> DDB : INSERT alert_timeline\n(event_type=false_positive)
-    
-    DE --> S : **200 OK**\n{alert: {status: "false_positive"}}
+
+    DE -> DDB : INSERT alert_timeline\n(event_type=assigned)
+
+    DE --> S : **200 OK**\n{alert: {assigned_to_id: "uuid"}}
     deactivate DE
 
-else Escalate Alert
-    S -> DE : **PATCH /api/v1/alerts/{id}**\n{action: "escalate", notes: "..."}\n+ Bearer {access_token}
+else Protective Action
+    S -> DE : **POST /api/v1/alerts/{id}/actions**
+    {action: "REQUIRE_MFA"|"REVOKE_SESSIONS"|\n"LOCK_USER"|"FORCE_LOGOUT", reason: "..."}
+    + Bearer {access_token}
     activate DE
-    
-    DE -> DDB : UPDATE alerts\n(notes=escalated)
-    DE -> DDB : INSERT alert_timeline\n(event_type=escalated)
-    
-    DE --> S : **200 OK**\n{alert: {escalated: true}}
+
+    DE -> DE : validate opaque bearer token → Session → User → Roles
+    DE -> CDB : **POST /api/v1/internal/actions**
+    (action, user_id, reason)
+    activate CDB
+    CDB --> DE : action result
+    deactivate CDB
+
+    DE -> DDB : INSERT alert_timeline\n(event_type=action_executed)
+
+    DE --> S : **200 OK**\n{status: applied, details}
     deactivate DE
 end
 
-== SOC Dashboard Stats ==
+== Add Timeline Note (CURRENT IMPLEMENTATION) ==
 
-S -> DE : **GET /api/v1/soc/dashboard**\n?timeframe=24h\n+ Bearer {access_token}
+S -> DE : **POST /api/v1/alerts/{id}/timeline**
+{event_type: "note_added", comment: "..."}
++ Bearer {access_token}
 activate DE
 
-DE -> DDB : SELECT COUNT(*) FROM alerts\nWHERE created_at > NOW()-24h
-DE -> DDB : SELECT COUNT(*) FROM alerts\nWHERE status='open'
-DE -> DDB : SELECT COUNT(*) GROUP BY risk_level
+DE -> DDB : INSERT alert_timeline\n(event_type=note_added, comment)
+DE --> S : **200 OK**\n{timeline_event}
 
-DE --> S : **200 OK**\n{stats: {total, open, by_risk_level}}
 deactivate DE
 
 note over S, DDB
-  **SOC Action Flow (v3.3):**
-  1. SOC → POST /alerts/{id}/actions
-  2. DE validates analyst, calls /internal/actions → Core App
-  3. Core App: REVOKE_SESSIONS → {sessions_revoked: N}
-  4. SOC nhận {status: applied, details.sessions_revoked}
-
-  **Alert State Machine:**
+  **Alert State Machine (v3.3):**
   open → acknowledged → resolved
                    ↘ false_positive
+
+  **Alert Timeline Event Types (current):**
+  created, assigned, unassigned, acknowledged,
+  note_added, status_changed, resolved, false_positive
+  (timeline.event_type=escalated is a marker only;
+   no /escalate endpoint is implemented in v3.3)
+
+  **APPROVED DESIGN / IMPLEMENTATION PENDING:**
+  - GET /api/v1/soc/dashboard
+  - POST /api/v1/alerts/{id}/escalate
+  - POST /api/v1/policies (policy create endpoint)
 end note
 
 @enduml

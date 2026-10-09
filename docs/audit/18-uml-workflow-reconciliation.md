@@ -152,9 +152,81 @@ Sources are corrected. PNG/SVG regeneration requires PlantUML installation.
 
 ---
 
-## 8. Source-of-Truth Confirmation
+## 8. D3.1 / D4.1 Correction Pass
 
-This D4 pass confirms:
+This audit records an additional correction pass (D3.1/D4.1) that addressed residual factual errors in session management, alert endpoints, and escalation semantics discovered after D3/D4 completion.
+
+### 8.1 Session / Refresh Corrections
+
+| Issue | Found In | Correction |
+|-------|---------|-----------|
+| "refresh token unlimited until revoked" | wf5_session_management.uml, workflows.mmd | Refresh only valid while backing session unexpired and not revoked |
+| "check expiry, signature" on refresh | wf5_session_management.uml | Opaque tokens: NO signature, NO embedded exp claim |
+| `expires_at=NOW()+1h` during refresh | wf5_session_management.uml | expires_at UNCHANGED on refresh (always fixed at login time + 1h) |
+| `expires_in: 3600` in refresh response | wf5_session_management.uml | Response only returns new tokens |
+| `logout-all` shown as CURRENT | wf5_session_management.uml, workflows.mmd | APPROVED DESIGN / IMPLEMENTATION PENDING |
+| Admin session revoke shown as CURRENT | wf5_session_management.uml, workflows.mmd | APPROVED DESIGN / IMPLEMENTATION PENDING |
+| Logout uses `token_jti=access_token.jti` lookup | wf5_session_management.uml | Correct: uses authenticated session context |
+| `200 {revoked: true}` on DELETE sessions | wf5_session_management.uml | Correct: `204 No Content` |
+
+### 8.2 Alert Endpoint Corrections
+
+| Issue | Found In | Correction |
+|-------|---------|-----------|
+| `PATCH /api/v1/alerts/{id}` generic route | wf3_soc.uml | Replaced with specific POST endpoints: acknowledge, resolve, assign, actions, timeline |
+| `resolve` field in alert update | wf3_soc.uml | Added resolution type: `true_attack`, `false_positive`, `benign_true_positive`, `insufficient_evidence` |
+| `escalate` as PATCH with `status=escalated` | wf3_soc.uml, uml-activity-soc.puml | Removed — no `escalate` endpoint; escalation = timeline marker only |
+| Dashboard endpoint shown as CURRENT | wf3_soc.uml | APPROVED DESIGN / IMPLEMENTATION PENDING |
+
+### 8.3 Escalation Corrections
+
+| Issue | Found In | Correction |
+|-------|---------|-----------|
+| `alert.status = escalated` | uml-activity-soc.puml | Removed — only `open`, `acknowledged`, `resolved`, `false_positive` are valid statuses |
+| `POST /alerts/{id}/escalate` shown as CURRENT | uml-activity-soc.puml | APPROVED DESIGN / IMPLEMENTATION PENDING |
+| "Security Manager approve" on escalation | uml-activity-soc.puml | Removed — Manager giám sát supervisory visibility only |
+| Escalate as UC-DE-12 resolution type | 05-dac-ta-use-case-detection-engine.md | Removed `ESCALATED` from resolution types |
+
+### 8.4 Policy / Permission Corrections
+
+| Issue | Found In | Correction |
+|-------|---------|-----------|
+| Security Manager: Create/Activate Policy = YES | 06-phan-tich-doi-tuong-su-dung-detection-engine.md | Corrected to NO for both |
+| SOC Analyst: Policy View = YES | 06-phan-tich-doi-tuong-su-dung-detection-engine.md | Corrected to NO |
+| US-MGR-02: "approve/reject/reassign" on escalated | 06-phan-tich-doi-tuong-su-dung-detection-engine.md | Corrected to VIEW only |
+| US-MGR-03: Manager "adjust thresholds" | 06-phan-tich-doi-tuong-su-dung-detection-engine.md | Corrected to "review" only (Security Admin owns) |
+| Permission matrix: Manager acknowledge/resolve = ✅ | 06-phan-tich-doi-tuong-su-dung-detection-engine.md | Marked ⚠️ as prototype-only; canonical = oversight |
+
+### 8.5 Endpoint Implementation Status
+
+| Endpoint | Implementation Status | Verified In |
+|---------|---------------------|-----------|
+| `POST /api/v1/alerts/{id}/acknowledge` | CURRENT IMPLEMENTATION | `app/alerts.py:449` |
+| `POST /api/v1/alerts/{id}/resolve` | CURRENT IMPLEMENTATION | `app/alerts.py:496` |
+| `POST /api/v1/alerts/{id}/assign` | CURRENT IMPLEMENTATION | `app/alerts.py:575` |
+| `POST /api/v1/alerts/{id}/actions` | CURRENT IMPLEMENTATION (no role gate) | `app/alerts.py:634` |
+| `POST /api/v1/alerts/{id}/timeline` | CURRENT IMPLEMENTATION | `app/alerts.py:770` |
+| `GET /api/v1/alerts/{id}/evidence` | CURRENT IMPLEMENTATION | `app/alerts.py:355` |
+| `POST /api/v1/auth/logout` | CURRENT IMPLEMENTATION | `app/auth.py:720` |
+| `DELETE /api/v1/sessions/{id}` | CURRENT IMPLEMENTATION (204 No Content) | `app/auth.py:774` |
+| `GET /api/v1/soc/dashboard` | IMPLEMENTATION PENDING | Not in `app/alerts.py` |
+| `POST /api/v1/alerts/{id}/escalate` | IMPLEMENTATION PENDING | Not in `app/alerts.py` |
+| `POST /api/v1/policies` | IMPLEMENTATION PENDING | Not in `app/detection.py` |
+| `POST /api/v1/auth/logout-all` | IMPLEMENTATION PENDING | Not in `app/auth.py` |
+| `POST /api/v1/admin/sessions/{id}/revoke` | IMPLEMENTATION PENDING | Not in `app/auth.py` |
+
+### 8.6 D3.1/D4.1 Summary
+
+**Files modified:** 8 files (wf5, workflows.mmd, wf3, uml-activity-soc, 05, 06, SENTINEL_AUTH_TONG_HOP, DECISIONS-DETECTION)
+**Artifacts created:** None
+**Total corrections:** ~30 term/endpoint/status corrections across session semantics, alert endpoints, escalation, and permission matrices
+**Application code:** NOT modified (verified against `app/auth.py`, `app/alerts.py`, `app/schemas.py`)
+
+---
+
+## 9. Source-of-Truth Confirmation
+
+This D4 + D3.1/D4.1 pass confirms:
 
 1. All diagram/workflow artifacts now accurately derive from DECISIONS-SYSTEM-v3.3.md and DECISIONS-DETECTION-v3.3.md.
 2. No diagram introduces a business decision not covered by D1-D3.

@@ -522,7 +522,7 @@ erDiagram
 | S-03 | SOC Analyst | Xem bằng chứng Rule/ML/Risk | YCNV-S-03 | UC-08 | Bắt buộc |
 | S-04 | SOC Analyst | Tiếp nhận và điều tra Alert | YCNV-S-04 | UC-09 | Bắt buộc |
 | S-05 | SOC Analyst | Phân loại kết quả điều tra | YCNV-S-05 | UC-10 | Bắt buộc |
-| S-06 | SOC Analyst | Yêu cầu hành động bảo vệ | YCNV-S-06 | UC-11 | Bắt buộc |
+| S-06 | SOC Analyst | Thực hiện hành động bảo vệ | YCNV-S-06 | UC-11 | Bắt buộc |
 | S-07 | SOC Analyst | Đóng hồ sơ Incident | YCNV-S-07 | UC-12 | Bắt buộc |
 
 #### 5.1.3 Security Administrator Functions
@@ -558,7 +558,7 @@ erDiagram
 | UC-08 | Xem bằng chứng Rule/ML/Risk | SOC Analyst | Bắt buộc |
 | UC-09 | Tiếp nhận và điều tra Alert | SOC Analyst | Bắt buộc |
 | UC-10 | Phân loại kết quả điều tra | SOC Analyst | Bắt buộc |
-| UC-11 | Yêu cầu hành động bảo vệ | SOC Analyst | Bắt buộc |
+| UC-11 | Thực hiện hành động bảo vệ | SOC Analyst | Bắt buộc |
 | UC-12 | Đóng hồ sơ Incident | SOC Analyst | Bắt buộc |
 | UC-13 | Quản lý tài khoản và role | Security Admin | Bắt buộc |
 | UC-14 | Quản lý MFA/Auth Policy | Security Admin | Bắt buộc |

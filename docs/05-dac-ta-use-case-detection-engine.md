@@ -427,13 +427,16 @@ Nếu ML không thành công:
 |------------|--------|
 | **ID** | UC-DE-08 |
 | **Tên** | Xem SOC Dashboard |
-| **Actor chính** | SOC Analyst |
+| **Actor chính** | SOC Analyst, Security Manager |
 | **Mô tả ngắn** | Xem tổng quan alerts và metrics |
-| **Ưu tiên** | Bắt buộc |
+| **Trạng thái v3.3** | APPROVED DESIGN / IMPLEMENTATION PENDING — `GET /api/v1/soc/dashboard` endpoint not verified in current source. |
+
+> ⚠️ **Dashboard endpoint:** The `GET /api/v1/soc/dashboard` endpoint is an **APPROVED DESIGN** with **IMPLEMENTATION PENDING**. Do not describe it as currently implemented.
 
 #### Basic Flow
 ```
-1. SOC Analyst truy cập `GET /api/v1/soc/dashboard`
+1. SOC Analyst truy cập GET /api/v1/soc/dashboard
+   NOTE: IMPLEMENTATION PENDING — not in current prototype
 2. System lấy:
    - Alerts count by status
    - Alerts count by risk_level
@@ -639,21 +642,25 @@ Nếu ML không thành công:
 ```
 1. SOC Analyst hoàn thành điều tra
 2. Chọn resolution type:
-   - RESOLVED: Threat là thật
-   - FALSE_POSITIVE: Không phải threat
-   - ESCALATED: Cần Security Manager review
+   - true_attack: Threat confirmed, action taken
+   - false_positive: Legitimate login flagged incorrectly
+   - benign_true_positive: Legitimate but flagged for unusual behavior
+   - insufficient_evidence: Cannot determine
 3. Nhập notes (bắt buộc)
 4. System update alert status
 5. Ghi timeline entry
-6. Nếu ESCALATED → notify Security Manager
 ```
+> ⚠️ **ESCALATED is NOT a resolution type in v3.3.** Alert resolution types are:
+> `true_attack`, `false_positive`, `benign_true_positive`, `insufficient_evidence`.
+> Escalation is a timeline/supervisory marker only. See UC-DE-13 note.
 
-#### Resolution Types
+#### Resolution Types (v3.3)
 | Type | Mô tả |
 |------|--------|
-| `RESOLVED` | Threat confirmed, action taken |
-| `FALSE_POSITIVE` | Legitimate login flagged incorrectly |
-| `ESCALATED` | Need higher authority decision |
+| `true_attack` | Threat confirmed, action taken |
+| `false_positive` | Legitimate login flagged incorrectly |
+| `benign_true_positive` | Legitimate but flagged for unusual behavior |
+| `insufficient_evidence` | Cannot determine — keep open for later |
 
 ---
 
@@ -667,7 +674,7 @@ Nếu ML không thành công:
 | **Actor phụ** | Security Manager (khả năng giám sát / supervisory) |
 | **Đối tượng hệ thống** | Core App |
 | **Mô tả ngắn** | SOC Analyst hoặc Security Manager thực hiện trực tiếp hành động bảo vệ trên Core App. Không có bước phê duyệt. |
-| **Trạng thái v3.3** | APPROVED DESIGN / CURRENT PROTOTYPE: endpoint tồn tại nhưng chưa có kiểm tra role trên executor. |
+| **Trạng thái v3.3** | CURRENT IMPLEMENTATION — endpoint exists at `POST /api/v1/alerts/{id}/actions`; IMPLEMENTATION GAP: no role verification on executor. |
 
 > ⚠️ **Phê duyệt / Approval workflow không thuộc v3.3.** Pattern `SOC Analyst → submit request → Security Manager approve → execute` là **FUTURE ENHANCEMENT**, không phải hành vi hiện tại. Tham chiếu `APPROVE_ACTION` trong tài liệu cũ được đánh dấu STALE.
 

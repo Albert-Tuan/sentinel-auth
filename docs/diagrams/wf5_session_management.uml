@@ -1,13 +1,13 @@
 @startuml
 skinparam backgroundColor #FFFFFF
 
-title WF-5: Session Management (v3.3 - core-app + core-db)
+title WF-5: Session Management (v3.3 - CURRENT IMPLEMENTATION)
 
 participant "User\n(Browser/App)" as U #D5E8D4
 participant "Core App" as CA #DAE8FC
 database "core-db" as CDB #F5F5F5
 
-== Create Session ==
+    10|== Create Session ==
 
 note over U, CDB
   Session được tạo sau khi:
@@ -27,42 +27,49 @@ CA -> CDB : INSERT sessions\n(token_jti, access_token_hash,\nrefresh_token_hash,
 activate CDB
 deactivate CDB
 
-    CA --> U : **200 OK**\n{access_token, refresh_token,\nexpires_in: 3600}
+    CA --> U : **200 OK**\n{access_token, refresh_token}
     deactivate CA
 
 == Token Refresh ==
 
+note over U, CA
+  **Refresh semantics (v3.3):**
+  - Opaque tokens: NO signature, NO embedded exp/jti claims
+  - Refresh rotates both access and refresh token values
+  - Does NOT extend session.expires_at (fixed at login time + 1h)
+  - Refresh only valid while backing session is unexpired AND not revoked
+  - P1-F: concurrent refresh hardening — IMPLEMENTATION BACKLOG
+end note
+
 U -> CA : **POST /api/v1/auth/refresh**\n(refresh_token)
 activate CA
 
-CA -> CDB : SELECT session\nWHERE refresh_token_hash=?\nAND revoked_at IS NULL
+CA -> CDB : SELECT session\nWHERE refresh_token_hash=?\nAND revoked_at IS NULL\nAND expires_at >= NOW()
 activate CDB
 CDB --> CA : session record
 deactivate CDB
 
-CA -> CA : Validate refresh_token\n(check expiry, signature)
-
-alt refresh_token VALID + not revoked
-    CA -> CA : Generate new access_token\n(với token_jti rotation)
-    CA -> CDB : UPDATE sessions\n(token_jti=new, expires_at=NOW()+1h,\nlast_activity_at=NOW())
+alt refresh_token VALID + unexpired + not revoked
+    CA -> CA : Generate new opaque access_token\n(token_jti rotates)
+    CA -> CDB : UPDATE sessions\n(access_token_hash=hash(new_access),\nrefresh_token_hash=hash(new_refresh),\ntoken_jti=rotation_id,\nlast_activity_at=NOW())\nNOTE: expires_at UNCHANGED
     activate CDB
     deactivate CDB
     
-    CA --> U : **200 OK**\n{access_token, expires_in: 3600}
+    CA --> U : **200 OK**\n{access_token, refresh_token}
     deactivate CA
 
-else refresh_token EXPIRED/REVOKED
-    CA -> CDB : UPDATE sessions\n(revoked_at=NOW())
+else expired/revoked
     CA --> U : **401 TOKEN_EXPIRED**\n{relogin_required: true}
     deactivate CA
 end
 
-== Logout (Single Session) ==
+== Logout ==
 
 U -> CA : **POST /api/v1/auth/logout**\n(access_token)
 activate CA
 
-CA -> CDB : UPDATE sessions\n(revoked_at=NOW())\nWHERE token_jti=access_token.jti
+CA -> CA : get_current_auth_context() → ctx.session
+CA -> CDB : UPDATE sessions\n(revoked_at=NOW())\nWHERE id=ctx.session.id
 activate CDB
 deactivate CDB
 
@@ -70,21 +77,7 @@ CA -> CDB : INSERT audit_logs\n(action="logout", actor_id)
 activate CDB
 deactivate CDB
 
-CA --> U : **200 OK**\n{logged_out: true}
-deactivate CA
-
-== Logout (All Sessions) ==
-
-U -> CA : **POST /api/v1/auth/logout-all**\n(access_token)
-activate CA
-
-CA -> CDB : UPDATE sessions\nSET revoked_at=NOW()\nWHERE user_id=current_user_id\nAND revoked_at IS NULL
-activate CDB
-CDB --> CA : count: 5 sessions revoked
-deactivate CDB
-
-CA -> CDB : INSERT audit_logs\n(action="logout_all")
-CA --> U : **200 OK**\n{logged_out_all: true,\nsessions_revoked: 5}
+CA --> U : **200 OK**\n{status: "ok"}
 deactivate CA
 
 == List Active Sessions ==
@@ -105,68 +98,37 @@ deactivate CA
 U -> CA : **DELETE /api/v1/sessions/{id}**\n(access_token)
 activate CA
 
-CA -> CDB : SELECT session WHERE id=?
+CA -> CDB : SELECT session WHERE id=? AND user_id=current_user_id
 activate CDB
 CDB --> CA : session record
 deactivate CDB
 
-alt session.user_id = current_user_id
-    CA -> CDB : UPDATE sessions\n(revoked_at=NOW())\nWHERE id=? AND user_id=?
-    CA --> U : **200 OK** {revoked: true}
+alt session belongs to current_user
+    CA -> CDB : UPDATE sessions\n(revoked_at=NOW())\nWHERE id=? AND user_id=current_user_id
+    CA --> U : **204 No Content**
     deactivate CA
-
-else not own session
-    CA --> U : **403 FORBIDDEN**
+else session not found or not owned
+    CA --> U : **404 Not Found / 403 Forbidden**
     deactivate CA
 end
 
-== Admin Revoke Session ==
-
-note over U, CDB
-  Security Admin có thể revoke
-  sessions của user khác
+note over U, CA
+  **APPROVED DESIGN / IMPLEMENTATION PENDING:**
+  - Logout All (revoke all sessions at once)
+  - Admin Revoke (Security Admin revokes other user's session)
+  - Background middleware last_activity_at update
 end note
 
-U -> CA : **POST /api/v1/admin/sessions/{id}/revoke**\n(admin_token, reason)
-activate CA
-
-CA -> CA : validate opaque bearer token → Session → User → Roles
-CA -> CDB : UPDATE sessions\n(revoked_at=NOW())\nWHERE id=target_session_id
-activate CDB
-deactivate CDB
-
-CA -> CDB : INSERT audit_logs\n(action="session_revoked_by_admin",\nactor_id=admin_id,\nresource_id=session_id,\nafter_state={revoked: true})
-activate CDB
-deactivate CDB
-
-CA --> U : **200 OK** {revoked: true}
-deactivate CA
-
-== Session Activity Update ==
-
-note over U, CDB
-  Background: Middleware update
-  last_activity_at mỗi request
-end note
-
-U -> CA : Any API request\n(access_token in header)
-activate CA
-
-CA -> CA : validate opaque bearer token
-CA -> CDB : UPDATE sessions\n(last_activity_at=NOW())\nWHERE token_jti=? (async)
-deactivate CA
-
-== Session Expiry Check ==
+== Session Expiry Check (Bearer Token Validation) ==
 
 note over U, CA
   **Opaque Token Validation Pipeline (v3.3):**
-  1. Client gửi access_token (Bearer)
-  2. API compute SHA-256 hash
+  1. Client sends access_token (Bearer header)
+  2. API computes SHA-256 hash of token value
   3. Lookup session WHERE access_token_hash=? AND revoked_at IS NULL
-  4. Check expires_at > NOW()
-  5. If expired → 401, client dùng refresh_token
-  6. Hoặc user phải login lại
-  Note: P1-F concurrent refresh hardening — IMPLEMENTATION BACKLOG
+  4. Check session.expires_at > NOW()
+  5. If expired → 401, client uses refresh_token
+  6. Or user must re-login
 end note
 
 alt Token expired

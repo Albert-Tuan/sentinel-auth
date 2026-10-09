@@ -424,14 +424,14 @@ Mọi endpoint dành cho giao tiếp **service-to-service** đều:
 | `GET`  | `/api/v1/alerts/{id}/evidence` | Hồ sơ điều tra đầy đủ (UC-DE-11) |
 | `POST` | `/api/v1/alerts/{id}/acknowledge` | Tiếp nhận |
 | `POST` | `/api/v1/alerts/{id}/resolve` | Kết luận / báo nhầm |
-| `POST` | `/api/v1/alerts/{id}/escalate` | Chuyển cấp |
-| `POST` | `/api/v1/alerts/{id}/actions` | Yêu cầu hành động bảo vệ (UC-DE-13) |
+| `POST` | `/api/v1/alerts/{id}/escalate` | ~~IMPLEMENTATION PENDING~~ *(no dedicated endpoint in v3.3 — escalation is a timeline marker)* |
+| `POST` | `/api/v1/alerts/{id}/actions` | Thực hiện hành động bảo vệ (UC-DE-13) |
 | `GET`  | `/api/v1/alerts/{id}/timeline` | Dòng thời gian (DE-15) |
 | `POST` | `/api/v1/alerts/{id}/timeline` | Thêm ghi chú |
-| `GET`  | `/api/v1/soc/dashboard` | Số liệu bảng điều khiển (UC-DE-14) |
+| `GET`  | `/api/v1/soc/dashboard` | ~~IMPLEMENTATION PENDING~~ *(APPROVED DESIGN — not in current prototype)* |
 | `GET`  | `/api/v1/login-attempts` | Tra cứu lịch sử đăng nhập (UC-DE-14) |
 | `GET`  | `/api/v1/policies` | Danh sách chính sách (UC-DE-15) |
-| `POST` | `/api/v1/policies` | Tạo chính sách (UC-DE-15) |
+| `POST` | `/api/v1/policies` | ~~IMPLEMENTATION PENDING~~ *(APPROVED DESIGN — no create endpoint in current prototype)* |
 | `POST` | `/api/v1/policies/{id}/activate` | Kích hoạt chính sách (UC-DE-15) |
 
 > **Bốn hành động bảo vệ** dùng chung cho cả hai endpoint `/actions`:
