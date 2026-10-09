@@ -20,7 +20,7 @@ Quy ước marker:
   ("CODE", text)            -> Normal đơn cách, dùng cho khối dữ liệu/ký hiệu
   ("PAGEBREAK", "")         -> ngắt trang
   ("TABLE", spec)           -> bảng, spec = dict(xem file con)
-  ("IMG", spec)             -> hình, spec = dict(xem file con)
+  ("IMG", spec)             -> hình, spec = dict(key, width_cm, caption=str|None)
   ("TOC", kind)             -> trường TOC / TOA / danh mục từ viết tắt
 """
 from __future__ import annotations

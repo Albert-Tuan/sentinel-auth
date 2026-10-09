@@ -13,6 +13,13 @@ Nguyên tắc:
 Cách dùng:
     python3 scripts/build_bao_cao.py
     python3 scripts/build_bao_cao.py --out /đường/dẫn/tới/file.docx
+
+Sửa D3.1/D4.1 (v3.3):
+  * Unicode: mọi text đi qua unicodedata.normalize("NFC", ...) trước khi
+    chèn vào DOCX.
+  * Font: thiết lập Times New Roman rõ ràng cho Normal + mọi Heading style,
+    cả ascii/hAnsi lẫn eastAsia.
+  * Hình ảnh: luôn inline + canh giữa, bề rộng tối đa A4, giữ tỉ lệ.
 """
 from __future__ import annotations
 
@@ -21,6 +28,7 @@ import copy
 import re
 import shutil
 import sys
+import unicodedata
 from pathlib import Path
 
 from docx import Document
@@ -58,6 +66,21 @@ TEXT_W_CM = 21.0 - 2.54 - 2.54
 
 #: Những mục trong file mẫu bị loại bỏ vì là ví dụ về đề tài khác (quản lý nhà trọ)
 #: Danh sách heading bị loại nằm trong --drop-heading để người dùng kiểm soát.
+
+
+# ---------------------------------------------------------------------------
+# Tiện ích Unicode
+# ---------------------------------------------------------------------------
+
+def normalize(text: str) -> str:
+    """Chuẩn hoá Unicode về NFC trước khi chèn vào DOCX.
+
+    NFC đảm bảo chữ tiếng Việt được ghép đúng (base + combining mark)
+    thay vì tách rời, tránh hiện tượng ký tự phân mảnh trên Linux.
+    """
+    if not isinstance(text, str):
+        return text
+    return unicodedata.normalize("NFC", text)
 
 
 # ---------------------------------------------------------------------------
@@ -186,6 +209,78 @@ def set_update_fields(doc) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Font helpers
+# ---------------------------------------------------------------------------
+
+def _set_font_on_rFonts(element, font_name: str) -> None:
+    """Đặt tên font trên rFonts element cho ascii/hAnsi/eastAsia.
+
+    element thường là style._element (pPr.rPr hoặc rPr trực tiếp).
+    Đặt cả ba để đảm bảo font hiển thị đúng trên Linux/Windows/WPS.
+    """
+    for attr in ("w:ascii", "w:hAnsi", "w:eastAsia"):
+        element.set(qn(attr), font_name)
+
+
+def _apply_run_font(run, font_name: str = "Times New Roman") -> None:
+    """Đặt font cho một run, bao gồm cả eastAsia."""
+    run.font.name = font_name
+    rPr = run._r.get_or_add_rPr()
+    rFonts = rPr.find(qn("w:rFonts"))
+    if rFonts is None:
+        rFonts = OxmlElement("w:rFonts")
+        rPr.insert(0, rFonts)
+    _set_font_on_rFonts(rFonts, font_name)
+
+
+def set_document_fonts(doc) -> None:
+    """Thiết lập Times New Roman cho Normal và mọi Heading style.
+
+    Áp dụng cho cả ascii/hAnsi lẫn eastAsia để chữ Việt hiển thị đúng
+    trên mọi bộ office (Word, LibreOffice, WPS).
+    """
+    FONT = "Times New Roman"
+    style_names = ["Normal", "Heading 1", "Heading 2", "Heading 3",
+                   "Heading 4", "Heading 5", "Heading 6",
+                   "List Paragraph", "Caption"]
+
+    for name in style_names:
+        try:
+            style = doc.styles[name]
+        except KeyError:
+            continue
+        style.font.name = FONT
+        # Đặt trên rPr/rFonts để python-docx không bị ghi đè
+        rPr = style.element.get_or_add_rPr()
+        rFonts = rPr.find(qn("w:rFonts"))
+        if rFonts is None:
+            rFonts = OxmlElement("w:rFonts")
+            rPr.insert(0, rFonts)
+        _set_font_on_rFonts(rFonts, FONT)
+
+        # Kích thước mặc định
+        if name == "Normal":
+            style.font.size = Pt(13)
+
+    # Cũng cập nhật docDefaults rPr (phong cách mặc định cho toàn tài liệu)
+    docDefaults = doc.styles.element.find(qn("w:docDefaults"))
+    if docDefaults is not None:
+        rPrDefault = docDefaults.find(qn("w:rPrDefault"))
+        if rPrDefault is None:
+            rPrDefault = OxmlElement("w:rPrDefault")
+            docDefaults.append(rPrDefault)
+        rPr = rPrDefault.find(qn("w:rPr"))
+        if rPr is None:
+            rPr = OxmlElement("w:rPr")
+            rPrDefault.append(rPr)
+        rFonts = rPr.find(qn("w:rFonts"))
+        if rFonts is None:
+            rFonts = OxmlElement("w:rFonts")
+            rPr.insert(0, rFonts)
+        _set_font_on_rFonts(rFonts, FONT)
+
+
+# ---------------------------------------------------------------------------
 # Dựng các loại khối
 # ---------------------------------------------------------------------------
 
@@ -211,13 +306,15 @@ def add_para(doc, text: str, *, style: str | None = None,
     if keep_next:
         set_keep(p, with_next=True, together=True)
     if text:
-        run = p.add_run(text)
+        run = p.add_run(normalize(text))
         run.italic = italic
         run.bold = bold
         if size_pt:
             run.font.size = Pt(size_pt)
         if color:
             run.font.color.rgb = RGBColor.from_string(color)
+        # Đảm bảo font chuẩn trên mọi run chèn text
+        _apply_run_font(run)
     return p
 
 
@@ -226,7 +323,9 @@ def add_heading(doc, level: int, text: str) -> object:
     style = f"Heading {level}"
     p = doc.add_paragraph()
     p.style = doc.styles[style]
-    p.add_run(text)
+    run = p.add_run(normalize(text))
+    # Đảm bảo font chuẩn trên run tiêu đề
+    _apply_run_font(run)
     # Giữ tiêu đề cùng trang với nội dung ngay sau nó
     set_keep(p, with_next=True, together=True)
     # Canh giữa: mẫu canh giữa các tiêu đề cấp 1
@@ -237,7 +336,8 @@ def add_heading(doc, level: int, text: str) -> object:
 
 def add_bullet(doc, text: str) -> object:
     p = doc.add_paragraph(style=doc.styles["List Paragraph"])
-    p.add_run("•  " + text)
+    run = p.add_run("•  " + normalize(text))
+    _apply_run_font(run)
     pf = p.paragraph_format
     set_indent(p, left=567, hanging=283)
     set_spacing(p, before=0, after=80, line=300)
@@ -251,8 +351,9 @@ def add_caption(doc, text: str) -> object:
     p = doc.add_paragraph()
     p.alignment = WD_ALIGN_PARAGRAPH.CENTER
     set_spacing(p, before=60, after=200, line=288)
-    run = p.add_run(text)
+    run = p.add_run(normalize(text))
     run.bold = True
+    _apply_run_font(run)
 
     # Trường TC ẩn: đánh dấu caption cho danh sách hình bảng
     tc = p.add_run()
@@ -260,7 +361,7 @@ def add_caption(doc, text: str) -> object:
     tc._r.append(_el("w:fldChar", fldCharType="begin"))
     instr = OxmlElement("w:instrText")
     instr.set(qn("xml:space"), "preserve")
-    instr.text = f' TC "{text}" \\f c \\l 1 '
+    instr.text = f' TC "{normalize(text)}" \\f c \\l 1 '
     tc._r.append(instr)
     tc._r.append(_el("w:fldChar", fldCharType="end"))
     return p
@@ -272,33 +373,70 @@ MAX_IMG_W_CM = 15.5
 MAX_IMG_H_CM = 19.5
 
 
-def add_image(doc, key: str, width_cm: float) -> object:
-    """Chèn hình, tự thu nhỏ nếu vượt quá khung trang của file mẫu.
+def insert_figure(doc, image_path: Path | str,
+                  caption: str | None = None,
+                  width_cm: float = MAX_IMG_W_CM) -> object:
+    """Chèn hình ảnh inline, canh giữa, tự thu nhỏ nếu vượt quá khung A4.
 
-    Một số sơ đồ sinh bằng PlantUML có tỉ lệ rất dài, nếu chỉ giới hạn theo
-    bề rộng thì chiều cao vượt quá một trang và Word sẽ cắt hình. Vì vậy ta
-    lấy kích thước gốc, giới hạn theo cả bề rộng lẫn chiều cao, rồi mới đặt
-    vào tài liệu.
+    * Luôn canh giữa paragraph chứa ảnh.
+    * Giới hạn bề rộng tối đa = ``width_cm`` (mặc định 15,5 cm cho A4 lề 2,54).
+    * Giữ tỉ lệ gốc — không bóp méo.
+    * Nếu ảnh quá cao cho một trang, giới hạn chiều cao = MAX_IMG_H_CM.
+    * Chèn caption (tùy chọn) bên dưới ảnh, canh giữa.
+    * Font chuẩn cho caption.
     """
-    path = DOCS / H.HINH[key]
+    path = Path(image_path)
     if not path.exists():
-        raise FileNotFoundError(f"thiếu hình: {key} -> {path}")
+        raise FileNotFoundError(f"thiếu hình: {path}")
 
     w_cm = min(width_cm, MAX_IMG_W_CM)
     with Image.open(path) as im:
         px_w, px_h = im.size
     if not px_h:
-        raise ValueError(f"hình không hợp lệ: {key}")
+        raise ValueError(f"hình không hợp lệ: {path}")
+
+    # Tính chiều cao tương ứng giữ nguyên tỉ lệ
     h_cm = w_cm * px_h / px_w
     if h_cm > MAX_IMG_H_CM:
         h_cm = MAX_IMG_H_CM
         w_cm = h_cm * px_w / px_h
 
+    # Tạo paragraph chứa ảnh — luôn canh giữa
     p = doc.add_paragraph()
     p.alignment = WD_ALIGN_PARAGRAPH.CENTER
     set_spacing(p, before=120, after=60, line=240)
-    p.add_run().add_picture(str(path), width=Cm(w_cm), height=Cm(h_cm))
+
+    # Chèn ảnh inline (mặc định inline, không phải floating)
+    run = p.add_run()
+    run.add_picture(str(path), width=Cm(w_cm), height=Cm(h_cm))
+
+    # Thêm caption nếu có
+    if caption:
+        cap_p = doc.add_paragraph()
+        cap_p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        set_spacing(cap_p, before=40, after=160, line=240)
+        cap_run = cap_p.add_run(normalize(caption))
+        cap_run.italic = True
+        _apply_run_font(cap_run)
+
+        # Trường TC ẩn cho danh sách hình
+        tc = cap_p.add_run()
+        _hide_run(tc)
+        tc._r.append(_el("w:fldChar", fldCharType="begin"))
+        instr = OxmlElement("w:instrText")
+        instr.set(qn("xml:space"), "preserve")
+        instr.text = f' TC "{normalize(caption)}" \\f c \\l 1 '
+        tc._r.append(instr)
+        tc._r.append(_el("w:fldChar", fldCharType="end"))
+
     return p
+
+
+def add_image(doc, key: str, width_cm: float,
+              caption: str | None = None) -> object:
+    """API cũ — giữ tương thích ngược: chèn hình theo key trong H.HINH."""
+    path = DOCS / H.HINH[key]
+    return insert_figure(doc, path, caption=caption, width_cm=width_cm)
 
 
 def _apply_table_borders(tbl) -> None:
@@ -367,9 +505,10 @@ def add_table(doc, spec: dict) -> object:
             p.alignment = (WD_ALIGN_PARAGRAPH.LEFT if long_col
                            else WD_ALIGN_PARAGRAPH.CENTER)
             set_spacing(p, before=40, after=40, line=264)
-            run = p.add_run(str(val))
+            run = p.add_run(normalize(str(val)))
             run.font.size = Pt(11.5)
             run.bold = header_row
+            _apply_run_font(run)
             if header_row:
                 shade(cell, "D9D9D9")
 
@@ -394,10 +533,11 @@ def _cover_line(doc, runs: list[tuple[str, dict]], *, align: str = "center",
                    else WD_ALIGN_PARAGRAPH.JUSTIFY)
     set_spacing(p, before=before, after=after, line=240)
     for text, fmt in runs:
-        r = p.add_run(text)
+        r = p.add_run(normalize(text))
         r.bold = fmt.get("b", False)
         if fmt.get("sz"):
             r.font.size = Pt(fmt["sz"])
+        _apply_run_font(r)
     return p
 
 
@@ -421,16 +561,18 @@ def build_cover(doc) -> None:
     p = doc.add_paragraph()
     p.alignment = WD_ALIGN_PARAGRAPH.CENTER
     set_spacing(p, before=0, after=0, line=240)
-    r = p.add_run("BÁO CÁO ")
+    r = p.add_run(normalize("BÁO CÁO "))
     r.bold = True
     r.font.size = Pt(36)
     r2 = p.add_run()
     r2.bold = True
     r2.font.size = Pt(36)
     r2._r.append(_el("w:br"))
-    r3 = p.add_run("ĐỒ ÁN MÔN HỌC")
+    r3 = p.add_run(normalize("ĐỒ ÁN MÔN HỌC"))
     r3.bold = True
     r3.font.size = Pt(36)
+    for r_ in (r, r2, r3):
+        _apply_run_font(r_)
 
     for _ in range(3):
         _cover_line(doc, [("", {})])
@@ -457,13 +599,12 @@ def build_cover(doc) -> None:
         set_spacing(p, before=0, after=0, line=276)
         p.alignment = WD_ALIGN_PARAGRAPH.JUSTIFY
         set_indent(p, left=720, hanging=360)
-        p.add_run(f"{i}. {ho_ten}")
-        p.add_run("\t")
-        p.add_run(mssv)
-        p.add_run("\t")
-        p.add_run(lop)
-        p.add_run("\t\t")
-        p.add_run(vai_tro)
+        parts = [
+            f"{i}. {ho_ten}", "\t", mssv, "\t", lop, "\t\t", vai_tro
+        ]
+        for part in parts:
+            r = p.add_run(normalize(part) if part != "\t" else part)
+            _apply_run_font(r)
 
     for _ in range(5):
         _cover_line(doc, [("", {})])
@@ -490,8 +631,9 @@ def _field_block(doc, instr: str, placeholder: str) -> None:
     r2._r.append(it)
     r3 = p.add_run()
     r3._r.append(_el("w:fldChar", fldCharType="separate"))
-    r4 = p.add_run(placeholder)
+    r4 = p.add_run(normalize(placeholder))
     r4.italic = True
+    _apply_run_font(r4)
     r5 = p.add_run()
     r5._r.append(_el("w:fldChar", fldCharType="end"))
 
@@ -538,9 +680,10 @@ def build_front_matter(doc) -> None:
             p.alignment = (WD_ALIGN_PARAGRAPH.CENTER if i == 0
                            else WD_ALIGN_PARAGRAPH.LEFT)
             set_spacing(p, before=40, after=40, line=264)
-            run = p.add_run(val)
+            run = p.add_run(normalize(val))
             run.font.size = Pt(11.5)
             run.bold = idx == 0
+            _apply_run_font(run)
             if idx == 0:
                 shade(cell, "D9D9D9")
     _ = None
@@ -582,7 +725,8 @@ def render_blocks(doc, blocks: list[tuple[str, object]]) -> None:
             add_para(doc, payload, align="left", indent_first=False,
                      size_pt=11, space_after=80, line=240)
         elif kind == "IMG":
-            add_image(doc, payload["key"], payload["width_cm"])
+            add_image(doc, payload["key"], payload["width_cm"],
+                      caption=payload.get("caption"))
         elif kind == "TABLE":
             add_table(doc, payload)
         elif kind == "PAGEBREAK":
@@ -599,6 +743,8 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--out", default=str(DEFAULT_OUT))
     ap.add_argument("--template", default=str(TEMPLATE))
+    ap.add_argument("--smoke-test", action="store_true",
+                    help="Tạo smoke-test DOCX thu nhỏ để kiểm tra Vietnamese")
     args = ap.parse_args()
 
     tpl = Path(args.template)
@@ -624,11 +770,56 @@ def main() -> int:
             hp = hdr.paragraphs[0]
             for r in list(hp.runs):
                 r._r.getparent().remove(r._r)
-            hp.add_run("Báo cáo Đồ án Phân tích thiết kế hệ thống thông tin")
+            run = hp.add_run(normalize(
+                "Báo cáo Đồ án Phân tích thiết kế hệ thống thông tin"
+            ))
+            _apply_run_font(run)
 
     set_update_fields(doc)
 
-    # 3) Dựng nội dung
+    # 3) Áp dụng font chuẩn toàn tài liệu
+    set_document_fonts(doc)
+
+    if args.smoke_test:
+        # Smoke-test: tạo DOCX nhỏ kiểm tra Vietnamese rendering
+        add_heading(doc, 1, "SMOKE TEST — Vietnamese Rendering")
+        add_para(doc, "Đoạn văn tiếng Việt: Các ký tự có dấu phải hiển thị đúng: "
+                     "ÀÁÂÃÈÉÊÌÍÒÓÔÕÙÚÛĀĒĪŌŪăēīōūđẠẮẦẬẬẺẼỀỀỂỈỌỎỒỒỔỖỜỞỢỤỦỨỪửỰỲỴÝỹ",
+                     align="both")
+        add_heading(doc, 2, "Tiêu đề cấp 2 — Kiểm tra dấu")
+        add_para(doc, "Tiêu đề cấp 3 với chữ Việt: Mục tiêu nghiệp vụ", align="both",
+                 italic=True)
+        add_para(doc, "Đây là đoạn bullet tiếng Việt:", align="both")
+        add_bullet(doc, "Ghi nhận đầy đủ mọi lần đăng nhập")
+        add_bullet(doc, "Đánh giá rủi ro của mỗi lần đăng nhập dựa trên hành vi")
+        add_bullet(doc, "Tạo cảnh báo có đủ bằng chứng khi rủi ro vượt ngưỡng")
+        add_para(doc, "Đoạn ghi chú: Mô hình học máy dùng để suy luận mức bất thường "
+                     "của lần đăng nhập dựa trên lịch sử hành vi người dùng.",
+                 align="both", italic=True, space_after=200)
+        add_heading(doc, 3, "Bảng minh họa")
+        add_table(doc, {
+            "header": ["Cột 1", "Cột 2 — Tiếng Việt", "Cột 3"],
+            "rows": [
+                ["Hàng 1", "Giá trị minh họa", "Số liệu"],
+                ["Hàng 2", "Bảo mật thông tin", "123"],
+                ["Hàng 3", "Xác thực đa yếu tố", "456"],
+            ],
+            "widths": [3.0, 8.0, 4.0],
+        })
+        add_para(doc, "Kết thúc smoke test.", align="both", space_after=200)
+
+        out = Path(args.out)
+        out.parent.mkdir(parents=True, exist_ok=True)
+        doc.save(str(out))
+        n_img = sum(1 for r in doc.part.rels.values() if "image" in r.reltype)
+        print(f"Smoke-test DOCX: {out}")
+        print(f"  đoạn văn: {len(doc.paragraphs)}")
+        print(f"  bảng    : {len(doc.tables)}")
+        print(f"  hình    : {n_img}")
+        print(f"  dung lượng: {out.stat().st_size / 1024:.0f} KiB")
+        return 0
+
+    # 4) Dựng nội dung đầy đủ
     build_cover(doc)
     build_front_matter(doc)
 
@@ -651,7 +842,7 @@ def main() -> int:
     out.parent.mkdir(parents=True, exist_ok=True)
     doc.save(str(out))
 
-    # 4) In báo cáo kết quả
+    # 5) In báo cáo kết quả
     n_tbl = len(doc.tables)
     n_img = sum(1 for r in doc.part.rels.values() if "image" in r.reltype)
     n_par = len(doc.paragraphs)
