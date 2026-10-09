@@ -13,10 +13,9 @@ Features:
 - Auto-expire based on TTL
 """
 import hashlib
-import secrets
 from datetime import datetime, timedelta
 from typing import Optional, List
-from uuid import UUID, uuid4
+from uuid import UUID
 
 from fastapi import APIRouter, HTTPException, Header, Depends, Request
 from pydantic import BaseModel, Field
@@ -227,7 +226,7 @@ async def untrust_all_devices(
 
 @router.delete("/{device_id}", status_code=204)
 async def untrust_device(
-    device_id: str,
+    device_id: UUID,
     ctx: AuthContext = Depends(get_current_auth_context),
     db=Depends(get_db),
 ) -> None:
@@ -239,7 +238,7 @@ async def untrust_device(
     """
     device = db.query(UserTrustedDevice).filter(
         UserTrustedDevice.user_id == ctx.user.id,
-        UserTrustedDevice.id == UUID(device_id),
+        UserTrustedDevice.id == device_id,
     ).first()
 
     if not device:
@@ -310,20 +309,3 @@ async def check_device_trusted(
         "device_name": device.device_name,
         "expires_at": device.expires_at.isoformat() if device.expires_at else None,
     }
-
-
-@router.delete("/all", status_code=204)
-async def untrust_all_devices(
-    ctx: AuthContext = Depends(get_current_auth_context),
-    db=Depends(get_db),
-) -> None:
-    """
-    Remove all trusted devices for current user.
-    Security feature: allows user to remotely revoke all trusted devices.
-    Uses canonical get_current_auth_context() for authentication.
-    """
-    db.query(UserTrustedDevice).filter(
-        UserTrustedDevice.user_id == ctx.user.id
-    ).delete()
-
-    db.commit()

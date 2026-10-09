@@ -318,6 +318,8 @@ Implemented the three helpers directly in `app/devices.py`:
 - DELETE /all (removes all user devices)
 - Ownership enforcement (user cannot delete another's device)
 - Fingerprint determinism (same headers → same fingerprint, different → different)
+- DELETE /all and DELETE /{id} route uniqueness
+- Malformed device-id → 422 validation error
 
 ### Client-IP Debt
 `get_client_ip` in `app/devices.py` trusts `X-Forwarded-For` unconditionally.
