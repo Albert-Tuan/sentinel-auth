@@ -330,15 +330,16 @@ tracked under **P1-D**. It was not modified as part of this hotfix.
 
 #### Current environment (2026-10-09, PostgreSQL available)
 ```
-tests/test_devices.py              17 passed
-tests/test_postgres_bootstrap     16 passed
-tests/test_postgres_auth          15 passed  (+2 TIME-01 timezone regressions)
-tests/test_postgres_rbac          25 passed
+tests/test_devices.py                17 passed
+tests/test_postgres_bootstrap       16 passed
+tests/test_postgres_auth            15 passed  (+2 TIME-01 timezone regressions)
+tests/test_postgres_rbac            25 passed
 tests/test_postgres_mfa_concurrency  8 passed
-──────────────────────────────────────────────────────────────────────────────
+tests/test_time_utils.py             6 passed  (as_utc / utc_now unit tests)
+────────────────────────────────────────────────────────────────────────────────────
 PostgreSQL regression              64 passed, 0 skipped, 0 failed
 
-Full suite                      365 passed, 0 skipped, 0 failed
+Full suite                    371 passed, 0 skipped, 0 failed
 ```
 
 All tests run with `INTERNAL_SECRET` unset from the shell — P1-A tests remain green.
@@ -352,18 +353,14 @@ PostgreSQL server session timezone: `Asia/Ho_Chi_Minh` (+07).
 
 The application used `datetime.utcnow()` throughout, which returns a
 **timezone-naive** datetime.  PostgreSQL stores naive `TIMESTAMPTZ` values in its
-session timezone, so `2026-10-09 16:26` (naive UTC) was stored as
-`2026-10-09 16:26 +07`, which is `2026-10-09 09:26 UTC` — approximately **7 hours
-in the past**.
+session timezone.  An OTP created at UTC `09:31` with a naive datetime was stored
+as `09:31 +07` = `02:31 UTC` — approximately **7 hours in the past**.
 
 Evidence from real PostgreSQL under `Asia/Ho_Chi_Minh`:
 
 ```
 created MFA transaction:
-  created_at ≈ 09:26 +07   →  02:26 UTC  (not 09:26 UTC)
-  expires_at ≈ 09:31 +07  →  02:31 UTC  (not 09:31 UTC)
-  db_now ≈ 16:26 +07      →  09:26 UTC
-  remaining ≈ -6h55m       ← OTP appeared expired immediately
+  expiry ≈ current instant − 6h55m   ← OTP appeared expired immediately
 ```
 
 ### Resolution
@@ -373,16 +370,17 @@ Created `app/time_utils.py` with two helpers:
 
 ```python
 def utc_now() -> datetime:
-    return datetime.now(timezone.utc)
+    return datetime.now(timezone.utc)   # always aware UTC
 
 def as_utc(value: datetime) -> datetime:
-    """Normalise naive SQLite or DB-returned values to aware UTC."""
+    # Naive: treated as UTC (numeric values preserved).
+    # Aware: converted to UTC via astimezone(timezone.utc).
     if value.tzinfo is None:
         return value.replace(tzinfo=timezone.utc)
-    return value
+    return value.astimezone(timezone.utc)
 ```
 
-Replaced all `datetime.utcnow()` and `datetime.now(timezone.utc)` calls in:
+Replaced all `datetime.utcnow()` calls in:
 
 - `app/auth.py` — MFA transaction creation, login rate-limit, session creation,
   refresh, revocation, `last_seen_at`, `assigned_at`
@@ -391,29 +389,46 @@ Replaced all `datetime.utcnow()` and `datetime.now(timezone.utc)` calls in:
 - `app/alerts.py` — `resolved_at`, `revoked_at`, `locked_at`
 - `app/models.py` — ORM `now_utc()` helper → `datetime.now(timezone.utc)`
 
-SQLAlchemy filter comparisons (e.g. `Session.expires_at > utc_now()`) are
-now binding timezone-aware UTC values to `TIMESTAMPTZ` columns, so the comparison
-is correct regardless of the PostgreSQL session timezone.
+SQLAlchemy filter comparisons (e.g. `Session.expires_at > utc_now()`) bind
+timezone-aware UTC values to `TIMESTAMPTZ` columns, so comparisons are correct
+regardless of the PostgreSQL session timezone.
 
 ### Before / After Evidence
 
-| Value | Before (naive UTC) | After (aware UTC) |
-|-------|-------------------|-------------------|
-| `now` in `login()` | `datetime.utcnow()` naive | `utc_now()` → aware UTC |
+| Value | Before | After |
+|-------|--------|-------|
+| `now` in `login()` | `datetime.utcnow()` naive | `utc_now()` aware UTC |
 | MFA `expires_at` | `now + 5 min` naive | `utc_now() + 5 min` aware UTC |
-| Stored in PG (+07) | `09:31 +07` → `02:31 UTC` | `14:31 +07` → `07:31 UTC` |
-| OTP validity | ~−6h55m (expired) | ~+4m55s (valid) |
+| Stored in PG (+07) | naive `t` → `t +07` ≈ `t − 6h55m UTC` | aware UTC → correct instant |
+| OTP validity | expired immediately | valid for ~5 minutes |
 
 ### Non-UTC PostgreSQL Regression Evidence
-Two new tests in `TestTimezoneSafeMfa` use a PostgreSQL engine configured with
-`timezone=Asia/Ho_Chi_Minh`:
+`TestTimezoneSafeMfa` in `tests/test_postgres_auth.py` uses `tz_engine` —
+a connection pool explicitly configured with `options=-c timezone=Asia/Ho_Chi_Minh`.
+The test's own `tz_pg_conn` / `tz_orm_session` fixtures derive from `tz_engine`,
+not the module-default engine.  This guarantees isolation from the server default.
+
+Each test asserts `SHOW TIMEZONE` on `tz_pg_conn` returning `Asia/Ho_Chi_Minh`
+before exercising MFA.
 
 ```
 test_mfa_not_expired_immediately_under_vietnam_timezone
-  → 200, status=completed, 1 session created  ✓
+  → SHOW TIMEZONE = Asia/Ho_Chi_Minh  ✓
+  → 200, status=completed, 1 session  ✓
 
 test_mfa_otp_expiry_is_approximately_5_minutes_in_future
+  → SHOW TIMEZONE = Asia/Ho_Chi_Minh  ✓
   → stored UTC delta ≈ 5 min (4m < delta < 6m)  ✓
+```
+
+### `as_utc` Unit Tests
+`tests/test_time_utils.py` covers:
+
+```
+naive datetime(12:00)     → 12:00 UTC  ✓
+aware UTC                 → unchanged  ✓
+aware +07 (19:00)         → 12:00 UTC  ✓
+two zones, same instant   → same UTC  ✓
 ```
 
 ### P0-03 / P0-05 Semantics (re-verified under +07)
@@ -443,7 +458,8 @@ P0-05 independent txns  → both succeed  ✓
 | `app/devices.py` | `datetime.utcnow()` → `utc_now()`; `as_utc()` in expiry check |
 | `app/alerts.py` | `datetime.utcnow()` → `utc_now()` |
 | `app/models.py` | `now_utc()` → `datetime.now(timezone.utc)` |
-| `tests/test_postgres_auth.py` | `TestTimezoneSafeMfa` — 2 new regression tests |
+| `tests/test_postgres_auth.py` | `TestTimezoneSafeMfa` — 2 regression tests using `tz_engine`-bound fixtures |
+| `tests/test_time_utils.py` | **New** — unit tests for `utc_now()` and `as_utc()` |
 | `tests/conftest.py` | `app` fixture for route-table inspection |
 | `tests/test_devices.py` | `test_only_one_delete_all_route` uses `app.routes` inspection |
-| `docs/audit/14-p1-remediation.md` | Updated test counts; TIME-01 section added |
+| `docs/audit/14-p1-remediation.md` | Updated test counts (371 suite); TIME-01 section updated |

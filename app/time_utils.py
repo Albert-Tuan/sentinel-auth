@@ -21,13 +21,13 @@ def utc_now() -> datetime:
 def as_utc(value: datetime) -> datetime:
     """Normalise a datetime to timezone-aware UTC.
 
-    - Already aware: returned as-is (tzinfo preserved; UTC conversion would
-      be a semantic change so we leave other zones untouched).
     - Naive: treated as UTC — the numeric values are preserved and the UTC
       tzinfo is attached.  This is safe ONLY for values that are contractually
       known to have been created as UTC by the application (e.g. legacy SQLite
       rows persisted by SQLAlchemy DateTime defaults that never set timezone).
+    - Already aware: converted to UTC via ``astimezone(timezone.utc)``.
+      The instant (point in time) is preserved; only the zone is normalised.
     """
     if value.tzinfo is None:
         return value.replace(tzinfo=timezone.utc)
-    return value
+    return value.astimezone(timezone.utc)

@@ -970,17 +970,21 @@ class TestPostgresMfaLogin:
 # =============================================================================
 
 class TestTimezoneSafeMfa:
-    """TIME-01: MFA creation and verification succeed under a non-UTC DB timezone.
+    """TIME-01: MFA succeeds when the PostgreSQL session timezone is Asia/Ho_Chi_Minh.
 
     Before TIME-01 fix, ``datetime.utcnow()`` produced a naive datetime that
-    PostgreSQL's Asia/Ho_Chi_Minh session interpreted as local (+07), storing an
-    OTP expiry roughly 7 hours in the past.  After the fix all timestamps are
+    PostgreSQL's +07 session interpreted as local time, storing an OTP expiry
+    roughly 7 hours in the past.  After the fix all Python timestamps are
     timezone-aware UTC so the stored instant is correct regardless of session TZ.
+
+    This class uses ``tz_engine`` — a connection pool configured with
+    ``options=-c timezone=Asia/Ho_Chi_Minh`` — to guarantee its own non-UTC
+    session independently of the server default.
     """
 
     @pytest.fixture(scope="class")
     def tz_engine(self):
-        """PostgreSQL engine set to Asia/Ho_Chi_Minh timezone for this class."""
+        """PostgreSQL engine whose sessions run in Asia/Ho_Chi_Minh timezone."""
         tz_url = (
             f"postgresql+psycopg2://{POSTGRES_USER}:{POSTGRES_PASSWORD}"
             f"@{POSTGRES_HOST}:{POSTGRES_PORT}/{POSTGRES_DB}"
@@ -993,38 +997,39 @@ class TestTimezoneSafeMfa:
         yield eng
         eng.dispose()
 
-    @pytest.fixture(scope="class", autouse=True)
-    def tz_bootstrap(self, tz_engine):
-        """Bootstrap the non-UTC schema once for this class."""
+    @pytest.fixture()
+    def tz_pg_conn(self, tz_engine):
+        """Raw psycopg2 connection whose session is Asia/Ho_Chi_Minh."""
         with tz_engine.connect() as conn:
-            conn.execute(text("DROP SCHEMA IF EXISTS public CASCADE"))
-            conn.execute(text("CREATE SCHEMA public"))
-            for path in (SCHEMA_CORE, SCHEMA_DETECTION, SCHEMA_ML):
-                conn.execute(text(open(path).read()))
+            yield conn
 
-    @pytest.fixture(scope="class")
-    def tz_reset(self, tz_engine):
-        """Reset seed state for the timezone-specific schema."""
-        with tz_engine.connect() as conn:
-            conn.execute(text("UPDATE policies SET is_active = TRUE WHERE version = 'v1.0'"))
-            conn.execute(
-                text(
-                    "UPDATE model_versions SET status = 'active', is_production = TRUE "
-                    "WHERE version = 'v1.0-isolation-forest'"
-                )
-            )
+    @pytest.fixture()
+    def tz_orm_session(self, tz_engine):
+        """SQLAlchemy ORM session whose transaction is Asia/Ho_Chi_Minh."""
+        from sqlalchemy.orm import sessionmaker
+        maker = sessionmaker(bind=tz_engine, autocommit=False, autoflush=False)
+        session = maker()
+        try:
+            yield session
+        finally:
+            session.close()
 
     def test_mfa_not_expired_immediately_under_vietnam_timezone(
-        self, pg_conn, orm_session, tz_engine, tz_reset
+        self, tz_pg_conn, tz_orm_session
     ):
-        """MFA transaction expires_at is in the future when DB session is Asia/Ho_Chi_Minh.
+        """MFA OTP is valid immediately after creation when session TZ is Asia/Ho_Chi_Minh.
 
-        This test proves TIME-01 is fixed: the same code path that previously stored
-        a ~7-hour-past expiry under +07 now stores an expiry ~5 minutes in the future.
+        Verifies via ``SHOW TIMEZONE`` that the test's own connection is +07.
+        Uses ``tz_pg_conn`` / ``tz_orm_session`` exclusively — isolation from the
+        module-default ``pg_conn`` / ``orm_session`` is the point of this test.
         """
+        # Assert connection timezone — proves the session is genuinely +07.
+        tz = tz_pg_conn.execute(text("SHOW TIMEZONE")).scalar()
+        assert tz == "Asia/Ho_Chi_Minh", f"Expected Asia/Ho_Chi_Minh, got {tz}"
+
         username = f"tz_user_{uuid.uuid4().hex[:8]}"
-        user_id = _create_user_sql(pg_conn, username, "CorrectPassword")
-        pg_conn.execute(
+        user_id = _create_user_sql(tz_pg_conn, username, "CorrectPassword")
+        tz_pg_conn.execute(
             text("UPDATE users SET admin_mfa_required = TRUE WHERE id = :uid"),
             {"uid": user_id},
         )
@@ -1033,17 +1038,17 @@ class TestTimezoneSafeMfa:
         from fastapi.testclient import TestClient
         from app.main import app
 
+        orig_get_client_ip = _auth_mod.get_client_ip
         orig_run_pre_token = _auth_mod.RUN_PRE_TOKEN_CHECK
         orig_generate_otp = _auth_mod.generate_otp
 
         def _get_db_override():
-            yield orm_session
+            yield tz_orm_session
 
         try:
             _auth_mod.RUN_PRE_TOKEN_CHECK = "0"
             _auth_mod.get_client_ip = lambda req: "10.0.0.50"
             _auth_mod.generate_otp = lambda: "123456"
-
             app.dependency_overrides[_auth_mod.get_db] = _get_db_override
 
             with TestClient(app) as client:
@@ -1054,7 +1059,7 @@ class TestTimezoneSafeMfa:
                 assert login_resp.status_code == 200, login_resp.json()
                 txn_id = login_resp.json()["session_id"]
 
-            # Immediately verify — before TIME-01 fix this would be ~7h expired under +07.
+            # Before TIME-01 fix this would return 401 "MFA code has expired".
             with TestClient(app) as client:
                 verify_resp = client.post(
                     "/api/v1/auth/mfa/verify",
@@ -1062,38 +1067,46 @@ class TestTimezoneSafeMfa:
                 )
 
             assert verify_resp.status_code == 200, (
-                f"TIME-01: OTP expired immediately under +07 timezone. "
+                f"TIME-01: OTP expired immediately under +07 session. "
                 f"Got {verify_resp.status_code}: {verify_resp.json()}"
             )
             assert verify_resp.json()["access_token"] != ""
 
-            # Verify the transaction is marked completed.
-            pg_conn.commit()
-            status = pg_conn.execute(
+            # Transaction and session assertions via tz_pg_conn.
+            tz_pg_conn.commit()
+            status = tz_pg_conn.execute(
                 text("SELECT status FROM mfa_transactions WHERE id = :tid"),
                 {"tid": txn_id},
             ).scalar()
-            assert status == "completed", f"Expected status=completed, got {status}"
+            assert status == "completed", f"Expected completed, got {status}"
 
-            # Verify one session was created.
-            session_count = pg_conn.execute(
+            session_count = tz_pg_conn.execute(
                 text("SELECT COUNT(*) FROM sessions WHERE user_id = :uid"),
                 {"uid": user_id},
             ).scalar()
             assert session_count == 1, f"Expected 1 session, got {session_count}"
 
         finally:
+            _auth_mod.get_client_ip = orig_get_client_ip
             _auth_mod.RUN_PRE_TOKEN_CHECK = orig_run_pre_token
             _auth_mod.generate_otp = orig_generate_otp
             app.dependency_overrides.clear()
 
     def test_mfa_otp_expiry_is_approximately_5_minutes_in_future(
-        self, pg_conn, orm_session, tz_engine, tz_reset
+        self, tz_pg_conn, tz_orm_session
     ):
-        """expires_at is stored as ~5 minutes from now, not ~7 hours in the past."""
+        """Stored expires_at is in the future (not 7 hours in the past) under Asia/Ho_Chi_Minh.
+
+        Asserts ``SHOW TIMEZONE`` on tz_pg_conn to confirm the session is +07.
+        Reads ``expires_at`` via tz_pg_conn and verifies the delta against UTC now.
+        """
+        # Assert connection timezone — proves the session is genuinely +07.
+        tz = tz_pg_conn.execute(text("SHOW TIMEZONE")).scalar()
+        assert tz == "Asia/Ho_Chi_Minh", f"Expected Asia/Ho_Chi_Minh, got {tz}"
+
         username = f"tz_exp_{uuid.uuid4().hex[:8]}"
-        user_id = _create_user_sql(pg_conn, username, "CorrectPassword")
-        pg_conn.execute(
+        user_id = _create_user_sql(tz_pg_conn, username, "CorrectPassword")
+        tz_pg_conn.execute(
             text("UPDATE users SET admin_mfa_required = TRUE WHERE id = :uid"),
             {"uid": user_id},
         )
@@ -1103,17 +1116,17 @@ class TestTimezoneSafeMfa:
         from fastapi.testclient import TestClient
         from app.main import app
 
+        orig_get_client_ip = _auth_mod.get_client_ip
         orig_run_pre_token = _auth_mod.RUN_PRE_TOKEN_CHECK
         orig_generate_otp = _auth_mod.generate_otp
 
         def _get_db_override():
-            yield orm_session
+            yield tz_orm_session
 
         try:
             _auth_mod.RUN_PRE_TOKEN_CHECK = "0"
             _auth_mod.get_client_ip = lambda req: "10.0.0.50"
             _auth_mod.generate_otp = lambda: "999888"
-
             app.dependency_overrides[_auth_mod.get_db] = _get_db_override
 
             before = utc_now()
@@ -1127,28 +1140,27 @@ class TestTimezoneSafeMfa:
 
             after = utc_now()
 
-            # Read the stored expiry.
-            pg_conn.commit()
-            stored_expiry = pg_conn.execute(
+            # Read expires_at via tz_pg_conn — the connection that wrote it.
+            tz_pg_conn.commit()
+            stored_expiry = tz_pg_conn.execute(
                 text("SELECT expires_at FROM mfa_transactions WHERE id = :tid"),
                 {"tid": txn_id},
             ).scalar()
             assert stored_expiry is not None, "expires_at was not stored"
 
-            # Convert stored value to UTC-aware Python datetime for comparison.
             from app.time_utils import as_utc
             stored_utc = as_utc(stored_expiry)
 
-            # Stored expiry must be after both before and after our utc_now() call.
+            # Before TIME-01 fix stored_expiry would be ~7 hours in the past
+            # (stored as 09:31 +07 = 02:31 UTC), so this would assert < now.
             assert stored_utc > before, (
                 f"TIME-01: expires_at ({stored_utc}) is not after 'before' ({before}). "
-                f"This means the OTP was stored as expired."
+                f"OTP was stored as expired."
             )
             assert stored_utc > after, (
-                f"TIME-01: expires_at ({stored_utc}) is not after 'after' ({after})"
+                f"TIME-01: expires_at ({stored_utc}) is not after 'after' ({after})."
             )
 
-            # Stored expiry should be approximately 5 minutes in the future.
             delta = stored_utc - after
             assert timedelta(minutes=4) < delta < timedelta(minutes=6), (
                 f"TIME-01: expires_at delta ({delta}) is not approximately 5 minutes. "
@@ -1156,6 +1168,7 @@ class TestTimezoneSafeMfa:
             )
 
         finally:
+            _auth_mod.get_client_ip = orig_get_client_ip
             _auth_mod.RUN_PRE_TOKEN_CHECK = orig_run_pre_token
             _auth_mod.generate_otp = orig_generate_otp
             app.dependency_overrides.clear()
