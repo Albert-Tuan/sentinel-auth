@@ -66,8 +66,9 @@ class UserRegisterResponse(BaseModel):
 class LoginRequest(BaseModel):
     username: str
     password: str
-    # Client IP is derived server-side from X-Forwarded-For / request.client
-    # (see app.auth.get_client_ip), never trusted from the request body.
+    # Client IP is derived server-side from request.client.host.
+    # The canonical resolver is app.client_ip.get_client_ip().
+    # The application never reads X-Forwarded-For directly.
 
 
 class LoginResponse(BaseModel):

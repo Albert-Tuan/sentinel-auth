@@ -10,7 +10,10 @@ COPY requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY app ./app
-COPY infra/postgres/schema.sql ./infra/postgres/schema.sql
+# Copy all schema files (loaded into PostgreSQL, not the running app).
+COPY infra/postgres/schema-core-v3.3.sql       ./schemas/schema-core-v3.3.sql
+COPY infra/postgres/schema-detection-v3.3.sql  ./schemas/schema-detection-v3.3.sql
+COPY infra/postgres/schema-ml-service-v3.3.sql ./schemas/schema-ml-service-v3.3.sql
 
 ENV APP_ENV=development
 # Trusted-proxy configuration.

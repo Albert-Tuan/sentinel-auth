@@ -14,26 +14,36 @@
 
 The current repository is a **single FastAPI monorepo** — one `app/` package, one process, one running application. Logical boundaries (Core / Detection / ML) exist as code modules within the same application. They are **not independently deployed services**.
 
-```
-Current runtime:  single Python process (uvicorn app.main:app)
-Target runtime:  three independent processes (per v3.3 design document)
-```
+The **target architecture** (documented in `docs/DECISIONS-SYSTEM-v3.3.md`) describes three independent services. The infrastructure in this repository reflects the target architecture. The application code reflects the current implementation.
 
-### 1.2 Database
+**Approved architecture decisions** are recorded in `docs/DECISIONS-SYSTEM-v3.3.md`. These do NOT automatically change implementation; they create a record that implementation must be updated to match. See Section 2 for the document hierarchy.
 
-Three SQL schema files exist as authoritative contracts under `infra/postgres/`:
+### 1.1b Token Model
 
-| File | Tables | Owner |
-|------|--------|-------|
-| `schema-core-v3.3.sql` | 13 | Core App |
-| `schema-detection-v3.3.sql` | 7 | Detection Engine |
-| `schema-ml-service-v3.3.sql` | 3 | ML Service |
+Sentinel Auth v3.3 uses **opaque random tokens** — NOT JWT.
 
-**Total: 23 base tables + 1 view (`manager_dashboard`).**
+- Access token: `secrets.token_urlsafe(32)` — 32-byte cryptographically random, base64-url encoded. Hash (SHA-256) in `sessions.access_token_hash`.
+- Refresh token: `secrets.token_urlsafe(32)` — hash in `sessions.refresh_token_hash`.
+- `revoked_at` column enables immediate revocation. No token expiry list needed.
+- `token_jti` is a session UUID, not a JWT claim. Column name is legacy/internal naming.
 
-All three schemas bootstrap cleanly on PostgreSQL. Bootstrap is verified by `tests/test_postgres_bootstrap.py` (16 tests, all passing).
+JWT is NOT part of v3.3. This is an intentional design choice. See `docs/DECISIONS-SYSTEM-v3.3.md` Section 1.
 
-Logical ownership: `core_auth`, `detection_soc`, `ml_manager` schemas.
+### 1.2 Database Topology
+
+Three SQL schema files under `infra/postgres/`:
+
+| Database | Schema File | Tables | Logical Schema Owner |
+|----------|-------------|--------|-------------------|
+| `sentinel_core` | `schema-core-v3.3.sql` | 13 | `core_auth` |
+| `sentinel_detection` | `schema-detection-v3.3.sql` | 7 | `detection_soc` |
+| `sentinel_ml` | `schema-ml-service-v3.3.sql` | 3 + 1 view | `ml_manager` |
+
+**Total: 23 base tables, 1 real view (`local_ml_stats` in `sentinel_ml`).**
+
+The `manager_dashboard` reference in `schema-ml-service-v3.3.sql` is commented-out conceptual SQL — not a real view. Do NOT count it.
+
+PostgreSQL bootstrap is verified by `tests/test_postgres_bootstrap.py` (16 tests, all passing).
 
 ### 1.3 Authentication
 
@@ -639,26 +649,47 @@ This audit is infrastructure and documentation only. The following are explicitl
 - `tests/**/*.py` — frozen
 - `infra/postgres/schema-*.sql` — frozen
 
-The single allowed change from this audit is:
+### Approved Decisions (2026-10-09)
 
-- `docs/audit/15-docs-infra-baseline-audit.md` ← **THIS DOCUMENT**
+The following were decided and are now authoritative:
+
+| Decision | Document | Status |
+|----------|----------|--------|
+| Opaque token model (not JWT) | `docs/DECISIONS-SYSTEM-v3.3.md` Section 1 | ✅ APPROVED |
+| Three logical databases on one PostgreSQL server | `docs/DECISIONS-SYSTEM-v3.3.md` Section 3 | ✅ APPROVED |
+| Redis Streams as async transport (not session/token store) | `docs/DECISIONS-SYSTEM-v3.3.md` Section 4 | ✅ APPROVED |
+| Current monolith vs target three-service distinction | `docs/DECISIONS-SYSTEM-v3.3.md` Section 5 | ✅ APPROVED |
+| Docker infrastructure (postgres + redis) | `docker-compose.yml`, `docs/INFRASTRUCTURE-v3.3.md` | ✅ APPROVED |
 
 ---
 
-## 15. Summary of Blocking Issues
+## 15. Summary: Blocking Issues
+
+### ✅ RESOLVED by this pass
+
+| Priority | Issue | Resolution |
+|----------|-------|-----------|
+| 🔴 CRITICAL | `Dockerfile` referenced non-existent `infra/postgres/schema.sql` | Fixed: schemas mounted to `/schemas`, referenced by init script |
+| 🔴 CRITICAL | No `docker-compose.yml` | Created: `postgres` + `redis` services |
+| 🔴 CRITICAL | No `.env.example` | Created: full env template with all variables |
+| 🔴 CRITICAL | No PostgreSQL init mechanism | Created: `infra/postgres/init/00-init-databases.sh` |
+
+### 🟡 HIGH — Pending decisions
 
 | Priority | Issue | Blocks |
 |----------|-------|--------|
-| 🔴 CRITICAL | `Dockerfile` references non-existent `infra/postgres/schema.sql` | Docker build |
-| 🔴 CRITICAL | No `docker-compose.yml` | Developer reproducibility |
-| 🔴 CRITICAL | No `.env.example` | Developer onboarding |
-| 🟡 HIGH | P1-B decision not made | Protective action workflow |
-| 🟡 HIGH | P1-C decision not made | Policy management roles |
-| 🟡 HIGH | Multiple UML diagrams show JWT | Report accuracy |
+| 🟡 HIGH | P1-B: SOC action workflow (request vs direct-apply) | Implementation |
+| 🟡 HIGH | P1-C: Policy management roles | Implementation |
+| 🟡 HIGH | UML diagrams: JWT → opaque token | Report accuracy |
 | 🟡 HIGH | `schema-core-v3.3.sql` COMMENT says "JWT" | Report accuracy |
-| 🟢 MEDIUM | `docs/audit/04-database-bootstrap.md` shows old failures | Misleading historical evidence |
-| 🟢 MEDIUM | `docs/SENTINEL_AUTH_TONG_HOP_v3.3.md` describes JWT + three-service as current | Report accuracy |
-| 🟢 LOW | Stale `INTERNAL_SECRET` default in old audit docs | Documentation cleanliness |
+
+### 🟢 MEDIUM — Documentation updates
+
+| Priority | Issue | Blocks |
+|----------|-------|--------|
+| 🟢 MEDIUM | `docs/audit/04-database-bootstrap.md` shows fixed failures | Misleading |
+| 🟢 MEDIUM | `docs/SENTINEL_AUTH_TONG_HOP_v3.3.md` describes JWT as current | Report accuracy |
+| 🟢 LOW | Old audit docs (10–14) show resolved P0 findings | Historical record is fine |
 
 ---
 
