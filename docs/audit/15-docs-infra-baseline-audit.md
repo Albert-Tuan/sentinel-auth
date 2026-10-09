@@ -539,41 +539,54 @@ No `expired` status is written by application code — expiry is checked by comp
 
 ## 12. Source-of-Truth Hierarchy
 
-### Proposed Hierarchy
+The authoritative hierarchy is defined in `docs/DECISIONS-SYSTEM-v3.3.md` Section 2.
+The summary below reflects that document.
 
-**Level 1 — Approved Architecture Decisions (immutable after approval)**
-- `docs/DECISIONS-DETECTION-v3.3.md` ← RISK SCORING FORMULA, FEATURE CONTRACT
-- `TASK_ASSIGNMENT.md` ← 3-schema ownership, branch strategy
+**Level 1 — System Architecture Decisions**
+- `docs/DECISIONS-SYSTEM-v3.3.md` ← highest authority for system-wide decisions (token model, database topology, Redis role, service architecture)
+- `docs/DECISIONS-DETECTION-v3.3.md` ← domain-specific authority (risk scoring, feature contract)
+
+**Level 1B — Governance / Ownership**
+- `TASK_ASSIGNMENT.md` ← schema ownership, branch strategy, team responsibilities
 
 **Level 2 — Requirements / Use Cases**
-- `docs/01-bang-yeu-cau-chuc-nang-nghiep-vu-core-app.md`
+- `docs/01-bang-yeu-cau-*.md`
+- `docs/02-dac-ta-use-case-*.md`
 - `docs/04-bang-yeu-cau-chuc-nang-nghiep-vu-detection-engine.md`
-- `docs/03-bang-yeu-cau-chuc-nang-nghiep-vu-ml-service.md`
-- `docs/02-dac-ta-use-case-core-app.md` ← UC descriptions (need P1-B, P1-C reconciliation)
+- `docs/03-*-ml-service.md`
 
-**Level 3 — SQL Schemas + API Contracts**
-- `infra/postgres/schema-core-v3.3.sql` ← 13 tables
-- `infra/postgres/schema-detection-v3.3.sql` ← 7 tables
-- `infra/postgres/schema-ml-service-v3.3.sql` ← 3 tables
-- `docs/workflows.mmd` ← API contracts (accurate for current HTTP endpoints)
+**Level 3 — SQL Schemas / API Contracts**
+- `infra/postgres/schema-core-v3.3.sql` ← 13 base tables, `sentinel_core`
+- `infra/postgres/schema-detection-v3.3.sql` ← 7 base tables, `sentinel_detection`
+- `infra/postgres/schema-ml-service-v3.3.sql` ← 3 base tables + 1 real view (`local_ml_stats`), `sentinel_ml`
+- `docs/workflows.mmd` ← API contracts
 
 **Level 4 — UML / ERD / Workflows**
-- `docs/bao-cao/ERD_*.puml` ← accurate, regenerate PNG
-- `docs/workflows.mmd` ← accurate for current state
-- `docs/bao-cao/uml-state-*.puml` ← accurate for current state
-- Architecture and auth UML ← need updates (see Section 10)
+- `docs/bao-cao/ERD_*.puml` ← accurate entity diagrams
+- `docs/bao-cao/uml-state-*.puml` ← accurate state machines
+- Architecture and auth UML ← need updates (JWT → opaque token)
 
 **Level 5 — Implementation**
-- `app/**/*.py` ← authoritative for current runtime
-- `tests/**/*.py` ← authoritative for current behavior
+- `app/**/*.py` ← authoritative for current runtime behavior
+- `tests/**/*.py` ← authoritative for verified behavior
 
 **Level 6 — Historical Audits**
-- `docs/audit/10-findings.md` ← F-01 to F-10 all resolved
-- `docs/audit/07-cross-artifact-conflicts.md` ← C-01 to C-16 tracked
-- `docs/audit/08-open-decisions.md` ← Q-01 to Q-05
+- `docs/audit/10-findings.md` through `docs/audit/16-infra-baseline-verification.md`
+- Records past findings; does NOT override Level 1–3 decisions
 
-### Anti-Pattern to Prevent
-Old design documents (SENTINEL_AUTH_TONG_HOP_v3.3.md, architecture diagrams) must NOT override Level 5 (implementation). The rule: **implementation is always the source of truth for current behavior; design documents describe intended state.**
+### Conflict Resolution Rule
+
+Approved Level 1 decisions do NOT automatically change implementation. When
+implementation differs from a Level 1 decision, an **implementation gap** is recorded.
+Implementation at Level 5 describes current evidence but does NOT override an approved
+Level 1 decision.
+
+### Anti-pattern this hierarchy prevents
+
+Old design documents (e.g. `SENTINEL_AUTH_TONG_HOP_v3.3.md`, architecture UML
+showing JWT) must not override Level 1 decisions or Level 5 implementation.
+Historical audits at Level 6 record findings but do not reverse approved
+architecture decisions.
 
 ---
 
@@ -583,9 +596,11 @@ Old design documents (SENTINEL_AUTH_TONG_HOP_v3.3.md, architecture diagrams) mus
 
 #### D1: Canonical Architecture Decisions (No implementation changes)
 
-**Files:** `docs/DECISIONS-DETECTION-v3.3.md`, `TASK_ASSIGNMENT.md`
+**Files:** `docs/DECISIONS-SYSTEM-v3.3.md`, `docs/DECISIONS-DETECTION-v3.3.md`, `TASK_ASSIGNMENT.md`
 
-- Update TASK_ASSIGNMENT.md header to clarify "v3.3 DESIGN / single-process current implementation"
+- `docs/DECISIONS-SYSTEM-v3.3.md` — ✅ CREATED (this audit pass). Records token model, database topology, Redis role, service architecture.
+- `docs/DECISIONS-DETECTION-v3.3.md` — ✅ EXISTS. Records risk scoring formula.
+- Update `TASK_ASSIGNMENT.md` header to clarify "v3.3 DESIGN / single-process current implementation"
 - No changes to `app/`, `tests/`, `infra/postgres/`
 
 #### D2: Business Decisions (No implementation changes)
@@ -665,7 +680,7 @@ The following were decided and are now authoritative:
 
 ## 15. Summary: Blocking Issues
 
-### ✅ RESOLVED by this pass
+### ✅ RESOLVED by prior passes
 
 | Priority | Issue | Resolution |
 |----------|-------|-----------|
@@ -689,7 +704,6 @@ The following were decided and are now authoritative:
 |----------|-------|--------|
 | 🟢 MEDIUM | `docs/audit/04-database-bootstrap.md` shows fixed failures | Misleading |
 | 🟢 MEDIUM | `docs/SENTINEL_AUTH_TONG_HOP_v3.3.md` describes JWT as current | Report accuracy |
-| 🟢 LOW | Old audit docs (10–14) show resolved P0 findings | Historical record is fine |
 
 ---
 

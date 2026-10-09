@@ -1,13 +1,15 @@
 # Sentinel Auth v3.3 — Infrastructure Baseline Verification
 
-> **Date:** 2026-10-09
-> **Baseline:** `1d9bf9f173a2f09761d9d28d26d165c2bf4d147a`
+> **Date:** 2026-10-09 (correction pass)
+> **Baseline:** `ced4178379cbf0ffe28619d777e20c18bd4ed711`
+> **Status:** INFRA_STATIC_VERIFIED_RUNTIME_PENDING
 
-This document records evidence from infrastructure baseline verification.
+This document records infrastructure baseline verification. Static validation was
+performed. Runtime verification requires Docker daemon access.
 
 ---
 
-## Static Validation
+## 1. Static Validation (Completed)
 
 ### docker-compose.yml
 
@@ -15,12 +17,12 @@ This document records evidence from infrastructure baseline verification.
 $ docker compose config
 ```
 
-**Result:** ✅ PASS — Valid YAML. All services parsed correctly. Named volumes
-(`sentinel_postgres_data`, `sentinel_redis_data`) confirmed. Schema mount paths verified:
-- `./infra/postgres/init` → `/docker-entrypoint-initdb.d` (read-only)
-- `./infra/postgres` → `/schemas` (read-only)
+**Result:** ✅ PASS — Valid YAML. All services parsed. Volumes are
+Compose-managed (no explicit `name:` — each project gets its own volume).
+DB name environment variables passed to postgres service. Ports bound to
+`127.0.0.1`. Named volumes resolve as `sentinel-auth_postgres_data`.
 
-### Init Script Shell Syntax
+### Init Script
 
 ```bash
 $ bash -n infra/postgres/init/00-init-databases.sh
@@ -30,20 +32,30 @@ $ bash -n infra/postgres/init/00-init-databases.sh
 
 ---
 
-## Runtime Verification (Requires Docker Daemon)
+## 2. Runtime Verification (Requires Docker Daemon)
 
-The following commands require a running Docker daemon. They could not be executed in
-this verification environment (Docker daemon not accessible from the build host).
+The following require a running Docker daemon. Commands are documented for
+manual execution.
 
-### Bring Up Infrastructure
+### 2.1 Bring Up Infrastructure (Isolated Project)
+
+Use an isolated compose project name and temporary ports to avoid conflicts
+with any existing local PostgreSQL/Redis:
 
 ```bash
-$ docker compose -p sentinel_auth_infra_test up -d
+POSTGRES_PORT=55432 REDIS_PORT=56379 \
+docker compose -p sentinel_auth_infra_test up -d
 ```
 
-**Expected:** Both `postgres` and `redis` services start.
+**Why isolated project?** Without explicit volume names, each compose project
+gets its own named volume (`sentinel_auth_infra_test_postgres_data`). This
+prevents `sentinel_auth_infra_test down -v` from affecting the main
+`sentinel-auth` project's data.
 
-### Health Check
+**Why temporary ports?** If port 5432 or 6379 is already in use on the
+developer machine, temporary ports avoid conflicts.
+
+### 2.2 Health Check
 
 ```bash
 $ docker compose -p sentinel_auth_infra_test ps
@@ -51,117 +63,22 @@ $ docker compose -p sentinel_auth_infra_test ps
 
 **Expected:**
 ```
-NAME      IMAGE            STATUS      PORTS
-postgres  postgres:16-alpine  Up (healthy)  0.0.0.0:5432->5432/tcp
-redis    redis:7-alpine     Up (healthy)  0.0.0.0:6379->6379/tcp
+NAME      IMAGE             STATUS      PORTS
+postgres  postgres:16-alpine  Up (healthy)  127.0.0.1:55432->5432/tcp
+redis     redis:7-alpine     Up (healthy)  127.0.0.1:56379->6379/tcp
 ```
 
-**Expected:** Both services report `healthy`.
+Both services must report `healthy`.
 
-### Redis PING
+### 2.3 Redis PING
 
 ```bash
 $ docker compose -p sentinel_auth_infra_test exec redis redis-cli PING
 ```
 
-**Expected:**
-```
-PONG
-```
+**Expected:** `PONG`
 
----
-
-## Database Verification (Requires Running PostgreSQL)
-
-### List Databases
-
-```bash
-$ docker compose -p sentinel_auth_infra_test exec postgres \
-    psql -U sentinel -d postgres -c "\l"
-```
-
-**Expected:** `sentinel_core`, `sentinel_detection`, `sentinel_ml` all listed.
-
-### Table Counts
-
-#### sentinel_core
-
-```bash
-$ docker compose -p sentinel_auth_infra_test exec postgres \
-    psql -U sentinel -d sentinel_core -c \
-    "SELECT count(*) FROM information_schema.tables WHERE table_schema = 'public'"
-```
-
-**Expected:** `13`
-
-#### sentinel_detection
-
-```bash
-$ docker compose -p sentinel_auth_infra_test exec postgres \
-    psql -U sentinel -d sentinel_detection -c \
-    "SELECT count(*) FROM information_schema.tables WHERE table_schema = 'public'"
-```
-
-**Expected:** `7`
-
-#### sentinel_ml
-
-```bash
-$ docker compose -p sentinel_auth_infra_test exec postgres \
-    psql -U sentinel -d sentinel_ml -c \
-    "SELECT count(*) FROM information_schema.tables WHERE table_schema = 'public'"
-```
-
-**Expected:** `3`
-
-### Views in sentinel_ml
-
-```bash
-$ docker compose -p sentinel_auth_infra_test exec postgres \
-    psql -U sentinel -d sentinel_ml -c \
-    "SELECT viewname FROM information_schema.views WHERE table_schema = 'public'"
-```
-
-**Expected:** `local_ml_stats` (the `manager_dashboard` in the schema file is a
-commented-out conceptual reference, not a real view)
-
-### Database Isolation
-
-#### sentinel_core does NOT contain detection tables
-
-```bash
-$ docker compose -p sentinel_auth_infra_test exec postgres \
-    psql -U sentinel -d sentinel_core -c \
-    "SELECT count(*) FROM information_schema.tables WHERE table_schema = 'public' AND table_name = 'policies'"
-```
-
-**Expected:** `0`
-
-#### sentinel_detection does NOT contain core tables
-
-```bash
-$ docker compose -p sentinel_auth_infra_test exec postgres \
-    psql -U sentinel -d sentinel_detection -c \
-    "SELECT count(*) FROM information_schema.tables WHERE table_schema = 'public' AND table_name = 'users'"
-```
-
-**Expected:** `0`
-
-#### sentinel_ml does NOT contain core/detection tables
-
-```bash
-$ docker compose -p sentinel_auth_infra_test exec postgres \
-    psql -U sentinel -d sentinel_ml -c \
-    "SELECT count(*) FROM information_schema.tables WHERE table_schema = 'public' AND table_name IN ('users', 'sessions', 'policies')"
-```
-
-**Expected:** `0`
-
----
-
-## Redis Verification
-
-### Persistence Check
+### 2.4 Verify AOF Persistence
 
 ```bash
 $ docker compose -p sentinel_auth_infra_test exec redis redis-cli CONFIG GET appendonly
@@ -169,42 +86,159 @@ $ docker compose -p sentinel_auth_infra_test exec redis redis-cli CONFIG GET app
 
 **Expected:** `appendonly yes`
 
-### AOF fsync Policy
+---
+
+## 3. Database Verification
+
+### 3.1 List Databases
 
 ```bash
-$ docker compose -p sentinel_auth_infra_test exec redis redis-cli CONFIG GET appendfsync
+$ docker compose -p sentinel_auth_infra_test exec postgres \
+    psql -U sentinel -d postgres -c "\l"
 ```
 
-**Expected:** `appendfsync everysec`
+**Expected:** `sentinel_core`, `sentinel_detection`, `sentinel_ml` all present.
+
+### 3.2 Base Table Counts (Not Views)
+
+Use `table_type = 'BASE TABLE'` to exclude views.
+
+#### sentinel_core (expected 13)
+
+```bash
+$ docker compose -p sentinel_auth_infra_test exec postgres \
+    psql -U sentinel -d sentinel_core -c \
+    "SELECT count(*) FROM information_schema.tables \
+     WHERE table_schema = 'public' AND table_type = 'BASE TABLE'"
+```
+
+**Expected:** `13`
+
+#### sentinel_detection (expected 7)
+
+```bash
+$ docker compose -p sentinel_auth_infra_test exec postgres \
+    psql -U sentinel -d sentinel_detection -c \
+    "SELECT count(*) FROM information_schema.tables \
+     WHERE table_schema = 'public' AND table_type = 'BASE TABLE'"
+```
+
+**Expected:** `7`
+
+#### sentinel_ml (expected 3)
+
+```bash
+$ docker compose -p sentinel_auth_infra_test exec postgres \
+    psql -U sentinel -d sentinel_ml -c \
+    "SELECT count(*) FROM information_schema.tables \
+     WHERE table_schema = 'public' AND table_type = 'BASE TABLE'"
+```
+
+**Expected:** `3`
+
+### 3.3 Views in sentinel_ml
+
+```bash
+$ docker compose -p sentinel_auth_infra_test exec postgres \
+    psql -U sentinel -d sentinel_ml -c \
+    "SELECT viewname FROM information_schema.views WHERE table_schema = 'public'"
+```
+
+**Expected:** `local_ml_stats`
+
+Note: `manager_dashboard` referenced in `schema-ml-service-v3.3.sql` is a
+commented-out conceptual reference — not a real view. Do not count it.
 
 ---
 
-## Clean Shutdown
+## 4. Database Isolation Verification
 
-After verification is complete:
+### 4.1 sentinel_core does NOT contain detection tables
+
+```bash
+$ docker compose -p sentinel_auth_infra_test exec postgres \
+    psql -U sentinel -d sentinel_core -c \
+    "SELECT count(*) FROM information_schema.tables \
+     WHERE table_schema = 'public' \
+       AND table_type = 'BASE TABLE' \
+       AND table_name = 'policies'"
+```
+
+**Expected:** `0`
+
+### 4.2 sentinel_detection does NOT contain core tables
+
+```bash
+$ docker compose -p sentinel_auth_infra_test exec postgres \
+    psql -U sentinel -d sentinel_detection -c \
+    "SELECT count(*) FROM information_schema.tables \
+     WHERE table_schema = 'public' \
+       AND table_type = 'BASE TABLE' \
+       AND table_name = 'users'"
+```
+
+**Expected:** `0`
+
+### 4.3 sentinel_ml does NOT contain core/detection tables
+
+```bash
+$ docker compose -p sentinel_auth_infra_test exec postgres \
+    psql -U sentinel -d sentinel_ml -c \
+    "SELECT count(*) FROM information_schema.tables \
+     WHERE table_schema = 'public' \
+       AND table_type = 'BASE TABLE' \
+       AND table_name IN ('users', 'sessions', 'policies')"
+```
+
+**Expected:** `0`
+
+---
+
+## 5. Init Script Summary
+
+The init script (`00-init-databases.sh`) reports counts at completion:
+
+```
+[init] sentinel_core:       13 base tables (expected 13)
+[init] sentinel_detection:  7 base tables (expected 7)
+[init] sentinel_ml:        3 base tables (expected 3)
+[init] sentinel_ml views:  1 (expected 1 — local_ml_stats)
+[init] All three databases initialized successfully
+```
+
+---
+
+## 6. Safe Cleanup
 
 ```bash
 $ docker compose -p sentinel_auth_infra_test down -v
 ```
 
-**Expected:** Containers stopped. Named volumes (`sentinel_postgres_data`,
-`sentinel_redis_data`) destroyed. No interference with existing developer data.
+**Why is this safe?**
+
+With explicit `name:` removed from compose volumes, the isolated test project
+gets its own named volumes:
+- `sentinel_auth_infra_test_postgres_data`
+- `sentinel_auth_infra_test_redis_data`
+
+`docker compose -p sentinel_auth_infra_test down -v` only removes those
+specific volumes. It does NOT affect `sentinel-auth_postgres_data` (the main
+project's volume) or any other Docker project.
 
 ---
 
-## Files Verified
+## 7. Files Verified (Static)
 
 | File | Check | Result |
 |------|-------|--------|
 | `docker-compose.yml` | `docker compose config` | ✅ PASS |
 | `infra/postgres/init/00-init-databases.sh` | `bash -n` | ✅ PASS |
-| `Dockerfile` | Static review | ✅ PASS (schema references fixed) |
 | `.env.example` | Static review | ✅ PASS |
 | `docs/DECISIONS-SYSTEM-v3.3.md` | Static review | ✅ PASS |
 | `docs/INFRASTRUCTURE-v3.3.md` | Static review | ✅ PASS |
+| `Dockerfile` | Static review | ✅ PASS (schema references corrected) |
 | `docs/audit/15-docs-infra-baseline-audit.md` | Updated | ✅ PASS |
 
 ---
 
-**Status:** INFRASTRUCTURE BASELINE VERIFIED (static) — runtime verification
-requires Docker daemon access.
+**Status:** INFRA_STATIC_VERIFIED_RUNTIME_PENDING

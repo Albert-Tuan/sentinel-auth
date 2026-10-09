@@ -4,17 +4,19 @@
 # The application (FastAPI monolith) is started separately.
 #
 # Three logical PostgreSQL databases are created and bootstrapped:
-#   sentinel_core       — Core/Auth service tables
-#   sentinel_detection  — Detection Engine tables
-#   sentinel_ml        — ML Service tables
+#   sentinel_core       — Core/Auth service tables (13 base tables)
+#   sentinel_detection  — Detection Engine tables (7 base tables)
+#   sentinel_ml        — ML Service tables (3 base tables + 1 view)
 #
 # One Redis instance is started for future outbox/stream-based event transport.
+# PostgreSQL remains the authoritative data store.
 #
 # Usage:
-#   docker compose up -d
-#   docker compose ps          # verify health
-#   docker compose down        # stop services
-#   docker compose down -v    # stop + destroy volumes (full reset)
+#   cp .env.example .env          # edit .env with your secrets
+#   docker compose up -d           # start infra
+#   docker compose ps              # verify health
+#   docker compose down            # stop services (data persists in volumes)
+#   docker compose down -v         # stop + destroy volumes (full reset)
 
 services:
   postgres:
@@ -23,15 +25,19 @@ services:
       POSTGRES_USER: ${POSTGRES_USER:-sentinel}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-sentinel123}
       PGDATA: /var/lib/postgresql/data/pgdata
+      # Database names passed to the init script so custom .env names take effect.
+      CORE_DB: ${CORE_DB:-sentinel_core}
+      DETECTION_DB: ${DETECTION_DB:-sentinel_detection}
+      ML_DB: ${ML_DB:-sentinel_ml}
     volumes:
-      # Bootstrap schemas on first run (init scripts run once when data directory is empty).
+      # Init script + schema files mounted read-only.
       - ./infra/postgres/init:/docker-entrypoint-initdb.d:ro
-      # Schema files (read-only, mounted so init script can reference them).
       - ./infra/postgres:/schemas:ro
-      # Persistent project-scoped data volume.
+      # Compose-managed project-scoped volume (name = <project>_<volume>).
       - postgres_data:/var/lib/postgresql/data
+    # Bind to localhost only — not exposed on all interfaces.
     ports:
-      - "${POSTGRES_PORT:-5432}:5432"
+      - "127.0.0.1:${POSTGRES_PORT:-5432}:5432"
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-sentinel}"]
       interval: 5s
@@ -49,8 +55,9 @@ services:
       --save 60 10000
     volumes:
       - redis_data:/data
+    # Bind to localhost only.
     ports:
-      - "${REDIS_PORT:-6379}:6379"
+      - "127.0.0.1:${REDIS_PORT:-6379}:6379"
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
@@ -58,8 +65,10 @@ services:
       retries: 5
       start_period: 5s
 
+# Compose-managed volumes — name = <project>_<volume>.
+# No explicit `name:` so each compose project gets its own volume.
+# Example: project "sentinel-auth" → sentinel-auth_postgres_data
+#          project "sentinel_auth_infra_test" → sentinel_auth_infra_test_postgres_data
 volumes:
   postgres_data:
-    name: sentinel_postgres_data
   redis_data:
-    name: sentinel_redis_data

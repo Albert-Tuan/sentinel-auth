@@ -61,9 +61,9 @@ docker compose ps
 
 Expected output:
 ```
-NAME        IMAGE         STATUS          PORTS
-postgres    postgres:16   Up (healthy)   0.0.0.0:5432->5432/tcp
-redis       redis:7      Up (healthy)   0.0.0.0:6379->6379/tcp
+NAME       IMAGE             STATUS       PORTS
+postgres   postgres:16-alpine  Up (healthy)  127.0.0.1:5432->5432/tcp
+redis      redis:7-alpine     Up (healthy)  127.0.0.1:6379->6379/tcp
 ```
 
 ### 3.2 Verify Databases
@@ -72,15 +72,18 @@ redis       redis:7      Up (healthy)   0.0.0.0:6379->6379/tcp
 # List all databases
 docker compose exec postgres psql -U sentinel -d postgres -c "\l"
 
-# Verify table counts
+# Verify base table counts (not views)
 docker compose exec postgres psql -U sentinel -d sentinel_core -c \
-  "SELECT count(*) FROM information_schema.tables WHERE table_schema = 'public'"
+  "SELECT count(*) FROM information_schema.tables \
+   WHERE table_schema = 'public' AND table_type = 'BASE TABLE'"
 
 docker compose exec postgres psql -U sentinel -d sentinel_detection -c \
-  "SELECT count(*) FROM information_schema.tables WHERE table_schema = 'public'"
+  "SELECT count(*) FROM information_schema.tables \
+   WHERE table_schema = 'public' AND table_type = 'BASE TABLE'"
 
 docker compose exec postgres psql -U sentinel -d sentinel_ml -c \
-  "SELECT count(*) FROM information_schema.tables WHERE table_schema = 'public'"
+  "SELECT count(*) FROM information_schema.tables \
+   WHERE table_schema = 'public' AND table_type = 'BASE TABLE'"
 
 # Verify the real view in sentinel_ml
 docker compose exec postgres psql -U sentinel -d sentinel_ml -c \
@@ -105,17 +108,20 @@ Expected: `PONG`
 ```bash
 # sentinel_core must NOT contain detection tables
 docker compose exec postgres psql -U sentinel -d sentinel_core -c \
-  "SELECT table_name FROM information_schema.tables WHERE table_schema = 'public' AND table_name = 'policies'"
+  "SELECT count(*) FROM information_schema.tables WHERE table_schema = 'public' \
+   AND table_type = 'BASE TABLE' AND table_name = 'policies'"
 # Expected: 0 rows
 
 # sentinel_detection must NOT contain core tables
 docker compose exec postgres psql -U sentinel -d sentinel_detection -c \
-  "SELECT table_name FROM information_schema.tables WHERE table_schema = 'public' AND table_name = 'users'"
+  "SELECT count(*) FROM information_schema.tables WHERE table_schema = 'public' \
+   AND table_type = 'BASE TABLE' AND table_name = 'users'"
 # Expected: 0 rows
 
-# sentinel_ml must NOT contain core or detection tables
+# sentinel_ml must NOT contain core/detection tables
 docker compose exec postgres psql -U sentinel -d sentinel_ml -c \
-  "SELECT table_name FROM information_schema.tables WHERE table_schema = 'public' AND table_name IN ('users', 'sessions', 'policies')"
+  "SELECT count(*) FROM information_schema.tables WHERE table_schema = 'public' \
+   AND table_type = 'BASE TABLE' AND table_name IN ('users', 'sessions', 'policies')"
 # Expected: 0 rows
 ```
 
@@ -285,7 +291,6 @@ docker compose up -d
 export DATABASE_URL="postgresql://sentinel:sentinel123@localhost:5432/sentinel_core"
 export INTERNAL_SECRET="a-test-secret-at-least-32-characters-long"
 export RUN_PRE_TOKEN_CHECK="0"
-unset INTERNAL_SECRET
 uvicorn app.main:app --reload --port 8000
 ```
 
