@@ -424,14 +424,17 @@ and protective actions (Section 9).
 
 - Separation of concerns: policy owners (Security Admin) vs. policy consumers (SOC Analyst)
 - Security Manager oversight role without mutation prevents self-approval scenarios
-- Matches existing prototype: Security Manager has no policy mutation endpoint coverage
+- Policy listing and activation are role-gated in the prototype; create/edit are pending
 
-### 10.4 Implementation Gap (Known)
+### 10.4 Implementation Status
 
-The current prototype has no role-gated policy management endpoints. All role
-checks are currently performed only at the session-authorization level. Policy
-mutation endpoints are not yet protected by role. This is an **implementation gap**
-to address during the next implementation phase.
+The current prototype provides partial policy management:
+
+- **Policy listing** (`GET /api/v1/policies`): role-gated — `SECURITY_ADMIN` + `SECURITY_MANAGER` only.
+- **Policy activation** (`POST /api/v1/policies/{id}/activate`): role-gated — `SECURITY_ADMIN` only.
+- **Policy create/edit**: APPROVED DESIGN / IMPLEMENTATION PENDING — no dedicated endpoints exist.
+
+This is an **implementation gap** to address during the next implementation phase.
 
 ---
 

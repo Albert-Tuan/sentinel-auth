@@ -584,8 +584,8 @@ Nếu `thresholds` vi phạm (ví dụ `low = 0.8`, `medium = 0.3`):
 | Thuộc tính | Giá trị |
 |------------|---------|
 | **Mã YC** | DE-16 |
-| **Tên** | Action Request to Core |
-| **Mô tả** | Gửi yêu cầu action về Core App |
+| **Tên** | Thực hiện hành động bảo vệ (Protective Action) |
+| **Mô tả** | Detection Engine thực hiện hành động bảo vệ trên Core App (REQUIRE_MFA, REVOKE_SESSIONS, LOCK_USER, FORCE_LOGOUT). Không có bước phê duyệt. |
 | **Đối tượng** | Hệ thống |
 | **Ưu tiên** | Bắt buộc |
 

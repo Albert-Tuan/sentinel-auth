@@ -21,7 +21,7 @@ Sentinel Auth có **3 nhóm actor chính** trực tiếp sử dụng hệ thốn
 | Mã | Chức năng | Mô tả |
 |---|---|---|
 | U-01 | Đăng ký | Nhập username, email, password → tạo account với role `USER`. Không tự chọn role đặc biệt. |
-| U-02 | Đăng nhập | Gửi username + password → xác thực. Nếu không MFA: nhận JWT + session. Nếu có MFA: nhận OTP challenge. |
+| U-02 | Đăng nhập | Gửi username + password → xác thực. Nếu không MFA: nhận opaque bearer token + session. Nếu có MFA: nhận OTP challenge. |
 | U-03 | Xác minh Email OTP | Nhập OTP 6 số khi bị yêu cầu (Admin bật hoặc detection yêu cầu one-time). |
 | U-04 | Đăng xuất | Revoke session hiện tại. |
 | U-05 | Xem session của mình | Xem danh sách phiên đang hoạt động: IP, device, thời gian, trạng thái. |
@@ -75,7 +75,7 @@ Sentinel Auth có **3 nhóm actor chính** trực tiếp sử dụng hệ thốn
 | Chức năng | User | Security Admin | SOC Analyst |
 |---|---|---:|---:|
 | Đăng ký account | ✅ | ✅ (với tư cách User) | ✅ (với tư cách User) |
-| Đăng nhập và nhận JWT/session | ✅ | ✅ | ✅ |
+| Đăng nhập và nhận opaque bearer token + session | ✅ | ✅ | ✅ |
 | Xác minh Email OTP khi bị yêu cầu | ✅ | ✅ | ✅ |
 | Logout, xem/revoke session của mình | ✅ | ✅ | ✅ |
 | Refresh token | ✅ | ✅ | ✅ |
@@ -106,7 +106,7 @@ Sentinel Auth có **3 nhóm actor chính** trực tiếp sử dụng hệ thốn
 
 ### 4.2 RBAC rules
 
-- JWT mang claim `roles` dạng mảng: `["USER", "SOC_ANALYST"]`
+- Token bearer mang roles từ database dạng mảng: `["USER", "SOC_ANALYST"]`
 - Endpoint cho phép khi account có **ít nhất 1 role** trong danh sách roles được yêu cầu.
 - Không tự động include role nền `USER` khi gán special roles.
 - Khi role bị thu hồi → tất cả session bị revoke.
@@ -133,7 +133,7 @@ Sentinel Auth có **3 nhóm actor chính** trực tiếp sử dụng hệ thốn
 ### 5.4 Detection Engine (Internal)
 
 - Không phải actor con người.
-- Hoạt động tự động: sau mỗi login attempt, Core App ghi `outbox_events` → Detection Engine đánh giá risk (bất đồng bộ).
+- Hoạt động tự động: sau mỗi login attempt, Core App ghi login event (outbox pattern **APPROVED DESIGN / IMPLEMENTATION PENDING** — currently: direct HTTP call to Detection Engine; outbox publisher not yet implemented).
 - Khi risk cao → tạo alert (SOC xử lý).
 - Khi risk vừa → enforce action (REQUIRE_MFA, REVOKE_SESSIONS, LOCK_USER) → tác động lên User.
 
@@ -142,7 +142,7 @@ Sentinel Auth có **3 nhóm actor chính** trực tiếp sử dụng hệ thốn
 ## 6. Luồng dữ liệu giữa actors
 
 ```
-User ──login──▶ FastAPI ──outbox──▶ Detection Engine
+User ──login──▶ FastAPI ──login event──▶ Detection Engine
                    │
                    ├── rule_score + ml_score ──▶ Risk Level
                    │                                 │

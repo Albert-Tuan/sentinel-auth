@@ -611,13 +611,18 @@ architecture decisions.
 - **D2b:** ✅ RESOLVED — P1-C: Security Admin owns policy mutation. See DECISIONS-SYSTEM-v3.3.md Section 10.
 - No changes to `app/`, `tests/`, `infra/postgres/`
 
-#### D3: Requirements / Use-Case Reconciliation
+#### D3: Requirements / Use-Case Reconciliation (✅ COMPLETE)
 
-**Files:** `docs/01-bang-yeu-cau-*.md`, `docs/02-dac-ta-use-case-*.md`, `docs/03-*-ml-service.md`
+**Files:** `docs/01-bang-yeu-cau-*.md`, `docs/02-dac-ta-use-case-*.md`, `docs/03-*-ml-service.md`, `docs/04-*.md`, `docs/05-*.md`, `docs/06-phan-tich-doi-tuong-su-dung-detection-engine.md`, `docs/SENTINEL_AUTH_TONG_HOP_v3.3.md`, `docs/DECISIONS-SYSTEM-v3.3.md`, `docs/DECISIONS-DETECTION-v3.3.md`
 
-- Reconcile UC descriptions against current implementation
-- Mark unimplemented features explicitly (outbox, three-service deployment)
-- No changes to `app/`, `tests/`, `infra/postgres/`
+- ✅ P1-B (protective action workflow): direct-apply semantics propagated to UC-DE-13 and related docs
+- ✅ P1-C (policy management roles): canonical role matrix propagated to UC-DE-15 and related docs
+- ✅ JWT → opaque bearer token: corrected in 7 files (11 occurrences in 02, 4 in 03, 1 in ML reqs, 2 in DECISIONS-DETECTION)
+- ✅ Outbox/Redis terminology: corrected to APPROVED DESIGN / IMPLEMENTATION PENDING
+- ✅ Actor descriptions: Security Manager role clarified as oversight/governance
+- ✅ Application code NOT modified (stale comments in `app/models.py`, `app/schemas.py` recorded for future phase)
+- ✅ See `docs/audit/17-requirements-usecase-reconciliation.md` for full traceability
+- No changes to `app/`, `tests/`, `infra/postgres/`, `Dockerfile`, `docker-compose.yml`, UML files
 
 #### D4: UML / ERD Regeneration
 
@@ -691,17 +696,19 @@ The following were decided and are now authoritative:
 
 ### ✅ DECISIONS — RESOLVED AT CANONICAL LEVEL
 
-| Priority | Item | Canonical Source | Downstream Reconciliation |
-|----------|------|-----------------|------------------------|
-| ✅ | P1-B: SOC protective-action workflow | DECISIONS-SYSTEM-v3.3.md Section 9 | D3 pass |
-| ✅ | P1-C: Policy management roles | DECISIONS-SYSTEM-v3.3.md Section 10 | D3 pass |
+| Priority | Item | Canonical Source | Status |
+|----------|------|-----------------|--------|
+| ✅ | P1-B: SOC protective-action workflow | DECISIONS-SYSTEM-v3.3.md Section 9 | ✅ RESOLVED; D3 downstream reconciled |
+| ✅ | P1-C: Policy management roles | DECISIONS-SYSTEM-v3.3.md Section 10 | ✅ RESOLVED; D3 downstream reconciled |
+| ✅ | D3: Requirements/USC reconciliation | D3 pass | ✅ COMPLETE — see `17-requirements-usecase-reconciliation.md` |
 
-### 🟡 HIGH — Pending documentation reconciliation
+### 🟡 HIGH — Remaining (D4 / R1 / Application phase)
 
 | Priority | Issue | Blocks |
 |----------|-------|--------|
 | 🟡 HIGH | UML diagrams: JWT → opaque token | Report accuracy |
 | 🟡 HIGH | `schema-core-v3.3.sql` COMMENT says "JWT" | Report accuracy |
+| 🟡 HIGH | Application code stale comments (JWT, etc.) | Application phase |
 
 ### 🟢 MEDIUM — Documentation updates
 

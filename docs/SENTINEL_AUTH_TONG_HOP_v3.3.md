@@ -188,13 +188,13 @@
 │  ┌─────────────────────────────────────────────────────────┐          │
 │  │                    CORE TABLES                          │          │
 │  ├─────────────────────────────────────────────────────────┤          │
-│  │ SESSIONS          │ JWT token management              │          │
+│  │ SESSIONS          │ Opaque bearer token management     │          │
 │  │ MFA_TRANSACTIONS  │ MFA challenge lifecycle           │          │
 │  │ MFA_NOTIFICATIONS │ OTP email/SMS tracking           │          │
 │  │ AUDIT_LOGS        │ Immutable audit trail            │          │
 │  │ USER_TRUSTED_DEVICES │ Remember-me devices          │          │
 │  │ SYSTEM_SETTINGS   │ Dynamic configuration            │          │
-│  │ OUTBOX_EVENTS     │ Transactional outbox            │          │
+│  │ OUTBOX_EVENTS     │ Transactional outbox (APPROVED DESIGN / IMPLEMENTATION PENDING) │          │
 │  │ USER_NOTIFICATIONS│ In-app notifications           │          │
 │  │ RATE_LIMITS      │ Rate limiting counters          │          │
 │  │ IP_ADDRESSES      │ Normalized IP tracking          │          │
@@ -609,7 +609,7 @@ erDiagram
 | UC-DE-10 | Điều tra Alert | SOC Analyst | Bắt buộc |
 | UC-DE-11 | Xem Evidence | SOC Analyst | Bắt buộc |
 | UC-DE-12 | Phân loại Alert | SOC Analyst | Bắt buộc |
-| UC-DE-13 | Yêu cầu Action | SOC Analyst | Bắt buộc |
+| UC-DE-13 | Thực hiện hành động bảo vệ | SOC Analyst | Bắt buộc |
 | UC-DE-14 | Tra cứu Login History | SOC Analyst | Bắt buộc |
 
 ### 6.3 Risk Scoring Formula
@@ -849,20 +849,21 @@ Header: `X-Internal-Secret: <shared_secret>` — timeout 5 giây.
 
 ### ADR-002: Transactional Outbox
 
-**Quyết định:** Core App sử dụng transactional outbox pattern để đảm bảo event delivery.
+**Quyết định:** Core App sử dụng transactional outbox pattern để đảm bảo event delivery. Redis Streams là target transport cho event delivery (not current implementation).
 
 **Lý do:**
 - Reliability: Event không bị lost khi service crash
 - Atomicity: Event được tạo cùng với business transaction
 - Durability: Event được persist trong DB
 
-> **Trạng thái 2026-10-05: CHƯA HIỆN THỰC.** Bảng `outbox_events` có trong schema và
-> ERD, nhưng `app/auth.py` ghi thẳng `LoginAttempt` và **không** tạo dòng outbox;
-> **không có** poller. Sự kiện đã ghi mà Detection không nhận được thì mất vĩnh viễn.
+> **Trạng thái 2026-10-09: APPROVED DESIGN / IMPLEMENTATION PENDING.**
+> Bảng `outbox_events` có trong schema và ERD, nhưng `app/auth.py` ghi thẳng
+> `LoginAttempt` và **không** tạo dòng outbox; **không có** outbox publisher hoặc
+> Redis Streams consumer. Sự kiện đã ghi mà Detection không nhận được thì mất vĩnh viễn.
 >
 > ADR này giữ nguyên vì vẫn là câu trả lời đúng cho bài toán đó. Trong lúc chờ poller,
 > cổng `pre-token-check` (ADR-005) giảm thiểu rủi ro vì `high`/`critical` bị chặn
-> **trước khi** có token. Xem `DECISIONS-DETECTION-v3.3.md` mục 12.
+> **trước khi** có token. PostgreSQL remains authoritative. Xem `DECISIONS-DETECTION-v3.3.md` mục 12.
 
 ### ADR-003: 3NF Database Normalization
 

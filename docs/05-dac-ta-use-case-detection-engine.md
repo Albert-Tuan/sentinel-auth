@@ -28,7 +28,7 @@ Tài liệu này mô tả chi tiết các Use Case của **Detection Engine** tr
 | UC-DE-10 | Điều tra Alert | SOC Analyst | Bắt buộc |
 | UC-DE-11 | Xem Evidence | SOC Analyst | Bắt buộc |
 | UC-DE-12 | Phân loại Alert | SOC Analyst | Bắt buộc |
-| UC-DE-13 | Yêu cầu Action | SOC Analyst | Bắt buộc |
+| UC-DE-13 | Thực hiện hành động bảo vệ | SOC Analyst | Bắt buộc |
 | UC-DE-14 | Tra cứu Login History | SOC Analyst | Bắt buộc |
 | UC-DE-15 | Quản lý Policy | Security Admin | Bắt buộc |
 
@@ -657,31 +657,34 @@ Nếu ML không thành công:
 
 ---
 
-### 3.13 UC-DE-13: Yêu cầu Action
+### 3.13 UC-DE-13: Thực hiện hành động bảo vệ (Protective Action)
 
 | Thuộc tính | Mô tả |
 |------------|--------|
 | **ID** | UC-DE-13 |
-| **Tên** | Yêu cầu Action |
+| **Tên** | Thực hiện hành động bảo vệ (Protective Action) |
 | **Actor chính** | SOC Analyst |
-| **Actor phụ** | Core App |
-| **Mô tả ngắn** | Request security action on user/account |
-| **Ưu tiên** | Bắt buộc |
+| **Actor phụ** | Security Manager (khả năng giám sát / supervisory) |
+| **Đối tượng hệ thống** | Core App |
+| **Mô tả ngắn** | SOC Analyst hoặc Security Manager thực hiện trực tiếp hành động bảo vệ trên Core App. Không có bước phê duyệt. |
+| **Trạng thái v3.3** | APPROVED DESIGN / CURRENT PROTOTYPE: endpoint tồn tại nhưng chưa có kiểm tra role trên executor. |
+
+> ⚠️ **Phê duyệt / Approval workflow không thuộc v3.3.** Pattern `SOC Analyst → submit request → Security Manager approve → execute` là **FUTURE ENHANCEMENT**, không phải hành vi hiện tại. Tham chiếu `APPROVE_ACTION` trong tài liệu cũ được đánh dấu STALE.
 
 #### Basic Flow
 ```
-1. SOC Analyst quyết định action cần thiết
-2. Chọn action type
-3. Nhập reason
-4. System gửi action request đến Core App
-5. Ghi timeline entry
-6. SOC Analyst notify khi completed
+1. SOC Analyst (hoặc Security Manager) mở alert.
+2. Chọn một trong 4 hành động được hỗ trợ.
+3. Cung cấp lý do (reason).
+4. Hệ thống gửi action trực tiếp đến Core App (không qua queue phê duyệt).
+5. Ghi timeline entry.
+6. Trả kết quả cho actor.
 ```
 
 #### Available Actions
 | Action | Target | Mô tả | Tự động? |
 |--------|--------|--------|----------|
-| `REQUIRE_MFA` | user_id | Đặt cờ one-time **+ thu hồi mọi phiên đang hoạt động** | ✅ (`high`) |
+| `REQUIRE_MFA` | user_id | Đặt cờ one-time + thu hồi mọi phiên đang hoạt động | ✅ (`high`) |
 | `REVOKE_SESSIONS` | user_id | Thu hồi tất cả sessions | ✅ (`critical`) |
 | `LOCK_USER` | user_id | Khoá tài khoản + thu hồi phiên | ❌ SOC thủ công |
 | `FORCE_LOGOUT` | user_id | Đăng xuất cưỡng bức (giống `REVOKE_SESSIONS`) | ❌ SOC thủ công |
@@ -738,10 +741,21 @@ Nếu ML không thành công:
 | **ID** | UC-DE-15 |
 | **Tên** | Quản lý Policy |
 | **Actor chính** | Security Admin |
-| **Mô tả ngắn** | CRUD policies và activate/deactivate |
-| **Ưu tiên** | Bắt buộc |
+| **Actor phụ** | Security Manager (read-only / giám sát) |
+| **Mô tả ngắn** | Security Admin tạo, chỉnh sửa, kích hoạt policies. Security Manager xem để giám sát. |
+| **Trạng thái v3.3** | APPROVED DESIGN / IMPLEMENTATION PENDING: policy listing và activation có role-gating; policy create/edit endpoint chưa tồn tại. |
 
-#### Basic Flow - Create
+#### Role Permissions — Policy Management
+
+| Role | View Policies | Create Policy | Edit Policy | Activate Policy |
+|------|:---:|:---:|:---:|:---:|
+| `SECURITY_ADMIN` | ✅ | ✅ | ✅ | ✅ |
+| `SECURITY_MANAGER` | ✅ | ❌ | ❌ | ❌ |
+| `SOC_ANALYST` | ❌ | ❌ | ❌ | ❌ |
+
+> ⚠️ `MANAGE_POLICIES` cho `SECURITY_MANAGER` trong tài liệu cũ là **STALE**. Thuật ngữ đúng là `VIEW_POLICIES`.
+
+#### Basic Flow - Create (SECURITY_ADMIN only)
 ```
 1. Security Admin tạo policy mới
 2. Nhập version, name, rules, config
@@ -750,12 +764,19 @@ Nếu ML không thành công:
 5. Return policy ID
 ```
 
-#### Basic Flow - Activate
+#### Basic Flow - Activate (SECURITY_ADMIN only)
 ```
 1. Security Admin chọn policy
 2. System deactivate all other policies
 3. Set is_active = true
 4. Ghi audit log
+```
+
+#### Basic Flow - View (SECURITY_ADMIN + SECURITY_MANAGER)
+```
+1. Actor gọi GET /api/v1/policies
+2. System trả danh sách policy (newest first)
+3. Actor xem cấu hình để giám sát
 ```
 
 #### Policy Structure
@@ -874,7 +895,7 @@ Nếu ML không thành công:
 │     │  │  UC-DE-10: Điều tra Alert   │   │                                │
 │     │  │  UC-DE-11: Xem Evidence     │   │                                │
 │     │  │  UC-DE-12: Phân loại Alert  │   │                                │
-│     │  │  UC-DE-13: Yêu cầu Action   │   │                                │
+│     │  │  UC-DE-13: Protective Action │   │                                │
 │     │  │  UC-DE-14: Tra cứu History  │   │                                │
 │     │  └─────────────────────────────┘   │                                │
 │     │                                     │                                │

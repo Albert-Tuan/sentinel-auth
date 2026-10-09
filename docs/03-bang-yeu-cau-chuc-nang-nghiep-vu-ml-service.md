@@ -25,7 +25,7 @@ ML Service là thành phần xử lý nội bộ của `sentinel-auth`: nhận f
 
 | Mã | Yêu cầu |
 |---|---|
-| YCPNC-ML-01 | ML Service không verify JWT của user. Chỉ verify shared secret với Detection Engine. |
+| YCPNC-ML-01 | ML Service không verify opaque bearer token của user. Chỉ verify shared secret với Detection Engine. |
 | YCPNC-ML-02 | ML Service down không được làm detection fail hoàn toàn. Detection Engine fallback sang Rule Score only. |
 | YCPNC-ML-03 | Normalized score = 0 có nghĩa là bình thường, score = 1 có nghĩa là bất thường nhất. |
 | YCPNC-ML-04 | is_anomaly được xác định theo threshold đã config trong model. |

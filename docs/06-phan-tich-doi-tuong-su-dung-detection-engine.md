@@ -57,7 +57,7 @@ SOC Analyst là nhân viên chịu trách nhiệm giám sát các hoạt động
 | `INVESTIGATE_ALERT` | Điều tra alert | UC-DE-10 |
 | `VIEW_EVIDENCE` | Xem evidence | UC-DE-11 |
 | `RESOLVE_ALERT` | Phân loại và đóng alert | UC-DE-12 |
-| `REQUEST_ACTION` | Yêu cầu action | UC-DE-13 |
+| `EXECUTE_ACTION` | Thực hiện hành động bảo vệ (Protective Action) | UC-DE-13 |
 | `SEARCH_HISTORY` | Tra cứu login history | UC-DE-14 |
 
 #### 3.1.4 Quy trình công việc
@@ -151,8 +151,8 @@ Security Manager là người quản lý đội ngũ SOC và chịu trách nhi�
 | `VIEW_MANAGER_DASHBOARD` | Xem dashboard quản lý | UC-DE-08 (extended) |
 | `VIEW_ALL_ALERTS` | Xem tất cả alerts | UC-DE-08 |
 | `REVIEW_ESCALATED` | Review escalated alerts | UC-DE-12 |
-| `APPROVE_ACTION` | Phê duyệt action quan trọng | UC-DE-13 |
-| `MANAGE_POLICIES` | Quản lý policies | UC-DE-15 |
+| `EXECUTE_ACTION` | Thực hiện hành động bảo vệ (supervisory capability) | UC-DE-13 |
+| `VIEW_POLICIES` | Xem policies để giám sát (không tạo/chỉnh sửa) | UC-DE-15 |
 | `MANAGE_SOC_TEAM` | Quản lý team SOC | (Core App) |
 | `VIEW_REPORTS` | Xem báo cáo | UC-M-02 |
 
@@ -339,11 +339,14 @@ So that the system can learn and reduce false positives
 - Alert được đánh dấu resolution và timestamp
 - Feedback được ghi log cho ML training
 
-#### US-SOC-04: Yêu cầu Action
+#### US-SOC-04: Thực hiện hành động bảo vệ (Protective Action)
+
+> ⚠️ **Approval workflow không thuộc v3.3.** Pattern `SOC Analyst → submit request → Security Manager approve → execute` là **FUTURE ENHANCEMENT**.
+
 ```
-As a SOC Analyst
-I want to request security actions on suspicious accounts
-So that I can protect the organization
+As a SOC Analyst (or Security Manager in supervisory role)
+I want to execute protective actions directly on suspicious accounts
+So that I can respond immediately without a manager-approval step
 ```
 
 **Acceptance Criteria:**
@@ -352,6 +355,7 @@ So that I can protect the organization
 - Action được logged và auditable
 - Mọi action đều trả về `details.sessions_revoked` = số phiên đã thu hồi
 - Gọi lại action đã có hiệu lực trả `already_applied` chứ không lỗi
+- Không có bước phê duyệt (no approval queue)
 
 ---
 

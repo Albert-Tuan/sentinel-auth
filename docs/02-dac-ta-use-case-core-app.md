@@ -90,15 +90,15 @@ flowchart LR
 |---|---|
 | **Actor chính** | User |
 | **Tiền điều kiện** | Account tồn tại và chưa bị `LOCKED`. |
-| **Kích hoạt** | User gửi POST `/api/v1/auth/login` với username, password. IP lấy từ header / socket. |
-| **Luồng chính** | 1. Rate limit: kiểm tra số request/phút/IP (max 5). Vượt → `429`. 2. Tìm user theo username, verify Argon2id hash. 3. Kiểm tra `status != LOCKED`. 4. **Cổng kiểm duyệt rủi ro**: gọi `POST {DETECTION_URL}/api/v1/internal/pre-token-check` (timeout 3s). Nếu `risk_level ∈ {high, critical}` → đặt `detection_mfa_once=true` và sang bước 6 (chưa tạo session, chưa có token). Lỗi/timeout → **fail open**, coi như rủi ro thấp. 5. Ghi login event (UC-DE-03): INSERT `login_attempts`. 6. Nếu có cờ MFA → tạo MfaTransaction, sinh OTP 6 số, hash + lưu. Gửi email OTP (Mailpit). Trả `200` + `mfa_required=true` + `session_id`. 7. Nếu không có cờ MFA → tạo Session, sinh access token + refresh token (hash trước khi lưu). Trả `200`. |
+| **Kích hoạt** | User gửi POST `/api/v1/auth/login` với username, password. IP được xác định thông qua uvicorn proxy headers (xem `app/client_ip.py`). |
+| **Luồng chính** | 1. Rate limit: kiểm tra số request/phút/IP (max 5). Vượt → `429`. 2. Tìm user theo username, verify Argon2id hash. 3. Kiểm tra `status != LOCKED`. 4. **Cổng kiểm duyệt rủi ro**: gọi `POST {DETECTION_URL}/api/v1/internal/pre-token-check` (timeout 3s). Nếu `risk_level ∈ {high, critical}` → đặt `detection_mfa_once=true` và sang bước 6 (chưa tạo session, chưa có token). Lỗi/timeout → **fail open**, coi như rủi ro thấp. 5. Ghi login event (UC-DE-03): INSERT `login_attempts`. 6. Nếu có cờ MFA → tạo MfaTransaction, sinh OTP 6 số, hash + lưu. Gửi email OTP (Mailpit). Trả `200` + `mfa_required=true` + `session_id`. 7. Nếu không có cờ MFA → tạo Session, sinh opaque access token + refresh token (hash trước khi lưu). Trả `200`. |
 | **Detection** | **Hai chiều.** (1) Đồng bộ: cổng `pre-token-check` chặn token khi rủi ro cao — xem `DECISIONS-DETECTION-v3.3.md` mục 10. (2) Bất đồng bộ: Detection chấm xong gọi `POST /api/v1/internal/actions` để thu hồi phiên hoặc bắt MFA (mục 11). |
-| **Request** | `POST /api/v1/auth/login` → `{"username": "string", "password": "string"}` (IP lấy từ `X-Forwarded-For` / client socket) |
+| **Request** | `POST /api/v1/auth/login` → `{"username": "string", "password": "string"}` |
 | **Response thành công** | `200 OK` → `{"access_token": "string", "refresh_token": "string", "session_id": "uuid", "mfa_required": false}` |
 | **Response MFA required** | `200 OK` → `{"access_token": "", "refresh_token": "", "session_id": "uuid", "mfa_required": true}` |
 | **Response lỗi** | `401 Unauthorized` (sai credentials); `423 Locked` (account locked); `429 Too Many Requests` (rate limit). Login **không** trả `403`: khi rủi ro cao, cổng trả `200` + `mfa_required=true` chứ không chặn. |
 | **Ngoại lệ** | Rate limit → `429`; account `LOCKED` → `423`; wrong password → generic `401` (không tiết lộ account tồn tại). |
-| **Hậu điều kiện** | Hoặc có token + session; hoặc có MfaTransaction + OTP pending (chưa có token); hoặc login bị từ chối. |
+| **Hậu điều kiện** | Hoặc có opaque access token + session; hoặc có MfaTransaction + OTP pending (chưa có token); hoặc login bị từ chối. |
 
 ---
 
@@ -109,12 +109,12 @@ flowchart LR
 | **Actor chính** | User |
 | **Tiền điều kiện** | Có MfaTransaction `pending` của user, chưa hết hạn (5 phút), chưa bị `expired` hoặc `failed`. |
 | **Kích hoạt** | User gửi POST `/api/v1/auth/mfa/verify` với session_id và OTP 6 số. |
-| **Luồng chính** | 1. Tìm MfaTransaction theo session_id, kiểm tra ownership + status + expiry. 2. Verify OTP với stored hash (constant-time comparison). 3. Nếu đúng: đánh dấu `status=completed`; tạo Session + JWT. Nếu MFA là one-time (detection), xóa `detection_mfa_once`. Nếu MFA là persistent (admin), giữ nguyên. 4. Ghi LoginEvent (outcome=`mfa_success`). Trả `200`. 5. Nếu sai: tăng `fail_count`. Đến 3 → `status=failed`. Trả `401`. |
+| **Luồng chính** | 1. Tìm MfaTransaction theo session_id, kiểm tra ownership + status + expiry. 2. Verify OTP với stored hash (constant-time comparison). 3. Nếu đúng: đánh dấu `status=completed`; tạo Session + opaque access token. Nếu MFA là one-time (detection), xóa `detection_mfa_once`. Nếu MFA là persistent (admin), giữ nguyên. 4. Ghi LoginEvent (outcome=`mfa_success`). Trả `200`. 5. Nếu sai: tăng `fail_count`. Đến 3 → `status=failed`. Trả `401`. |
 | **Request** | `POST /api/v1/auth/mfa/verify` → `{"session_id": "uuid", "mfa_code": "string"}` |
 | **Response thành công** | `200 OK` → `{"access_token": "string", "refresh_token": "string", "session_id": "uuid"}` |
 | **Response lỗi** | `400 Bad Request` (sai format); `401 Unauthorized` (sai OTP hoặc hết hạn); `404 Not Found` (session không tồn tại) |
 | **Ngoại lệ** | OTP sai: `401` + tăng fail_count. Đến 3 lần: `status=FAILED`, trả `401`. OTP hết hạn: trả `401`. |
-| **Hậu điều kiện** | User có JWT + session. MFA persistent giữ nguyên; MFA one-time được xóa. |
+| **Hậu điều kiện** | User có opaque access token + session. MFA persistent giữ nguyên; MFA one-time được xóa. |
 
 ---
 
@@ -123,7 +123,7 @@ flowchart LR
 | Thuộc tính | Nội dung |
 |---|---|
 | **Actor chính** | User |
-| **Tiền điều kiện** | User có JWT hợp lệ. |
+| **Tiền điều kiện** | User có opaque access token hợp lệ. |
 | **Kích hoạt** | User gọi endpoint logout hoặc xem/revoke session. |
 | **Luồng chính** | 1. **Logout**: REVOKE session hiện tại (đặt `revoked_at`). 2. **Xem session**: GET `/api/v1/auth/sessions` → chỉ trả sessions thuộc `current_user`. 3. **Revoke session lạ**: DELETE `/api/v1/auth/sessions/{id}` → kiểm tra session thuộc `current_user` trước khi đặt `revoked_at`. |
 | **Request** | `POST /api/v1/auth/logout`; `GET /api/v1/auth/sessions`; `DELETE /api/v1/auth/sessions/{id}` |
@@ -152,9 +152,9 @@ flowchart LR
 | Thuộc tính | Nội dung |
 |---|---|
 | **Actor chính** | Security Administrator |
-| **Tiền điều kiện** | Admin có JWT với role `SECURITY_ADMIN` hoặc `SECURITY_MANAGER`. |
+| **Tiền điều kiện** | Admin có opaque access token với role `SECURITY_ADMIN` hoặc `SECURITY_MANAGER`. |
 | **Kích hoạt** | Admin gọi các endpoint quản lý account. |
-| **Luồng chính (gán role)** | 1. Xác thực JWT + role. 2. Validate role hợp lệ (`SECURITY_ADMIN`, `SOC_ANALYST`, `SECURITY_MANAGER`). 3. Thêm record vào `user_roles`. 4. Revoke mọi session của target user. 5. Ghi Audit Log với before/after state. |
+| **Luồng chính (gán role)** | 1. Xác thực bearer token + role. 2. Validate role hợp lệ (`SECURITY_ADMIN`, `SOC_ANALYST`, `SECURITY_MANAGER`). 3. Thêm record vào `user_roles`. 4. Revoke mọi session của target user. 5. Ghi Audit Log với before/after state. |
 | **Luồng chính (thu hồi role)** | 1. Kiểm tra target không phải `SECURITY_ADMIN` cuối cùng `ACTIVE`. 2. Xóa record `user_roles` tương ứng. 3. Revoke mọi session của target. 4. Ghi Audit Log. |
 | **Luồng chính (khóa account)** | 1. Kiểm tra target không phải Security Admin cuối cùng `ACTIVE`. 2. Đặt `status=LOCKED`. 3. Revoke mọi session. 4. Ghi Audit Log. |
 | **Luồng chính (mở khóa)** | 1. Đặt `status=ACTIVE`. 2. Ghi Audit Log. |
@@ -172,7 +172,7 @@ flowchart LR
 | Thuộc tính | Nội dung |
 |---|---|
 | **Actor chính** | Security Administrator |
-| **Tiền điều kiện** | Admin có JWT với role `SECURITY_ADMIN`. |
+| **Tiền điều kiện** | Admin có opaque access token với role `SECURITY_ADMIN`. |
 | **Luồng chính (tạo version)** | POST `/api/v1/policies` với `{"version": "string", "rules": [ ... ], "config": {"weights": {...}, "thresholds": {...}}}`. Chưa active. |
 | **Luồng chính (activate)** | PUT `/api/v1/admin/rules/{id}/activate` → đặt `is_active=true`, deactivate version cũ. |
 | **Luồng chính (xem)** | GET `/api/v1/admin/rules` → danh sách versions. GET `/api/v1/admin/rules/active` → version đang active. |
@@ -185,7 +185,7 @@ flowchart LR
 | Thuộc tính | Nội dung |
 |---|---|
 | **Actor chính** | Security Administrator |
-| **Tiền điều kiện** | Admin có JWT với role `SECURITY_ADMIN`. |
+| **Tiền điều kiện** | Admin có opaque access token với role `SECURITY_ADMIN`. |
 | **Luồng chính** | GET `/api/v1/admin/audit-logs` → danh sách audit entries, lọc theo `actor`, `action`, `resource`, `from`/`to` timestamp, phân trang. |
 | **Hậu điều kiện** | Không có — chỉ đọc. |
 
@@ -196,9 +196,9 @@ flowchart LR
 | Thuộc tính | Nội dung |
 |---|---|
 | **Actor chính** | SOC Analyst |
-| **Tiền điều kiện** | User có JWT với role `SOC_ANALYST`. |
+| **Tiền điều kiện** | User có opaque access token với role `SOC_ANALYST`. |
 | **Kích hoạt** | User gọi GET `/api/v1/soc/alerts`. |
-| **Luồng chính** | 1. Xác thực JWT + role `SOC_ANALYST`. 2. Query bảng `alerts` kèm `login_attempts` join. 3. Áp dụng filter: `status`, `risk_level`, `assigned_to`, date range. 4. Phân trang (default 20/page). 5. Trả danh sách alerts. |
+| **Luồng chính** | 1. Xác thực bearer token + role `SOC_ANALYST`. 2. Query bảng `alerts` kèm `login_attempts` join. 3. Áp dụng filter: `status`, `risk_level`, `assigned_to`, date range. 4. Phân trang (default 20/page). 5. Trả danh sách alerts. |
 | **Request** | `GET /api/v1/soc/alerts?status=open&risk_level=high&page=1&limit=20` |
 | **Response thành công** | `200 OK` → `{"data": [...], "total": int, "page": int, "limit": int}` |
 | **Ngoại lệ** | Không đủ quyền → `403` |
@@ -212,7 +212,7 @@ flowchart LR
 |---|---|
 | **Actor chính** | SOC Analyst |
 | **Tiền điều kiện** | Alert tồn tại và đang `open`. |
-| **Luồng chính** | 1. Xác thực JWT + role. 2. Kiểm tra alert `status=open`. 3. Cập nhật `status=acknowledged`, `assigned_to=<current_user>`, `notes`. 4. Ghi Audit Log. |
+| **Luồng chính** | 1. Xác thực bearer token + role. 2. Kiểm tra alert `status=open`. 3. Cập nhật `status=acknowledged`, `assigned_to=<current_user>`, `notes`. 4. Ghi Audit Log. |
 | **Request** | `PUT /api/v1/soc/alerts/{id}/acknowledge` → `{"notes": "string?"}` |
 | **Response thành công** | `200 OK` → alert object đã cập nhật |
 | **Ngoại lệ** | Alert không tồn tại → `404`; Alert không ở trạng thái `open` → `409 Conflict` |
