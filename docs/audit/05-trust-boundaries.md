@@ -70,57 +70,78 @@
 
 ## 3. IP Trust Model
 
-### 3.1 Current Implementation
+### 3.1 Architecture (Post P1-D)
 
-```python
-def get_client_ip(request: Request) -> str:
-    """Extract client IP from request."""
-    forwarded = request.headers.get("X-Forwarded-For")
-    if forwarded:
-        return forwarded.split(",")[0].strip()
-    return request.client.host if request.client else "unknown"
+All application code derives the client IP from ``request.client.host`` — populated
+by Uvicorn's ``ProxyHeadersMiddleware`` after validating the connection peer
+against ``FORWARDED_ALLOW_IPS``.
+
 ```
+untrusted HTTP headers (X-Forwarded-For, X-Forwarded-Proto)
+        │
+        ▼
+Uvicorn ProxyHeadersMiddleware
+  — checks: is the ASGI peer on FORWARDED_ALLOW_IPS allowlist?
+  — if YES:  parses X-Forwarded-For, populates scope["client"]
+  — if NO:   ignores headers, scope["client"] = actual TCP peer
+        │
+        ▼
+application code: request.client.host   ← ONE authority
+```
+
+The application does NOT read ``X-Forwarded-For`` directly.  There is exactly one
+authority for chain parsing: Uvicorn.  This eliminates the class of vulnerability
+where Sentinel Auth and the proxy disagree about the trust chain.
 
 ### 3.2 Trust Assessment
 
 | Assumption | Status | Risk |
 |-----------|--------|------|
-| X-Forwarded-For is trusted | ⚠️ CONDITIONAL | **HIGH** if not behind trusted proxy |
-| request.client.host is accurate | ⚠️ DEPENDS | Low if directly exposed |
-| No IP spoofing possible | ❌ FALSE | Depends on deployment |
+| ``request.client.host`` is accurate | ✅ SAFE | Uvicorn is the single authority |
+| ``X-Forwarded-For`` is never trusted directly | ✅ SAFE | Application reads no forwarding headers |
+| ``FORWARDED_ALLOW_IPS=*`` is rejected at startup | ✅ SAFE | ``ProxyTrustConfigurationError`` |
+| ``FORWARDED_ALLOW_IPS=127.0.0.1`` (Docker default) | ✅ SAFE | No remote client can forge headers |
+| ``FORWARDED_ALLOW_IPS=<proxy-ip>`` (production) | ✅ SAFE | Only the configured proxy can forge |
 
 ### 3.3 Deployment Scenarios
 
-**Scenario A: Direct Exposure**
-```
-Client → Core App (directly exposed to internet)
-```
-- `X-Forwarded-For` is USER-CONTROLLED
-- **IP-based controls are BYPASSABLE**
-- Risk: HIGH
+**Scenario A: Direct Exposure (development / Docker default)**
 
-**Scenario B: Behind Trusted Proxy**
 ```
-Client → nginx → Core App
+Client → Uvicorn
 ```
-- nginx strips/validates X-Forwarded-For
-- `X-Forwarded-For` from nginx is TRUSTED
-- Risk: LOW (if nginx is configured correctly)
 
-**Scenario C: Behind Load Balancer**
-```
-Client → AWS ALB → Core App
-```
-- ALB sets X-Forwarded-For
-- Must configure ALB to trust only itself
-- Risk: MEDIUM (configuration-dependent)
+``FORWARDED_ALLOW_IPS=127.0.0.1`` (default in Dockerfile).  No remote client
+is on the trusted list; Uvicorn ignores any ``X-Forwarded-For`` supplied by the
+client.  ``request.client`` is always the actual TCP peer.  Risk: **LOW**.
 
-### 3.4 Recommendations
+**Scenario B: Behind Trusted Proxy (production)**
 
-1. **Document the deployment assumption explicitly**
-2. **If direct exposure, reject X-Forwarded-For entirely**
-3. **If behind proxy, configure trusted proxy list**
-4. **Add warning in configuration about IP spoofing risk**
+```
+Client → nginx/load-balancer → Uvicorn
+```
+
+Set ``FORWARDED_ALLOW_IPS=<proxy-ip>`` (e.g. ``10.10.0.5``).  Only the proxy
+is on the trusted list; Uvicorn parses ``X-Forwarded-For`` from the proxy's
+connection and populates ``scope["client"]`` with the true client IP.
+Application code sees ``request.client.host = <true-client-ip>``.  Risk: **LOW**.
+
+**Forbidden: ``FORWARDED_ALLOW_IPS=*``**
+
+Any remote client could forge ``X-Forwarded-For`` and bypass IP-based controls
+(rate limiting, MFA IP binding, SOC alert audit).  ``app/client_ip.py`` raises
+``ProxyTrustConfigurationError`` at startup if this is detected.
+
+### 3.4 Configuration Reference
+
+| Variable | Default | Meaning |
+|----------|---------|---------|
+| ``FORWARDED_ALLOW_IPS`` | ``127.0.0.1`` | Comma-separated IPs/CIDRs trusted for forwarding |
+| ``FORWARDED_ALLOW_IPS=*`` | **rejected** | Raises ``ProxyTrustConfigurationError`` at startup |
+
+Operator action required: before deploying behind a reverse proxy, set
+``FORWARDED_ALLOW_IPS`` to the proxy's IP address, e.g.
+``FORWARDED_ALLOW_IPS=10.10.0.5``.
 
 ## 4. Internal Service Authentication
 
@@ -214,7 +235,6 @@ database_url = os.getenv(
 - ✅ Input validation (Pydantic)
 
 ### 8.2 Weak Boundaries (Needs Improvement)
-- ⚠️ IP-based controls (X-Forwarded-For trust)
 - ⚠️ RBAC (authorization not enforced)
 - ⚠️ Database access control (no service isolation)
 - ⚠️ Audit log immutability (no DB enforcement)
@@ -222,6 +242,5 @@ database_url = os.getenv(
 ### 8.3 Missing Boundaries (Not Implemented)
 - ❌ Token expiration enforcement at request time
 - ❌ Role change → session invalidation
-- ❌ IP-based anomaly detection (spoofable)
 - ❌ DB-level immutability for audit logs
 - ❌ Schema-level service isolation

@@ -14,6 +14,7 @@ from app.time_utils import utc_now
 from uuid import UUID, uuid4
 
 import httpx
+from app.client_ip import get_client_ip
 from fastapi import APIRouter, HTTPException, status, Depends, Request, Header
 from pydantic import BaseModel
 from argon2 import PasswordHasher
@@ -58,17 +59,6 @@ ph = PasswordHasher()
 def generate_otp() -> str:
     """Generate 6-digit OTP."""
     return f"{secrets.randbelow(1_000_000):06d}"
-
-
-def get_client_ip(request: Request) -> str:
-    """Extract client IP from request.
-
-    Never read the client IP from the request body - it would be spoofable.
-    """
-    forwarded = request.headers.get("X-Forwarded-For")
-    if forwarded:
-        return forwarded.split(",")[0].strip()
-    return request.client.host if request.client else "unknown"
 
 
 def resolve_ip_address(db, client_ip: str) -> Optional[str]:

@@ -13,6 +13,13 @@ COPY app ./app
 COPY infra/postgres/schema.sql ./infra/postgres/schema.sql
 
 ENV APP_ENV=development
+# Trusted-proxy configuration.
+# Safe default: only the local loopback address is trusted as a proxy source.
+# X-Forwarded-For headers from any other peer are ignored by Uvicorn.
+# Override this with the IP address(es) of your reverse proxy if deploying behind one.
+# NEVER set FORWARDED_ALLOW_IPS="*": it would allow any remote client to forge
+# X-Forwarded-For and bypass IP-based controls (rate limiting, MFA binding, etc.).
+ENV FORWARDED_ALLOW_IPS=127.0.0.1
 EXPOSE 8000
 
 HEALTHCHECK --interval=10s --timeout=3s --retries=5 \

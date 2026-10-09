@@ -463,3 +463,134 @@ P0-05 independent txns  → both succeed  ✓
 | `tests/conftest.py` | `app` fixture for route-table inspection |
 | `tests/test_devices.py` | `test_only_one_delete_all_route` uses `app.routes` inspection |
 | `docs/audit/14-p1-remediation.md` | Updated test counts (371 suite); TIME-01 section updated |
+
+---
+
+## P1-D — Trusted Proxy / Client-IP Remediation
+
+### Root Cause
+Three modules each implemented their own ``X-Forwarded-For`` parser:
+
+```python
+# app/auth.py
+# app/devices.py
+forwarded = request.headers.get("X-Forwarded-For")
+if forwarded:
+    return forwarded.split(",")[0].strip()
+```
+
+```python
+# app/alerts.py
+forwarded = request.headers.get("x-forwarded-for") if hasattr(request, "headers") else None
+```
+
+Any remote client could send ``X-Forwarded-For: 1.2.3.4`` and influence:
+
+- Login rate limiting
+- ``LoginAttempt.ip_address`` audit
+- Pre-token risk scoring
+- MFA bound-IP
+- Session IP tracking
+- ``UserTrustedDevice.last_ip``
+- SOC alert timeline IP
+
+### Architecture Decision
+The ASGI server (Uvicorn) is the **single authority** for proxy-header interpretation.
+
+Application code reads only ``request.client.host`` — already populated by Uvicorn's
+``ProxyHeadersMiddleware`` after validating the peer against ``FORWARDED_ALLOW_IPS``.
+
+There is no second XFF parser in the application.  Uvicorn and Sentinel Auth
+**cannot disagree** about the trust chain.
+
+```
+untrusted HTTP headers
+        ↓
+Uvicorn ProxyHeadersMiddleware  ← trusted-peer validation
+        ↓
+request.client.host              ← ONE authority
+        ↓
+canonical app.client_ip.get_client_ip()
+```
+
+### Canonical Resolver (`app/client_ip.py`)
+
+```python
+def get_client_ip(request: Request) -> str:
+    """Return the client IP as seen by the application.
+
+    Value is request.client.host AFTER Uvicorn's ProxyHeadersMiddleware has applied
+    its trusted-proxy policy.  The application does NOT read X-Forwarded-For.
+    """
+    if request.client is None:
+        return "unknown"
+    return request.client.host
+```
+
+### Wildcard Rejection
+
+``FORWARDED_ALLOW_IPS=*`` is rejected at application startup via
+``validate_proxy_trust_config()``, raising ``ProxyTrustConfigurationError``.
+Safe defaults (absent env var): Uvicorn defaults to ``127.0.0.1,::1``.
+
+### Docker Safe Default
+
+``Dockerfile`` sets ``ENV FORWARDED_ALLOW_IPS=127.0.0.1``.  Operators deploying
+behind a reverse proxy must override with the proxy's IP address.
+
+### P1-D Test Evidence
+
+**Direct XFF spoof** — ``TestGetClientIp``:
+```
+X-Forwarded-For: 1.2.3.4  (direct peer: 203.0.113.20)
+→ canonical resolver returns 203.0.113.20   ✓
+→ fake header has zero effect                  ✓
+```
+
+**Config validation** — ``TestValidateProxyTrustConfig``:
+```
+FORWARDED_ALLOW_IPS absent    → valid   ✓
+FORWARDED_ALLOW_IPS=127.0.0.1  → valid   ✓
+FORWARDED_ALLOW_IPS=10.10.0.0/24 → valid   ✓
+FORWARDED_ALLOW_IPS=*         → ProxyTrustConfigurationError   ✓
+FORWARDED_ALLOW_IPS=not-an-ip → ProxyTrustConfigurationError   ✓
+```
+
+**Trusted-device IP** — existing 17 tests remain green (same effective IP).
+
+**SOC audit IP** — ``get_client_ip`` used in all 5 timeline call sites.
+
+**Rate-limit** — existing tests use ``_mock_get_client_ip`` via module-patch,
+which correctly controls the effective IP regardless of implementation.
+
+### PostgreSQL Matrix
+```
+tests/test_postgres_bootstrap              16 passed
+tests/test_postgres_auth                  15 passed
+tests/test_postgres_rbac                  25 passed
+tests/test_postgres_mfa_concurrency       8 passed
+─────────────────────────────────────────────────────────────────────────────
+PostgreSQL regression total             64 passed, 0 skipped, 0 failed
+```
+
+### Full Suite
+```
+collected:  383
+passed:     383
+failed:       0
+skipped:      0
+```
+
+### Files Changed
+
+| File | Change |
+|------|--------|
+| `app/client_ip.py` | **New** — ``get_client_ip()`` and ``validate_proxy_trust_config()`` |
+| `app/auth.py` | Removed local ``get_client_ip``; imports canonical from ``app.client_ip`` |
+| `app/devices.py` | Removed local ``get_client_ip`` and P1-D comment; imports canonical |
+| `app/alerts.py` | Removed ``_get_client_ip_from_request``; replaced with ``get_client_ip`` in all 5 call sites |
+| `app/main.py` | ``lifespan`` calls ``validate_proxy_trust_config()`` on startup |
+| `Dockerfile` | Added ``ENV FORWARDED_ALLOW_IPS=127.0.0.1``; documented proxy override |
+| `tests/test_client_ip.py` | **New** — 12 tests (6 config + 6 canonical-resolver tests) |
+| `docs/audit/05-trust-boundaries.md` | Section 3 (IP Trust Model) replaced with post-P1-D architecture |
+| `docs/audit/14-p1-remediation.md` | P1-D section appended; test counts updated to 383 |

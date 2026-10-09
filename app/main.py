@@ -5,6 +5,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app import db
+from app.client_ip import validate_proxy_trust_config
 from app.auth import router as auth_router
 from app.detection import router as detection_router, policy_router
 from app.internal_actions import router as internal_actions_router
@@ -16,6 +17,8 @@ from app.devices import router as devices_router
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Startup and shutdown events."""
+    # Reject FORWARDED_ALLOW_IPS="*" before accepting any connections.
+    validate_proxy_trust_config()
     database_url = os.getenv("DATABASE_URL", "postgresql://sentinel:sentinel@postgres:5432/sentinel")
     engine = db.get_engine(database_url)
     db.get_session_maker(engine)

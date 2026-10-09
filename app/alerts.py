@@ -12,6 +12,7 @@ Authorization matrix:
 """
 from datetime import datetime
 
+from app.client_ip import get_client_ip
 from app.time_utils import utc_now
 from typing import List, Optional
 from uuid import UUID, uuid4
@@ -210,16 +211,6 @@ def _uuid_to_str(value) -> Optional[str]:
         return None
     if hasattr(value, "hex"):
         return str(value)
-    return str(value)
-
-
-def _get_client_ip_from_request(request) -> Optional[str]:
-    """Extract client IP from the request for the audit trail."""
-    forwarded = request.headers.get("x-forwarded-for") if hasattr(request, "headers") else None
-    if forwarded:
-        return forwarded.split(",")[0].strip()
-    client = getattr(request, "client", None)
-    return getattr(client, "host", None)
 
 
 def _alert_to_dict(alert) -> dict:
@@ -483,7 +474,7 @@ async def acknowledge_alert(
             alert.notes = request.notes
 
     actor_id = get_authenticated_user_id(ctx)
-    client_ip = _get_client_ip_from_request(ctx.request) if ctx.request else None
+    client_ip = get_client_ip(ctx.request) if ctx.request else None
 
     _create_timeline_event(
         db=db,
@@ -546,7 +537,7 @@ async def resolve_alert(
             alert.notes = f"Resolution: {request.notes}"
 
     actor_id = get_authenticated_user_id(ctx)
-    client_ip = _get_client_ip_from_request(ctx.request) if ctx.request else None
+    client_ip = get_client_ip(ctx.request) if ctx.request else None
 
     _create_timeline_event(
         db=db,
@@ -621,7 +612,7 @@ async def assign_alert(
         else TimelineEventType.STATUS_CHANGED
     )
     actor_id = get_authenticated_user_id(ctx)
-    client_ip = _get_client_ip_from_request(ctx.request) if ctx.request else None
+    client_ip = get_client_ip(ctx.request) if ctx.request else None
 
     _create_timeline_event(
         db=db,
@@ -730,7 +721,7 @@ async def request_security_action(
         )
 
     actor_id = get_authenticated_user_id(ctx)
-    client_ip = _get_client_ip_from_request(ctx.request) if ctx.request else None
+    client_ip = get_client_ip(ctx.request) if ctx.request else None
 
     _create_timeline_event(
         db=db,
@@ -789,7 +780,7 @@ async def add_timeline_event(
         raise HTTPException(status_code=404, detail="Alert not found")
 
     actor_id = get_authenticated_user_id(ctx)
-    client_ip = _get_client_ip_from_request(ctx.request) if ctx.request else None
+    client_ip = get_client_ip(ctx.request) if ctx.request else None
 
     event = _create_timeline_event(
         db=db,

@@ -17,6 +17,7 @@ from datetime import datetime, timedelta
 from typing import Optional, List
 from uuid import UUID
 
+from app.client_ip import get_client_ip
 from app.time_utils import utc_now, as_utc
 
 from fastapi import APIRouter, HTTPException, Header, Depends, Request
@@ -37,12 +38,6 @@ router = APIRouter(prefix="/api/v1/devices", tags=["devices"])
 # then store a SHA-256 hash.  This is intentionally lightweight — no browser
 # canvas, WebGL, or audio fingerprinting.  It is sufficient to distinguish
 # a browser/OS combination without tracking individuals.
-#
-# NOTE: ``get_client_ip`` duplicates the logic from ``app.auth`` here so that
-# ``app/devices.py`` has no cross-module dependency.  The behaviour (trust
-# X-Forwarded-For unconditionally) is preserved as-is and is tracked for
-# P1-D remediation.  Do NOT harden this here.
-# =============================================================================
 
 def generate_device_fingerprint(request: Request) -> str:
     """Derive a deterministic device fingerprint from request headers.
@@ -61,18 +56,6 @@ def generate_device_fingerprint(request: Request) -> str:
 def hash_fingerprint(fingerprint: str) -> str:
     """Return the SHA-256 hex digest of ``fingerprint``."""
     return hashlib.sha256(fingerprint.encode()).hexdigest()
-
-
-def get_client_ip(request: Request) -> str:
-    """Extract the client IP from the request.
-
-    Preserves existing behaviour (trust X-Forwarded-For first value) for this
-    hotfix.  This function is scheduled for remediation under P1-D.
-    """
-    forwarded = request.headers.get("X-Forwarded-For")
-    if forwarded:
-        return forwarded.split(",")[0].strip()
-    return request.client.host if request.client else "unknown"
 
 
 # =============================================================================
