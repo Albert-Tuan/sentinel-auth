@@ -37,7 +37,7 @@ rectangle "Lớp ứng dụng - Xác thực và dịch vụ" {
   component "FastAPI\n28 điểm cuối" as API
   component "Xác thực\n(đối chiếu mật khẩu)" as Auth
   component "Quản lý MFA\n(TOTP, thiết bị tin cậy)" as Mfa
-  component "Quản lý phiên\n(JWT + làm mới)" as Sess
+  component "Quản lý phiên\n(opaque bearer token + refresh)" as Sess
   component "Phân quyền\n(RBAC theo vai trò)" as Rbac
   component "Nhật ký kiểm toán" as Audit
 }
@@ -93,9 +93,9 @@ API --> DetDb : đọc và cập nhật cảnh báo
 
 note right of Gate
   Điểm kiểm duyệt nằm trước khi cấp token.
-  Khi dịch vụ máy học không phản hồi
-  trong 500 ms thì quy trình chuyển sang
-  chỉ dùng điểm quy tắc và ghi nhật ký.
+  Pre-token HTTP timeout: 3s (fail open).
+  Detection → ML timeout: 5s (fail open).
+  Outbox/Redis: APPROVED DESIGN / IMPLEMENTATION PENDING.
 end note
 
 note bottom of DetDb

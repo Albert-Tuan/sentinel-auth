@@ -18,7 +18,7 @@ title Sơ đồ hoạt động - Điều tra cảnh báo SOC
 
 start
 :SOC Analyst đăng nhập\nbằng tài khoản có vai trò SOC_ANALYST;
-:Hệ thống kiểm tra JWT và vai trò;
+:Hệ thống kiểm tra opaque bearer token và vai trò;
 if (Vai trò hợp lệ?) then (không)
   :Trả 403 Forbidden;
   stop
@@ -80,10 +80,10 @@ partition "Kết luận" {
     #LightGreen :POST /alerts/{id}/resolve\n{ resolution };
     :UPDATE alerts\nstatus = 'resolved',\nresolved_by_id, resolved_at;
     :INSERT alert_timeline\n(event_type = 'resolved');
-  else (cần leo thang)
-    #FFEB99 :POST /alerts/{id}/escalate;
+  else (leo thang)
+    :PATCH /api/v1/alerts/{id}\n{status: "escalated", notes};
     :INSERT alert_timeline\n(event_type = 'escalated');
-    :Chuyển sang Security Manager\nphê duyệt;
+    :Ghi nhận escalated;\nSecurity Manager giám sát;\nFUTURE ENHANCEMENT: dedicated escalate endpoint;
   endif
 }
 

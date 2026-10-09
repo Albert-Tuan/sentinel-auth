@@ -86,15 +86,21 @@ legend right
 | WF-6: ML Inference (ml-service) |
 legend bottom
   **v3.3 Tech Stack:**
-  - FastAPI + PostgreSQL (3 schemas)
-  - 3 separate databases (core + detection + ml-service)
-  - HTTP communication between services
+  - FastAPI + PostgreSQL (1 server / 3 databases)
+    - sentinel_core, sentinel_detection, sentinel_ml
+  - HTTP communication between logical services
   - ML Service: stateless, model in memory
+  - Redis: FUTURE async event transport (not currently used for event delivery)
 
-  **2026-10-05 changes:**
-  - Risk gate SYNCHRONOUS trước khi cấp token (fail open)
-  - Detection gọi ngược /actions sau khi commit verdict
-  - Outbox pattern: THIẾT KẾ ĐÍCH, chưa hiện thực (màu xám)
+  **Current Prototype (2026-10-09):**
+  - One FastAPI process (monolith) — not three separate services
+  - One DATABASE_URL — not yet consuming three databases independently
+  - Opaque bearer tokens (not JWT)
+  - Outbox publisher: APPROVED DESIGN / IMPLEMENTATION PENDING
+
+  **Target v3.3 (dashed elements = not yet implemented):**
+  - Redis Streams as async event transport
+  - Outbox publisher → Redis → Detection consumer
 endlegend
 
 @enduml

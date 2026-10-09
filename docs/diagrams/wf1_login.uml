@@ -12,7 +12,7 @@ database "core-db\n(PostgreSQL)" as CDB #F5F5F5
 
 == Login Request ==
 
-U -> CA : **POST /api/v1/auth/login**\n(username, password;\nIP from X-Forwarded-For)
+U -> CA : **POST /api/v1/auth/login**\n(username, password;\neffective client IP from request.client.host)
 activate CA
 
 CA -> CDB : SELECT user WHERE username

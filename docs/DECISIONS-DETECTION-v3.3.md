@@ -385,7 +385,7 @@ Với ví dụ 3.4:
 Mọi endpoint dành cho giao tiếp **service-to-service** đều:
 - Có tiền tố `/api/v1/internal/`
 - Yêu cầu header `X-Internal-Secret`
-- Không dùng JWT (vì không có người dùng)
+- Không dùng JWT (vì ML Service không có người dùng con người — dùng `X-Internal-Secret` cho service-to-service)
 
 ### 5.2. Bảng đầy đủ
 
@@ -418,7 +418,7 @@ Mọi endpoint dành cho giao tiếp **service-to-service** đều:
 
 | Method | Đường dẫn | Mô tả |
 |--------|-----------|--------|
-| `POST` | `/api/v1/auth/login` | Đăng nhập (trả JWT) |
+| `POST` | `/api/v1/auth/login` | Đăng nhập (trả opaque bearer token) |
 | `GET`  | `/api/v1/alerts` | Danh sách cảnh báo (lọc + phân trang) |
 | `GET`  | `/api/v1/alerts/{id}` | Chi tiết cảnh báo |
 | `GET`  | `/api/v1/alerts/{id}/evidence` | Hồ sơ điều tra đầy đủ (UC-DE-11) |
@@ -443,7 +443,7 @@ Mọi endpoint dành cho giao tiếp **service-to-service** đều:
 | Mã | Khi nào |
 |-----|--------|
 | `400 Bad Request` | Sai định dạng, sai kiểu, vi phạm ràng buộc nghiệp vụ (VD: chuyển trạng thái không hợp lệ) |
-| `401 Unauthorized` | Thiếu/sai `X-Internal-Secret`, JWT không hợp lệ hoặc hết hạn |
+| `401 Unauthorized` | Thiếu/sai `X-Internal-Secret`, hoặc bearer token không hợp lệ hoặc hết hạn |
 | `403 Forbidden` | Đã xác thực nhưng không đủ quyền |
 | `404 Not Found` | Không tìm thấy tài nguyên |
 | `408 Request Timeout` | ML Service vượt quá 5 giây |

@@ -512,7 +512,7 @@ databases. These references **MUST** be validated at the application layer.
 │  USERS            │ Core authentication                 │
 │  USER_ROLES       │ Role assignments                   │
 │  ROLES            │ Role definitions                   │
-│  SESSIONS         │ JWT token management               │
+│  SESSIONS         │ Opaque token / session management     │
 │  IP_ADDRESSES     │ Normalized IP tracking              │
 │  MFA_TRANSACTIONS │ MFA challenge lifecycle            │
 │  MFA_NOTIFICATIONS│ OTP email/SMS tracking             │

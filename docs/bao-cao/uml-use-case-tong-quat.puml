@@ -44,15 +44,19 @@ rectangle "Sentinel Auth" {
   usecase "UC-15 Kết luận / Báo nhầm" as UC15
   usecase "UC-16 Chuyển cấp cảnh báo" as UC16
   usecase "UC-17 Xem dòng thời gian" as UC17
-  usecase "UC-18 Yêu cầu hành động bảo vệ" as UC18
+  usecase "UC-18 Thực hiện hành động\nbảo vệ" as UC18
   usecase "UC-19 Xem bảng điều khiển SOC" as UC19
 
   usecase "UC-20 Quản lý chính sách" as UC20
   usecase "UC-21 Quản lý tài khoản, vai trò" as UC21
   usecase "UC-22 Quản lý phiên người dùng khác" as UC22
   usecase "UC-23 Xem nhật ký kiểm toán" as UC23
-  usecase "UC-24 Phê duyệt leo thang" as UC24
   usecase "UC-25 Xuất báo cáo tổng hợp" as UC25
+}
+
+' FUTURE ENHANCEMENT package — not v3.3 scope
+package "FUTURE ENHANCEMENT (không thuộc v3.3)" {
+  usecase "UC-24 Phê duyệt leo thang" as UC24
 }
 
 ' --- Người dùng ---
@@ -82,10 +86,17 @@ Admin --> UC18
 
 ' --- Security Manager ---
 Manager --> UC19
-Manager --> UC24
 Manager --> UC25
+Manager --> UC20
 Manager --> UC12
 Manager --> UC23
+note right #DDD of Manager
+  Security Manager: oversight / governance
+  - UC-19: view dashboard
+  - UC-20 <<view only>>: view policies
+  - UC-25: view reports
+  - UC-18: supervisory capability (optional)
+end note
 
 ' --- System actors ---
 DE --> UC06

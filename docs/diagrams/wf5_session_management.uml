@@ -23,12 +23,12 @@ activate CDB
 CDB --> CA : user record
 deactivate CDB
 
-CA -> CDB : INSERT sessions\n(token_jti, access_token_hash,\nrefresh_token_hash, expires_at=+15min,\nrefresh_expires=+7d,\nip_address_id, user_agent)
+CA -> CDB : INSERT sessions\n(token_jti, access_token_hash,\nrefresh_token_hash, expires_at=NOW()+1h,\nip_address_id, user_agent)
 activate CDB
 deactivate CDB
 
-CA --> U : **200 OK**\n{access_token (15min),\nrefresh_token (7d),\nexpires_in: 900}
-deactivate CA
+    CA --> U : **200 OK**\n{access_token, refresh_token,\nexpires_in: 3600}
+    deactivate CA
 
 == Token Refresh ==
 
@@ -44,11 +44,11 @@ CA -> CA : Validate refresh_token\n(check expiry, signature)
 
 alt refresh_token VALID + not revoked
     CA -> CA : Generate new access_token\n(với token_jti rotation)
-    CA -> CDB : UPDATE sessions\n(token_jti=new, expires_at=NOW()+15min,\nlast_activity_at=NOW())
+    CA -> CDB : UPDATE sessions\n(token_jti=new, expires_at=NOW()+1h,\nlast_activity_at=NOW())
     activate CDB
     deactivate CDB
     
-    CA --> U : **200 OK**\n{access_token, expires_in: 900}
+    CA --> U : **200 OK**\n{access_token, expires_in: 3600}
     deactivate CA
 
 else refresh_token EXPIRED/REVOKED
@@ -130,7 +130,7 @@ end note
 U -> CA : **POST /api/v1/admin/sessions/{id}/revoke**\n(admin_token, reason)
 activate CA
 
-CA -> CA : Validate JWT, role=SECURITY_ADMIN
+CA -> CA : validate opaque bearer token → Session → User → Roles
 CA -> CDB : UPDATE sessions\n(revoked_at=NOW())\nWHERE id=target_session_id
 activate CDB
 deactivate CDB
@@ -152,19 +152,21 @@ end note
 U -> CA : Any API request\n(access_token in header)
 activate CA
 
-CA -> CA : Validate JWT
+CA -> CA : validate opaque bearer token
 CA -> CDB : UPDATE sessions\n(last_activity_at=NOW())\nWHERE token_jti=? (async)
 deactivate CA
 
 == Session Expiry Check ==
 
 note over U, CA
-  **JWT Validation Pipeline:**
-  1. Client gửi access_token
-  2. API check exp claim trong JWT
-  3. Nếu expired → 401
-  4. Client dùng refresh_token
-  5. Hoặc user phải login lại
+  **Opaque Token Validation Pipeline (v3.3):**
+  1. Client gửi access_token (Bearer)
+  2. API compute SHA-256 hash
+  3. Lookup session WHERE access_token_hash=? AND revoked_at IS NULL
+  4. Check expires_at > NOW()
+  5. If expired → 401, client dùng refresh_token
+  6. Hoặc user phải login lại
+  Note: P1-F concurrent refresh hardening — IMPLEMENTATION BACKLOG
 end note
 
 alt Token expired

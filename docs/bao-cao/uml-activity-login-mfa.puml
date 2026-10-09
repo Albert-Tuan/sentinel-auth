@@ -105,7 +105,8 @@ note right
   2. Khi cổng trả high hoặc critical:
      KHÔNG có dòng trong `sessions`
   3. Cổng lỗi: `sessions` vẫn được tạo (fail-open đúng thiết kế)
-  4. `sessions.token_jti` khớp `jti` nếu sau này chuyển sang JWT
+  4. `sessions.token_jti` là legacy/internal session token identifier (UUID).
+     Not a JWT claim. JWT is not the current design direction.
 end note
 
 stop

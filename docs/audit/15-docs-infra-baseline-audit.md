@@ -624,14 +624,22 @@ architecture decisions.
 - ✅ See `docs/audit/17-requirements-usecase-reconciliation.md` for full traceability
 - No changes to `app/`, `tests/`, `infra/postgres/`, `Dockerfile`, `docker-compose.yml`, UML files
 
-#### D4: UML / ERD Regeneration
+#### D4: UML / Workflow Reconciliation (✅ COMPLETE)
 
-**Files:** `docs/diagrams/*.uml`, `docs/diagrams/*.drawio`, `docs/bao-cao/uml-*.puml`
+**Files:** `docs/workflows.mmd`, `docs/diagrams/architecture.uml`, `docs/diagrams/wf1_login.uml`, `docs/diagrams/wf3_soc.uml`, `docs/diagrams/wf5_session_management.uml`, `docs/bao-cao/uml-architecture.puml`, `docs/bao-cao/uml-use-case-tong-quat.puml`, `docs/bao-cao/uml-activity-soc.puml`, `docs/bao-cao/uml-activity-login-mfa.puml`, `docs/diagrams/ERD_v3.3.md`
 
-- Update all JWT → opaque token references
-- Add "v3.3 DESIGN TARGET" annotation to architecture diagrams
-- Update `wf1_login.uml` IP trust model annotation
-- Do NOT regenerate `docs/bao-cao/ERD_*.puml` — these are accurate
+- ✅ JWT → opaque bearer token: corrected in 7 files (workflows.mmd, wf3_soc.uml, wf5_session_management.uml, uml-architecture.puml, uml-activity-soc.puml)
+- ✅ Session expiry corrected: 15min → 1h; 7d refresh → unlimited (P1-F backlog noted)
+- ✅ IP trust: X-Forwarded-For → request.client.host in wf1_login.uml
+- ✅ 500ms ML timeout → 3s/5s in uml-architecture.puml
+- ✅ Architecture: "3 schemas" → "1 server / 3 databases"; current/target distinction added
+- ✅ UC-18: "Yêu cầu hành động" → "Thực hiện hành động bảo vệ"
+- ✅ UC-24: "Phê duyệt leo thang" → FUTURE ENHANCEMENT package
+- ✅ Security Manager: removed approval association; added oversight note and view-only UC-20
+- ✅ ERD_v3.3.md: "JWT token management" → "Opaque token / session management"
+- ✅ No changes to `app/`, `tests/`, `infra/postgres/`, `Dockerfile`, `docker-compose.yml`, report generators, ERD.puml sources
+- ✅ See `docs/audit/18-uml-workflow-reconciliation.md` for full traceability and PlantUML validation
+- PNG/SVG rendering: PLANTUML_BINARY_NOT_AVAILABLE — all sources corrected, regeneration pending- Do NOT regenerate `docs/bao-cao/ERD_*.puml` — these are accurate
 - No changes to `app/`, `tests/`, `infra/postgres/`
 
 #### I1: Docker / Environment Infrastructure
@@ -701,12 +709,12 @@ The following were decided and are now authoritative:
 | ✅ | P1-B: SOC protective-action workflow | DECISIONS-SYSTEM-v3.3.md Section 9 | ✅ RESOLVED; D3 downstream reconciled |
 | ✅ | P1-C: Policy management roles | DECISIONS-SYSTEM-v3.3.md Section 10 | ✅ RESOLVED; D3 downstream reconciled |
 | ✅ | D3: Requirements/USC reconciliation | D3 pass | ✅ COMPLETE — see `17-requirements-usecase-reconciliation.md` |
+| ✅ | D4: UML/Workflow reconciliation | D4 pass | ✅ COMPLETE — see `18-uml-workflow-reconciliation.md` |
 
-### 🟡 HIGH — Remaining (D4 / R1 / Application phase)
+### 🟡 HIGH — Remaining (R1 / Application phase)
 
 | Priority | Issue | Blocks |
 |----------|-------|--------|
-| 🟡 HIGH | UML diagrams: JWT → opaque token | Report accuracy |
 | 🟡 HIGH | `schema-core-v3.3.sql` COMMENT says "JWT" | Report accuracy |
 | 🟡 HIGH | Application code stale comments (JWT, etc.) | Application phase |
 

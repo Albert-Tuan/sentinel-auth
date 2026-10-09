@@ -21,7 +21,7 @@ deactivate CA
 S -> DE : **GET /api/v1/alerts**\n?status=open&risk_level=high\n+ Bearer {access_token}
 activate DE
 
-DE -> DE : Validate JWT\n(role=SOC_ANALYST)
+DE -> DE : validate opaque bearer token → Session → User → Roles
 DE -> DDB : SELECT alerts\nWHERE status=? AND risk_level=?\nORDER BY created_at DESC
 activate DDB
 DDB --> DE : [alert1, alert2, ...]
@@ -59,7 +59,7 @@ alt Acknowledge Alert
     S -> DE : **PATCH /api/v1/alerts/{id}**\n{status: "acknowledged", notes: "..."}\n+ Bearer {access_token}
     activate DE
     
-    DE -> DE : Validate JWT, role=SOC_ANALYST
+    DE -> DE : validate opaque bearer token → Session → User → Roles
     DE -> CDB : (HTTP) **GET /api/v1/internal/users/{user_id}**\nđể validate SOC analyst
     activate CDB
     CDB --> DE : user record (role=SOC_ANALYST)
