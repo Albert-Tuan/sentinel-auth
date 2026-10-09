@@ -15,7 +15,7 @@ Detached conventions
 * Columns prefixed with a comment marked *cross-DB* reference a table that
   lives in another database and therefore cannot be a real ``ForeignKey``.
 """
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, List, Optional
 from uuid import uuid4
 
@@ -40,7 +40,7 @@ from app.db import Base
 
 
 def now_utc() -> datetime:
-    return datetime.utcnow()
+    return datetime.now(timezone.utc)
 
 
 #: Postgres-only column types, with a TEXT fallback so the same models can

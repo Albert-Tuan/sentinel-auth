@@ -308,7 +308,7 @@ Implemented the three helpers directly in `app/devices.py`:
 
 **Production code change:** `app/devices.py` only.
 
-**Test change:** New file `tests/test_devices.py` (15 tests) covering:
+**Test change:** New file `tests/test_devices.py` (17 tests) covering:
 - Trust device creation (creates row, returns id, DB row belongs to user)
 - Fingerprint population (SHA-256 hex digest stored)
 - Idempotent registration (same device → update, not duplicate)
@@ -318,7 +318,7 @@ Implemented the three helpers directly in `app/devices.py`:
 - DELETE /all (removes all user devices)
 - Ownership enforcement (user cannot delete another's device)
 - Fingerprint determinism (same headers → same fingerprint, different → different)
-- DELETE /all and DELETE /{id} route uniqueness
+- Route-table uniqueness: exactly one DELETE `/api/v1/devices/all` via `app.routes` inspection
 - Malformed device-id → 422 validation error
 
 ### Client-IP Debt
@@ -327,16 +327,123 @@ This is the same behaviour as the existing `app/auth.py` implementation and is
 tracked under **P1-D**. It was not modified as part of this hotfix.
 
 ### Test Counts
+
+#### Current environment (2026-10-09, PostgreSQL available)
 ```
-tests/test_devices.py              15 passed
+tests/test_devices.py              17 passed
 tests/test_postgres_bootstrap     16 passed
-tests/test_postgres_auth          13 passed
+tests/test_postgres_auth          15 passed  (+2 TIME-01 timezone regressions)
 tests/test_postgres_rbac          25 passed
 tests/test_postgres_mfa_concurrency  8 passed
-──────────────────────────────────────────────────
-PostgreSQL regression              62 passed, 0 skipped, 0 failed
+──────────────────────────────────────────────────────────────────────────────
+PostgreSQL regression              64 passed, 0 skipped, 0 failed
 
-Full suite                      361 passed, 0 skipped, 0 failed
+Full suite                      365 passed, 0 skipped, 0 failed
 ```
 
 All tests run with `INTERNAL_SECRET` unset from the shell — P1-A tests remain green.
+
+---
+
+## TIME-01 — Timezone-Aware Timestamp Remediation
+
+### Root Cause
+PostgreSQL server session timezone: `Asia/Ho_Chi_Minh` (+07).
+
+The application used `datetime.utcnow()` throughout, which returns a
+**timezone-naive** datetime.  PostgreSQL stores naive `TIMESTAMPTZ` values in its
+session timezone, so `2026-10-09 16:26` (naive UTC) was stored as
+`2026-10-09 16:26 +07`, which is `2026-10-09 09:26 UTC` — approximately **7 hours
+in the past**.
+
+Evidence from real PostgreSQL under `Asia/Ho_Chi_Minh`:
+
+```
+created MFA transaction:
+  created_at ≈ 09:26 +07   →  02:26 UTC  (not 09:26 UTC)
+  expires_at ≈ 09:31 +07  →  02:31 UTC  (not 09:31 UTC)
+  db_now ≈ 16:26 +07      →  09:26 UTC
+  remaining ≈ -6h55m       ← OTP appeared expired immediately
+```
+
+### Resolution
+Canonical UTC policy: `datetime.now(timezone.utc)` — always timezone-aware UTC.
+
+Created `app/time_utils.py` with two helpers:
+
+```python
+def utc_now() -> datetime:
+    return datetime.now(timezone.utc)
+
+def as_utc(value: datetime) -> datetime:
+    """Normalise naive SQLite or DB-returned values to aware UTC."""
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value
+```
+
+Replaced all `datetime.utcnow()` and `datetime.now(timezone.utc)` calls in:
+
+- `app/auth.py` — MFA transaction creation, login rate-limit, session creation,
+  refresh, revocation, `last_seen_at`, `assigned_at`
+- `app/authz.py` — session expiry filter
+- `app/devices.py` — `last_used_at`, `expires_at`, session expiry filter
+- `app/alerts.py` — `resolved_at`, `revoked_at`, `locked_at`
+- `app/models.py` — ORM `now_utc()` helper → `datetime.now(timezone.utc)`
+
+SQLAlchemy filter comparisons (e.g. `Session.expires_at > utc_now()`) are
+now binding timezone-aware UTC values to `TIMESTAMPTZ` columns, so the comparison
+is correct regardless of the PostgreSQL session timezone.
+
+### Before / After Evidence
+
+| Value | Before (naive UTC) | After (aware UTC) |
+|-------|-------------------|-------------------|
+| `now` in `login()` | `datetime.utcnow()` naive | `utc_now()` → aware UTC |
+| MFA `expires_at` | `now + 5 min` naive | `utc_now() + 5 min` aware UTC |
+| Stored in PG (+07) | `09:31 +07` → `02:31 UTC` | `14:31 +07` → `07:31 UTC` |
+| OTP validity | ~−6h55m (expired) | ~+4m55s (valid) |
+
+### Non-UTC PostgreSQL Regression Evidence
+Two new tests in `TestTimezoneSafeMfa` use a PostgreSQL engine configured with
+`timezone=Asia/Ho_Chi_Minh`:
+
+```
+test_mfa_not_expired_immediately_under_vietnam_timezone
+  → 200, status=completed, 1 session created  ✓
+
+test_mfa_otp_expiry_is_approximately_5_minutes_in_future
+  → stored UTC delta ≈ 5 min (4m < delta < 6m)  ✓
+```
+
+### P0-03 / P0-05 Semantics (re-verified under +07)
+All MFA tests pass with DB timezone `Asia/Ho_Chi_Minh`:
+
+```
+P0-03 same IPv4          → 200  ✓
+P0-03 different IPv4      → 403  ✓
+P0-03 equivalent IPv6     → 200  ✓
+P0-03 different IPv6     → 403  ✓
+P0-05 single correct OTP  → 200  ✓
+P0-05 sequential replay  → 409/401  ✓
+P0-05 concurrent correct → [200, 409]  ✓
+P0-05 concurrent wrong   → fail_count=3, status=failed, 0 sessions  ✓
+P0-05 correct-after-fail → rejected  ✓
+P0-05 expired            → rejected  ✓
+P0-05 independent txns  → both succeed  ✓
+```
+
+### Files Changed
+
+| File | Change |
+|------|--------|
+| `app/time_utils.py` | **New** — `utc_now()` and `as_utc()` helpers |
+| `app/auth.py` | All `datetime.utcnow()` / `datetime.now(timezone.utc)` → `utc_now()` |
+| `app/authz.py` | `datetime.utcnow()` → `utc_now()` |
+| `app/devices.py` | `datetime.utcnow()` → `utc_now()`; `as_utc()` in expiry check |
+| `app/alerts.py` | `datetime.utcnow()` → `utc_now()` |
+| `app/models.py` | `now_utc()` → `datetime.now(timezone.utc)` |
+| `tests/test_postgres_auth.py` | `TestTimezoneSafeMfa` — 2 new regression tests |
+| `tests/conftest.py` | `app` fixture for route-table inspection |
+| `tests/test_devices.py` | `test_only_one_delete_all_route` uses `app.routes` inspection |
+| `docs/audit/14-p1-remediation.md` | Updated test counts; TIME-01 section added |

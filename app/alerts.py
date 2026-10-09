@@ -11,6 +11,8 @@ Authorization matrix:
   - USER role gets 403 on all alert endpoints.
 """
 from datetime import datetime
+
+from app.time_utils import utc_now
 from typing import List, Optional
 from uuid import UUID, uuid4
 
@@ -535,7 +537,7 @@ async def resolve_alert(
     if analyst:
         alert.resolved_by_id = analyst.id
 
-    alert.resolved_at = datetime.utcnow()
+    alert.resolved_at = utc_now()
 
     if request.notes:
         if alert.notes:
@@ -686,7 +688,7 @@ async def request_security_action(
             .all()
         )
         for session in revoked:
-            session.revoked_at = datetime.utcnow()
+            session.revoked_at = utc_now()
         return len(revoked)
 
     if action == SecurityAction.REQUIRE_MFA:
@@ -708,7 +710,7 @@ async def request_security_action(
 
     elif action == SecurityAction.LOCK_USER:
         user.status = "locked"
-        user.locked_at = datetime.utcnow()
+        user.locked_at = utc_now()
         details = {
             "status": "locked",
             "sessions_revoked": _revoke_user_sessions(),

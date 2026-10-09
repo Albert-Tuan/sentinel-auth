@@ -7,8 +7,10 @@ import ipaddress
 import logging
 import os
 import secrets
-from datetime import datetime, timedelta, timezone
+from datetime import timedelta, timezone
 from typing import Optional
+
+from app.time_utils import utc_now
 from uuid import UUID, uuid4
 
 import httpx
@@ -88,7 +90,7 @@ def resolve_ip_address(db, client_ip: str) -> Optional[str]:
         db.add(row)
         db.flush()
     else:
-        row.last_seen_at = datetime.utcnow()
+        row.last_seen_at = utc_now()
     return row.id
 
 
@@ -184,7 +186,7 @@ async def register(request: UserRegisterRequest, db=Depends(get_db)) -> UserRegi
     ur = UserRole(
         user_id=user.id,
         role_id="USER",
-        assigned_at=datetime.utcnow(),
+        assigned_at=utc_now(),
     )
     db.add(ur)
 
@@ -286,7 +288,7 @@ async def login(
     request_id = uuid4()
 
     # 1. Rate limit check
-    now = datetime.utcnow()
+    now = utc_now()
     window_start = now - timedelta(minutes=1)
 
     rate = db.query(RateLimit).filter(
@@ -470,7 +472,7 @@ async def _create_session(
     Returns (LoginResponse, LoginAttempt) so caller can add audit events
     before the single commit.
     """
-    now = datetime.now(timezone.utc)
+    now = utc_now()
 
     # Generate tokens
     access_token = secrets.token_urlsafe(32)
@@ -537,7 +539,7 @@ async def mfa_verify(
     - status == 'expired'  → 401 (expired)
     """
     client_ip = get_client_ip(req)
-    now = datetime.now(timezone.utc)
+    now = utc_now()
 
     # ------------------------------------------------------------------
     # STEP 1: Lock the MFA transaction row with SELECT ... FOR UPDATE.
@@ -702,7 +704,7 @@ async def refresh_token(
     if not session:
         raise HTTPException(status_code=401, detail="Invalid refresh token")
 
-    if session.expires_at < datetime.utcnow():
+    if session.expires_at < utc_now():
         raise HTTPException(status_code=401, detail="Session expired")
 
     # Generate new access token
@@ -711,7 +713,7 @@ async def refresh_token(
 
     session.access_token_hash = hash_token(new_access_token)
     session.token_jti = new_jti
-    session.last_activity_at = datetime.utcnow()
+    session.last_activity_at = utc_now()
 
     # Optional: rotate refresh token (token rotation for security)
     new_refresh_token = secrets.token_urlsafe(32)
@@ -738,7 +740,7 @@ async def logout(
     - Post-logout: same token → 401 on protected endpoints
     """
     if ctx.session:
-        ctx.session.revoked_at = datetime.utcnow()
+        ctx.session.revoked_at = utc_now()
         db.commit()
 
     return LogoutResponse(status="ok")
@@ -761,7 +763,7 @@ async def list_sessions(
     sessions = db.query(Session).filter(
         Session.user_id == ctx.user.id,
         Session.revoked_at.is_(None),
-        Session.expires_at > datetime.utcnow(),
+        Session.expires_at > utc_now(),
     ).all()
 
     session_items = [
@@ -807,7 +809,7 @@ async def revoke_session(
     if target_session.user_id != ctx.user.id:
         raise HTTPException(status_code=403, detail="Cannot revoke session of another user")
 
-    target_session.revoked_at = datetime.utcnow()
+    target_session.revoked_at = utc_now()
     db.commit()
 
 

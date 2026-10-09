@@ -411,29 +411,39 @@ def test_generate_device_fingerprint_differs_with_different_headers():
 # Route-table sanity checks
 # =============================================================================
 
-def test_only_one_delete_all_route(client, db, user):
-    """There is exactly one DELETE /api/v1/devices/all route registered."""
+def test_only_one_delete_all_route(client, db, user, app):
+    """Exactly one DELETE /api/v1/devices/all route is registered."""
+    from fastapi.routing import APIRoute
+
+    matching = [
+        r
+        for r in app.routes
+        if isinstance(r, APIRoute)
+        and r.path == "/api/v1/devices/all"
+        and "DELETE" in r.methods
+    ]
+    assert len(matching) == 1, (
+        f"Expected 1 DELETE /api/v1/devices/all route, found {len(matching)}: "
+        f"[(r.path, r.methods) for r in matching]"
+    )
+
+    # Functional evidence: DELETE /all still works.
     token = _token_for_user(db, user)
     headers = {"Authorization": f"Bearer {token}"}
 
-    # DELETE /all must work (route is registered).
     create_resp = client.post("/api/v1/devices", json={}, headers=headers)
     assert create_resp.status_code == 200
 
     del_all_resp = client.delete("/api/v1/devices/all", headers=headers)
     assert del_all_resp.status_code == 204
 
-    # DELETE /{device_id} must work (different route is registered).
+    # DELETE /{device_id} must also still work (different route).
     create_resp2 = client.post("/api/v1/devices", json={}, headers=headers)
     assert create_resp2.status_code == 200
     device_id = create_resp2.json()["id"]
 
     del_resp = client.delete(f"/api/v1/devices/{device_id}", headers=headers)
     assert del_resp.status_code == 204
-
-    # If there were a duplicate /all route, FastAPI would have raised a
-    # FastAPIValidationError at startup (duplicate path).  The fact that the
-    # server starts and these calls succeed is the core assertion.
 
 
 def test_delete_device_malformed_id_returns_422(client, db, user):

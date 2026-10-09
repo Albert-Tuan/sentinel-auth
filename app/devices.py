@@ -17,6 +17,8 @@ from datetime import datetime, timedelta
 from typing import Optional, List
 from uuid import UUID
 
+from app.time_utils import utc_now, as_utc
+
 from fastapi import APIRouter, HTTPException, Header, Depends, Request
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session as DBSession
@@ -169,8 +171,8 @@ async def trust_device(
         # Update existing device
         existing.last_ip = client_ip
         existing.last_user_agent = user_agent
-        existing.last_used_at = datetime.utcnow()
-        existing.expires_at = datetime.utcnow() + timedelta(days=body.remember_for_days or 30)
+        existing.last_used_at = utc_now()
+        existing.expires_at = utc_now() + timedelta(days=body.remember_for_days or 30)
         if body.device_name:
             existing.device_name = body.device_name
 
@@ -186,7 +188,7 @@ async def trust_device(
     # Create new trusted device
     expires_at = None
     if body.remember_for_days:
-        expires_at = datetime.utcnow() + timedelta(days=body.remember_for_days)
+        expires_at = utc_now() + timedelta(days=body.remember_for_days)
 
     device = UserTrustedDevice(
         user_id=ctx.user.id,
@@ -194,7 +196,7 @@ async def trust_device(
         device_name=body.device_name,
         last_ip=client_ip,
         last_user_agent=user_agent,
-        last_used_at=datetime.utcnow(),
+        last_used_at=utc_now(),
         expires_at=expires_at,
     )
     db.add(device)
@@ -270,7 +272,7 @@ async def check_device_trusted(
         session = db.query(Session).filter(
             Session.access_token_hash == token_hash,
             Session.revoked_at.is_(None),
-            Session.expires_at > datetime.utcnow(),
+            Session.expires_at > utc_now(),
         ).first()
         if session:
             user = db.query(User).filter(User.id == session.user_id).first()
@@ -292,9 +294,9 @@ async def check_device_trusted(
     if not device:
         return {"trusted": False, "reason": "Device not registered"}
 
-    # Check expiry
-    now = datetime.utcnow()
-    if device.expires_at and device.expires_at < now:
+    # Check expiry — as_utc normalises naive SQLite-persisted values to aware UTC.
+    now = utc_now()
+    if device.expires_at and as_utc(device.expires_at) < now:
         return {"trusted": False, "reason": "Device expired"}
 
     # Update last used

@@ -12,7 +12,7 @@ from __future__ import annotations
 import hashlib
 import secrets
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from app.time_utils import utc_now
 from typing import TYPE_CHECKING, FrozenSet, Optional
 
 from fastapi import Depends, HTTPException, Request, status
@@ -96,7 +96,7 @@ async def get_current_auth_context(
     session: Optional[SessionModel] = db.query(SessionModel).filter(
         SessionModel.access_token_hash == token_hash,
         SessionModel.revoked_at.is_(None),
-        SessionModel.expires_at > datetime.utcnow(),
+        SessionModel.expires_at > utc_now(),
     ).first()
 
     if session is None:

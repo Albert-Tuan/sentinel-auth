@@ -63,6 +63,13 @@ def _override_get_db(session: OrmSession):
 
 
 @pytest.fixture()
+def app():
+    """The FastAPI application instance (for route-table inspection)."""
+    from app.main import app as fastapi_app
+    return fastapi_app
+
+
+@pytest.fixture()
 def client(db):
     """A TestClient whose ``get_db`` dependency returns the SQLite session."""
     from fastapi.testclient import TestClient
