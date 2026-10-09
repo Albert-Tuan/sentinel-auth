@@ -268,11 +268,12 @@ Services report `healthy` only after the start period elapses and all checks pas
 
 | Volume | Contents |
 |--------|---------|
-| `sentinel_postgres_data` | PostgreSQL data directory |
-| `sentinel_redis_data` | Redis AOF persistence |
+| `postgres_data` | PostgreSQL data directory |
+| `redis_data` | Redis AOF persistence |
 
-Both volumes are project-scoped with explicit names so they do not conflict
-with other Docker projects on the same host.
+Volumes are Compose-managed — each project gets its own named volume
+(`<project>_postgres_data`, `<project>_redis_data`). No explicit `name:` is set.
+Project isolation is automatic.
 
 ---
 
@@ -347,3 +348,31 @@ If ports 5432 or 6379 are in use:
 ```bash
 POSTGRES_PORT=5433 REDIS_PORT=6380 docker compose up -d
 ```
+
+### Bootstrap files not visible to PostgreSQL container
+
+If databases are not created on first start and logs show no init script output,
+the Docker bind mount may not be exposing files from the host filesystem.
+
+**Symptoms:**
+- Init script output absent from logs.
+- `sentinel_core`, `sentinel_detection`, `sentinel_ml` databases do not exist.
+- `/docker-entrypoint-initdb.d/` appears empty inside the container.
+
+**Cause:** Some host filesystems — notably those mounted under `/run/media` on
+Fedora/Linux — present directory structure to the Docker daemon without propagating
+regular-file visibility into containers. This is a host filesystem / Docker bind-mount
+visibility limitation. The infrastructure design and init script logic are correct.
+
+**Fix:** Run the repository from a **native Linux filesystem path**, for example:
+
+```bash
+~/Projects/sentinel-auth
+```
+
+From a native filesystem, all bind-mounted files are visible inside containers
+and initialization succeeds.
+
+**Do not** disable SELinux globally as a workaround. The issue is not an SELinux
+misconfiguration.
+
