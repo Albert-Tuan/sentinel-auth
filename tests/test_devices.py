@@ -28,7 +28,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app.main import app
-from app.models import Role, Session, User, UserRole, UserTrustedDevice
+from app.models import IpAddress, Role, Session, User, UserRole, UserTrustedDevice
 from app.authz import hash_token
 
 
@@ -61,6 +61,11 @@ def _token_for_user(db, user) -> str:
     # Use a unique raw token per user so token hashes are distinct.
     raw = f"trusted-device-test-token-{user.id}"
     token_hash = hash_token(raw)
+    ip = db.query(IpAddress).filter(IpAddress.ip_address == "testclient").first()
+    if ip is None:
+        ip = IpAddress(ip_address="testclient")
+        db.add(ip)
+        db.flush()
     sess = Session(
         user_id=user.id,
         access_token_hash=token_hash,
@@ -68,6 +73,7 @@ def _token_for_user(db, user) -> str:
         user_agent="test-agent",
         expires_at=datetime.utcnow() + timedelta(hours=1),
         last_activity_at=datetime.utcnow(),
+        ip_address_id=ip.id,
     )
     db.add(sess)
     db.commit()

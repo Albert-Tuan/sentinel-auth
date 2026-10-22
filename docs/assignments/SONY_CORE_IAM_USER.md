@@ -185,6 +185,9 @@ Refresh:
 | GET | `/api/v1/devices` | List trusted devices |
 | POST | `/api/v1/devices` | Add trusted device |
 | POST | `/api/v1/devices/check` | Check if device trusted |
+| POST | `/api/v1/devices/pending` | Request approval for a new device |
+| POST | `/api/v1/devices/pending/{request_id}/approve` | Approve a pending device from an existing session |
+| POST | `/api/v1/devices/pending/{request_id}/complete` | Complete the approved device login |
 | DELETE | `/api/v1/devices/{id}` | Remove trusted device |
 | DELETE | `/api/v1/devices/all` | Remove all trusted devices |
 
@@ -360,6 +363,17 @@ Outputs: device fingerprinting
          IP-based rate limiting on login
 Tests:   test_devices.py
 Acceptance: devices stored; rate limits enforced
+
+Trusted-device safety rule implemented in Core:
+- A device can be registered directly only from an active session whose source
+  IP matches the session's familiar IP.
+- A new device may create a short-lived pending request after proving the
+  password, but it cannot create a trusted row or session by itself. An already
+  signed-in session for the same user must approve the request from its
+  familiar IP; the new device must then complete from the original IP and
+  fingerprint.
+- `admin_mfa_required` and Detection-mandated MFA always take precedence over
+  trusted-device convenience. No trusted-device path bypasses either control.
 ```
 
 ### S7 — IAM-Side Security Admin

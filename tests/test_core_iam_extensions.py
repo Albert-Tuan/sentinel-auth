@@ -4,7 +4,16 @@ from argon2 import PasswordHasher
 from uuid import UUID
 
 from app import auth as auth_module
-from app.models import AuditLog, MfaNotification, MfaTransaction, Role, Session, User, UserRole
+from app.models import (
+    AuditLog,
+    MfaNotification,
+    MfaTransaction,
+    Role,
+    Session,
+    User,
+    UserRole,
+    UserTrustedDevice,
+)
 
 
 def _prepare_password(user):
@@ -239,3 +248,164 @@ def test_security_admin_can_list_assign_and_audit(client, db, user, monkeypatch)
 def test_non_admin_cannot_use_security_admin_endpoints(client, user):
     response = client.get("/api/v1/admin/users")
     assert response.status_code == 401
+
+
+def test_new_device_requires_existing_device_approval_before_session(
+    client, db, user, monkeypatch
+):
+    """A new device cannot self-trust; a familiar session must approve it."""
+    _prepare_password(user)
+    db.commit()
+
+    async def no_risk(*args):
+        return None
+
+    async def no_event(*args):
+        return True
+
+    monkeypatch.setattr(auth_module, "_pre_token_risk", no_risk)
+    monkeypatch.setattr(auth_module, "_send_login_event", no_event)
+
+    known_headers = {"User-Agent": "KnownBrowser/1.0"}
+    login = client.post(
+        "/api/v1/auth/login",
+        json={"username": user.username, "password": "password123"},
+        headers=known_headers,
+    )
+    assert login.status_code == 200, login.text
+    known_token = login.json()["access_token"]
+
+    new_headers = {"User-Agent": "NewBrowser/1.0"}
+    pending = client.post(
+        "/api/v1/devices/pending",
+        json={
+            "username": user.username,
+            "password": "password123",
+            "device_name": "New laptop",
+        },
+        headers=new_headers,
+    )
+    assert pending.status_code == 202, pending.text
+    request_id = pending.json()["request_id"]
+    assert db.query(UserTrustedDevice).count() == 0
+
+    approval = client.post(
+        f"/api/v1/devices/pending/{request_id}/approve",
+        headers={"Authorization": f"Bearer {known_token}", **known_headers},
+    )
+    assert approval.status_code == 200, approval.text
+    assert approval.json()["status"] == "approved"
+    assert db.query(UserTrustedDevice).count() == 1
+
+    complete = client.post(
+        f"/api/v1/devices/pending/{request_id}/complete",
+        headers=new_headers,
+    )
+    assert complete.status_code == 200, complete.text
+    assert complete.json()["access_token"]
+    transaction = db.query(MfaTransaction).filter(MfaTransaction.id == UUID(request_id)).one()
+    assert transaction.consumed_at is not None
+
+    replay = client.post(
+        f"/api/v1/devices/pending/{request_id}/complete",
+        headers=new_headers,
+    )
+    assert replay.status_code == 409
+
+
+def test_trusted_device_approval_rejects_unfamiliar_ip(client, db, user, monkeypatch):
+    _prepare_password(user)
+    db.commit()
+
+    async def no_risk(*args):
+        return None
+
+    async def no_event(*args):
+        return True
+
+    monkeypatch.setattr(auth_module, "_pre_token_risk", no_risk)
+    monkeypatch.setattr(auth_module, "_send_login_event", no_event)
+    login = client.post(
+        "/api/v1/auth/login",
+        json={"username": user.username, "password": "password123"},
+    )
+    assert login.status_code == 200
+    pending = client.post(
+        "/api/v1/devices/pending",
+        json={"username": user.username, "password": "password123"},
+        headers={"User-Agent": "NewBrowser/1.0"},
+    )
+    assert pending.status_code == 202
+
+    from app import devices as devices_module
+
+    monkeypatch.setattr(devices_module, "get_client_ip", lambda request: "203.0.113.99")
+    response = client.post(
+        f"/api/v1/devices/pending/{pending.json()['request_id']}/approve",
+        headers={"Authorization": f"Bearer {login.json()['access_token']}"},
+    )
+    assert response.status_code == 403
+    assert db.query(UserTrustedDevice).count() == 0
+
+
+def test_admin_mfa_wins_over_trusted_device_request(client, db, user, monkeypatch):
+    _prepare_password(user)
+    user.admin_mfa_required = True
+    db.commit()
+
+    async def no_risk(*args):
+        return None
+
+    monkeypatch.setattr(auth_module, "_pre_token_risk", no_risk)
+    response = client.post(
+        "/api/v1/devices/pending",
+        json={"username": user.username, "password": "password123"},
+    )
+    assert response.status_code == 409
+    assert db.query(UserTrustedDevice).count() == 0
+
+
+def test_existing_trusted_device_does_not_bypass_admin_mfa(client, db, user, monkeypatch):
+    _prepare_password(user)
+    db.commit()
+    delivered = {}
+
+    async def no_risk(*args):
+        return None
+
+    async def no_event(*args):
+        return True
+
+    async def capture_email(recipient, otp):
+        delivered["otp"] = otp
+
+    monkeypatch.setattr(auth_module, "_pre_token_risk", no_risk)
+    monkeypatch.setattr(auth_module, "_send_login_event", no_event)
+    monkeypatch.setattr(auth_module, "_send_otp_email", capture_email)
+
+    first = client.post(
+        "/api/v1/auth/login",
+        json={"username": user.username, "password": "password123"},
+        headers={"User-Agent": "KnownBrowser/1.0"},
+    )
+    assert first.status_code == 200
+    trusted = client.post(
+        "/api/v1/devices",
+        headers={
+            "Authorization": f"Bearer {first.json()['access_token']}",
+            "User-Agent": "KnownBrowser/1.0",
+        },
+        json={},
+    )
+    assert trusted.status_code == 200, trusted.text
+
+    user.admin_mfa_required = True
+    db.commit()
+    second = client.post(
+        "/api/v1/auth/login",
+        json={"username": user.username, "password": "password123"},
+        headers={"User-Agent": "KnownBrowser/1.0"},
+    )
+    assert second.status_code == 200
+    assert second.json()["mfa_required"] is True
+    assert delivered["otp"]

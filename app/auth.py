@@ -471,7 +471,7 @@ async def login(
         RateLimit.action == "login",
     ).with_for_update().first()
 
-    if rate and rate.window_start >= window_start and rate.count >= rate.max_count:
+    if rate and as_utc(rate.window_start) >= window_start and rate.count >= rate.max_count:
         # Record rate-limited login attempt
         la = _login_event(
             request_id=request_id,
@@ -486,7 +486,7 @@ async def login(
 
     # Update or create rate limit
     if rate:
-        if rate.window_start < window_start:
+        if as_utc(rate.window_start) < window_start:
             rate.window_start = now
             rate.count = 1
         else:
@@ -760,6 +760,12 @@ async def mfa_verify(
 
     if not mfa_txn:
         raise HTTPException(status_code=404, detail="Transaction not found")
+
+    if mfa_txn.mfa_type == "trusted_device":
+        raise HTTPException(
+            status_code=409,
+            detail="Trusted-device approvals must be completed by the approving device",
+        )
 
     # ------------------------------------------------------------------
     # STEP 2: Inspect state after acquiring the lock.
