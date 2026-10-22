@@ -294,16 +294,16 @@ Tests:   test_auth.py, test_risk_gate.py
 Acceptance: login works, pre-token check integrated
 ```
 
-### S2b — Login Event Delivery to Detection  [IMPLEMENTATION PENDING]
+### S2b — Login Event Delivery to Detection  [IMPLEMENTED]
 
 ```
 Inputs:  Detection receiver endpoint (already implemented by Tuấn Anh)
 Outputs: Core producer: POST /api/v1/internal/login-events after each login attempt
-         Retry behavior (implementation decision)
+         Retry behavior (one retry for transport/5xx failures)
 Actions: Inspect detection.py receive_login_event endpoint first
-         Implement httpx producer in auth.py after login_attempt is committed
+         Implement httpx producer in auth.py after the Core auth transaction commits
          Coordinate with Tuấn Anh on contract tests
-         NOTE: Detection receiver is implemented; Core producer is NOT YET IMPLEMENTED
+         NOTE: Detection receiver and Core producer are implemented; Redis/outbox flow is out of scope
 Tests:   Core↔Detection contract tests (joint with Tuấn Anh)
 Acceptance: Detection receives login events from Core; idempotency via event_id works
 ```
@@ -311,8 +311,8 @@ Acceptance: Detection receives login events from Core; idempotency via event_id 
 **Evidence from source:**
 - Detection receiver: `app/detection.py:779` (`receive_login_event`)
 - Detection tests: `tests/test_detection.py:365-379`
-- Core producer: **NOT FOUND** in `app/auth.py` — no httpx call to `/login-events`
-- Login events are written to `sentinel_core.login_attempts` only; not sent to Detection
+- Core producer: `app/auth.py` sends `/api/v1/internal/login-events` after Core commits
+- Core does not persist Detection's `login_attempts`; Detection owns that table
 
 
 ### S3 — Pre-Token Detection Integration

@@ -7,6 +7,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from app import db
 from app.client_ip import validate_proxy_trust_config
 from app.auth import router as auth_router
+from app.iam import router as iam_router
 from app.detection import router as detection_router, policy_router
 from app.internal_actions import router as internal_actions_router
 from app.ml import router as ml_router
@@ -40,6 +41,7 @@ app.add_middleware(
 )
 
 app.include_router(auth_router)
+app.include_router(iam_router)
 app.include_router(detection_router)
 app.include_router(policy_router)
 app.include_router(internal_actions_router)

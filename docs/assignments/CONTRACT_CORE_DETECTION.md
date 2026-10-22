@@ -133,11 +133,11 @@ POST /api/v1/internal/login-events
 |--------|---------|--------|
 | Transport | **Direct HTTP** (Detection receiver only) | Core transaction + outbox → future publisher → Redis Stream → Detection consumer |
 | Detection receiver | **Implemented** (`POST /api/v1/internal/login-events`) | — |
-| Core producer | **NOT YET IMPLEMENTED** | — |
-| Retry behavior | **NOT YET IMPLEMENTED** | — |
+| Core producer | **Implemented in `app/auth.py`** (direct HTTP after the Core transaction commits) | — |
+| Retry behavior | **Implemented** (one immediate retry for transport/5xx failures; 3-second per-attempt timeout) | — |
 | Outbox publisher | IMPLEMENTATION PENDING | |
 | Redis Streams | IMPLEMENTATION PENDING | |
-| Status | Active | Not yet implemented |
+| Status | Active | Redis/outbox flow remains intentionally out of scope |
 
 **Important:** The async Redis flow is **NOT currently implemented**. Do not claim it is.
 

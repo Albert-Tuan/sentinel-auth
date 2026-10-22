@@ -415,11 +415,17 @@ def test_only_one_delete_all_route(client, db, user, app):
     """Exactly one DELETE /api/v1/devices/all route is registered."""
     from fastapi.routing import APIRoute
 
+    def iter_routes(routes):
+        for route in routes:
+            if isinstance(route, APIRoute):
+                yield route
+            elif hasattr(route, "original_router"):
+                yield from iter_routes(route.original_router.routes)
+
     matching = [
         r
-        for r in app.routes
-        if isinstance(r, APIRoute)
-        and r.path == "/api/v1/devices/all"
+        for r in iter_routes(app.routes)
+        if r.path == "/api/v1/devices/all"
         and "DELETE" in r.methods
     ]
     assert len(matching) == 1, (

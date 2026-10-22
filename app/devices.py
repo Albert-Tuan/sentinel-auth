@@ -7,7 +7,7 @@ Per Bảng Yêu Cầu Chức Năng Nghiệp Vụ v2:
 - U-QĐ-05: Quy định thiết bị tin cậy
 
 Features:
-    - Register device as trusted (skip MFA)
+    - Register device as trusted (metadata only; required MFA is not bypassed)
 - List trusted devices
 - Remove trusted device
 - Auto-expire based on TTL
@@ -241,7 +241,8 @@ async def check_device_trusted(
 ) -> dict:
     """
     Check if current device is trusted.
-    Used by auth flow to skip MFA for trusted devices.
+    Available for device-management UI. Core login does not use this result to
+    bypass persistent Admin MFA or a Detection-mandated MFA challenge.
 
     Contract: no token → trusted=false (optional/public authentication).
     If token is provided, validates it canonically; invalid token → trusted=false.

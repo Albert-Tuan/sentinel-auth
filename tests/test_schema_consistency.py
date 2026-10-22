@@ -169,9 +169,17 @@ def test_login_event_outcome_values_match_the_sql_check():
 
 def test_every_internal_path_in_the_spec_is_implemented():
     from app.main import app
+    from fastapi.routing import APIRoute
+
+    def iter_routes(routes):
+        for route in routes:
+            if isinstance(route, APIRoute):
+                yield route
+            elif hasattr(route, "original_router"):
+                yield from iter_routes(route.original_router.routes)
 
     implemented = {
-        r.path for r in app.routes if hasattr(r, "path") and "/internal/" in r.path
+        r.path for r in iter_routes(app.routes) if "/internal/" in r.path
     }
     # normalise the {id} placeholders before comparing
     normalised = {p.split("/")[-1].split("{")[0] and p for p in implemented}
