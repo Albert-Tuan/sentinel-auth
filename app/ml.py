@@ -110,14 +110,20 @@ REASON_CODES = (
 class IsolationForestRuntime:
     """Validated sklearn bundle: estimator + fitted score scaler."""
 
-    def __init__(self, model, score_scaler, features: list[str], version: str):
+    def __init__(
+        self, model, score_scaler, features: list[str], version: str,
+        model_version_id: Optional[UUID] = None,
+    ):
         self.model = model
         self.score_scaler = score_scaler
         self.features = features
         self.version = version
+        self.model_version_id = model_version_id
 
     @classmethod
-    def load(cls, path: Path) -> "IsolationForestRuntime":
+    def load(
+        cls, path: Path, model_version_id: Optional[UUID] = None,
+    ) -> "IsolationForestRuntime":
         bundle = joblib.load(path)
         if not isinstance(bundle, dict) or set(("model", "score_scaler", "features", "version")) - set(bundle):
             raise ValueError("invalid ML artifact bundle")
@@ -127,7 +133,10 @@ class IsolationForestRuntime:
             raise ValueError("artifact estimator lacks IsolationForest inference methods")
         if not hasattr(bundle["score_scaler"], "transform"):
             raise ValueError("artifact score scaler is not fitted")
-        return cls(bundle["model"], bundle["score_scaler"], bundle["features"], str(bundle["version"]))
+        return cls(
+            bundle["model"], bundle["score_scaler"], bundle["features"],
+            str(bundle["version"]), model_version_id,
+        )
 
     def normalize(self, oriented_scores: np.ndarray) -> np.ndarray:
         normalized = self.score_scaler.transform(np.asarray(oriented_scores).reshape(-1, 1)).ravel()
@@ -151,7 +160,7 @@ def reset_runtime() -> None:
     _runtime_path = None
 
 
-def resolve_model_path(db: Session) -> Path:
+def resolve_model_source(db: Session) -> tuple[Path, Optional[UUID]]:
     registered = (
         db.query(ModelVersion)
         .filter(ModelVersion.status == "active", ModelVersion.is_production.is_(True))
@@ -160,15 +169,21 @@ def resolve_model_path(db: Session) -> Path:
     path = registered.model_path if registered else os.getenv("ML_MODEL_PATH")
     if not path:
         raise FileNotFoundError("no active ML artifact is configured")
-    return Path(path)
+    return Path(path), registered.id if registered else None
+
+
+def resolve_model_path(db: Session) -> Path:
+    return resolve_model_source(db)[0]
 
 
 def get_ml_runtime(db: Session) -> IsolationForestRuntime:
     global _runtime, _runtime_path
-    path = resolve_model_path(db)
+    path, model_version_id = resolve_model_source(db)
     if _runtime is None or _runtime_path != path:
-        _runtime = IsolationForestRuntime.load(path)
+        _runtime = IsolationForestRuntime.load(path, model_version_id)
         _runtime_path = path
+    else:
+        _runtime.model_version_id = model_version_id
     return _runtime
 
 
@@ -262,6 +277,7 @@ async def score(
     reasons = reason_codes(payload.features)
     db.add(InferenceLog(
         request_id=payload.request_id,
+        model_version_id=runtime.model_version_id,
         model_version_used=runtime.version,
         features=payload.features.model_dump(),
         raw_score=raw_score,

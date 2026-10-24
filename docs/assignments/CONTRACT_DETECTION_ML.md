@@ -92,7 +92,7 @@ POST /api/v1/internal/ml/score
 | `normalized_anomaly_score` | float | **[0, 1]** | Normalized anomaly score |
 | `is_anomaly` | boolean | true/false | Whether score indicates anomaly |
 | `model_version` | string | — | Version of model used |
-| `reason_codes` | array[string] | — | Codes indicating why anomaly detected |
+| `reason_codes` | array[string] | — | Conservative evidence codes derived from canonical input features after inference |
 | `model_status` | string | `ready` \| `degraded` \| `error` | Current model health |
 
 ### `model_status` Semantics
@@ -164,7 +164,8 @@ deviation_score
 
 ### Reason Code Rules
 
-- ML generates `reason_codes` from Isolation Forest anomaly factors
+- ML derives conservative evidence codes from documented canonical-feature thresholds after inference
+- `reason_codes` are neither IsolationForest feature attribution nor causal explanations of the model
 - `reason_codes` is an array (can be empty, can have multiple)
 - Detection consumes `reason_codes` for alert evidence
 - **Both owners must approve** any change to reason code semantics

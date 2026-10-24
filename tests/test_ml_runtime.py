@@ -1,4 +1,5 @@
 """Canonical ML contract and real-artifact inference tests."""
+import json
 from datetime import datetime, timezone
 from uuid import UUID, uuid4
 from functools import partial
@@ -78,6 +79,26 @@ def payload(features=None):
     return {"request_id": str(uuid4()), "features": features or FEATURES}
 
 
+class ImmediateRequest:
+    def __init__(self, body):
+        self._body = json.dumps(body).encode()
+
+    async def body(self):
+        return self._body
+
+
+def complete_without_event_loop(coroutine):
+    with pytest.raises(StopIteration) as completed:
+        coroutine.send(None)
+    return completed.value.value
+
+
+def score_without_event_loop(db, request):
+    return complete_without_event_loop(
+        ml.score(ImmediateRequest(request), SECRET_HEADER["X-Internal-Secret"], db)
+    )
+
+
 def test_score_requires_internal_secret(client):
     assert client.post("/api/v1/internal/ml/score", json=payload()).status_code == 401
 
@@ -115,19 +136,76 @@ def test_valid_request_runs_real_artifact_and_logs(client, db):
 
     log = db.query(InferenceLog).filter_by(request_id=UUID(request["request_id"])).one()
     assert log.features == FEATURES
+    assert log.model_version_id is None
     assert log.model_version_used == "test-isolation-forest"
     assert log.model_status == "ready"
     assert log.processing_time_ms >= 0
 
 
-def test_registry_model_path_overrides_environment(db, artifact, monkeypatch):
-    monkeypatch.delenv("ML_MODEL_PATH", raising=False)
-    db.add(ModelVersion(
+def test_environment_path_inference_log_has_no_registry_id(db, artifact, monkeypatch):
+    monkeypatch.setenv("ML_MODEL_PATH", str(artifact))
+    ml.reset_runtime()
+    request = payload()
+
+    response = score_without_event_loop(db, request)
+
+    assert response.model_version == "test-isolation-forest"
+    log = db.query(InferenceLog).filter_by(request_id=UUID(request["request_id"])).one()
+    assert log.model_version_id is None
+    assert log.model_version_used == "test-isolation-forest"
+
+
+def test_registry_model_path_overrides_environment(db, artifact, tmp_path, monkeypatch):
+    monkeypatch.setenv("ML_MODEL_PATH", str(tmp_path / "fallback.joblib"))
+    registered = ModelVersion(
         name="test", version="test-isolation-forest", model_path=str(artifact),
         status="active", is_production=True, config={},
-    ))
+    )
+    db.add(registered)
     db.commit()
     assert ml.resolve_model_path(db) == artifact
+    assert ml.get_ml_runtime(db).model_version_id == registered.id
+
+
+def test_registered_inference_log_references_registry_row(db, artifact, monkeypatch):
+    monkeypatch.delenv("ML_MODEL_PATH", raising=False)
+    registered = ModelVersion(
+        name="test", version="registry-entry", model_path=str(artifact),
+        status="active", is_production=True, config={},
+    )
+    db.add(registered)
+    db.commit()
+    ml.reset_runtime()
+
+    request = payload()
+    response = score_without_event_loop(db, request)
+
+    assert response.model_version == "test-isolation-forest"
+    log = db.query(InferenceLog).filter_by(request_id=UUID(request["request_id"])).one()
+    assert log.model_version_id == registered.id
+    assert log.model_version_used == "test-isolation-forest"
+
+
+def test_cached_runtime_refreshes_registry_id_for_same_path(db, artifact, monkeypatch):
+    monkeypatch.setenv("ML_MODEL_PATH", str(artifact))
+    ml.reset_runtime()
+    runtime = ml.get_ml_runtime(db)
+    assert runtime.model_version_id is None
+
+    registered = ModelVersion(
+        name="test", version="registry-entry", model_path=str(artifact),
+        status="active", is_production=True, config={},
+    )
+    db.add(registered)
+    db.commit()
+
+    assert ml.get_ml_runtime(db) is runtime
+    assert runtime.model_version_id == registered.id
+
+    registered.status = "archived"
+    db.commit()
+    assert ml.get_ml_runtime(db) is runtime
+    assert runtime.model_version_id is None
 
 
 def test_missing_or_corrupt_artifact_fails_safely(db, tmp_path, monkeypatch):
@@ -136,16 +214,11 @@ def test_missing_or_corrupt_artifact_fails_safely(db, tmp_path, monkeypatch):
             path.write_text("not a joblib artifact", encoding="utf-8")
         monkeypatch.setenv("ML_MODEL_PATH", str(path))
         ml.reset_runtime()
-        app = FastAPI()
-        app.include_router(ml.router)
-        app.dependency_overrides[ml.get_db] = lambda: db
-        test_client = ApiClient(app)
-        assert test_client.get("/api/v1/internal/ml/health").json()["model_status"] == "error"
+        assert complete_without_event_loop(ml.ml_health(db))["model_status"] == "error"
         request = payload()
-        response = test_client.post(
-            "/api/v1/internal/ml/score", json=request, headers=SECRET_HEADER,
-        )
-        assert response.status_code == 503
+        with pytest.raises(ml.HTTPException) as exc:
+            score_without_event_loop(db, request)
+        assert exc.value.status_code == 503
         log = db.query(InferenceLog).filter_by(request_id=UUID(request["request_id"])).one()
         assert log.model_status == "error"
         assert log.error_message
