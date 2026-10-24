@@ -22,6 +22,12 @@ coverage.xml
 .mypy_cache/
 .ruff_cache/
 .ipynb_checkpoints/
+.superpowers/
+
+# Local/experimental ML artifacts
+*.joblib
+*.pkl
+benchmark_metrics.csv
 
 # Secrets / local config
 .env
