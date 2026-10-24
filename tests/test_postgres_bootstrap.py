@@ -209,8 +209,8 @@ class TestSchemaBootstrap:
         assert row is not None, "Seed policy v1.0 not found"
         assert row[1] is True, f"Seed policy should be active, got is_active={row[1]}"
 
-    def test_seed_model_is_production_active(self, db: Connection):
-        """The seeded model is marked is_production=TRUE and status='active'."""
+    def test_seed_model_is_nonproduction_placeholder(self, db: Connection):
+        """Unmeasured seed metadata must never claim production readiness."""
         row = db.execute(
             text(
                 "SELECT version, is_production, status FROM model_versions "
@@ -218,8 +218,8 @@ class TestSchemaBootstrap:
             )
         ).fetchone()
         assert row is not None, "Seed model v1.0-isolation-forest not found"
-        assert row[1] is True, f"Seed model should be is_production=TRUE, got {row[1]}"
-        assert row[2] == "active", f"Seed model should be status='active', got {row[2]}"
+        assert row[1] is False, f"Seed model should be nonproduction, got {row[1]}"
+        assert row[2] == "staged", f"Seed model should be staged, got {row[2]}"
 
 
 class TestIndexes:
