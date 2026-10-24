@@ -49,12 +49,12 @@ POST /api/v1/internal/ml/score
 
 | Field | Type | Range | Description |
 |-------|------|--------|-------------|
-| `hour_of_day` | integer | 0–23 | Hour of day in local time |
-| `fail_count_24h` | integer | ≥ 0 | Failed login attempts in last 24 hours |
-| `ip_change_rate_7d` | float | 0–1 | Rate of new IPs in last 7 days |
-| `new_device` | boolean | true/false | Device fingerprint not seen before |
-| `average_login_interval_seconds` | integer | ≥ 0 | Average seconds between logins |
-| `deviation_score` | float | 0–1 | Behavioral deviation from baseline |
+| `hour_of_day` | integer | 0–23 | UTC hour of the current event (`PROJECT_DEFINED_CONTRACT_CLARIFICATION`) |
+| `fail_count_24h` | integer | ≥ 0 | Failed attempts for the same user in prior `[t-24h, t)` |
+| `ip_change_rate_7d` | float | 0–1 | `1 - current_ip_count / prior_login_count` over prior `[t-7d, t)`; zero without history (`PROJECT_DEFINED_RBA_ADAPTATION`) |
+| `new_device` | boolean | true/false | Exact User-Agent proxy absent from prior `[t-30d, t)`; false when current User-Agent is missing (`PROJECT_DEFINED_UA_PROXY`) |
+| `average_login_interval_seconds` | integer | ≥ 0 | Mean of up to 9 gaps from 10 prior timestamps; zero with insufficient history (`KEEP_PROJECT_DEFINED`) |
+| `deviation_score` | float | 0–1 | Relative current-gap deviation from that historical mean, clamped to `[0,1]`; zero with insufficient history (`KEEP_PROJECT_DEFINED`) |
 
 ### Validation Rules
 
