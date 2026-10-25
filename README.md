@@ -1,16 +1,23 @@
 # Sentinel Auth — ML Service
+```bash
+“Thu đi để lại lá vàng,
+em đi để lại muôn vàn nhớ thương.
+Model đi để lại log đường,
+request lưu dấu, vô thường cũng tra.”
+```
 
-## Scope
+## Phạm Vi — Cương Giới
 
-Khang phụ trách ML inference, vòng đời mô hình và analytics phía ML trên nhánh `ml-service`. Detection Engine vẫn sở hữu việc dựng đặc trưng và hợp nhất điểm rủi ro; mô hình hiện tại chỉ là kết quả thực nghiệm, chưa được phát hành production.
+**KhangCute** phụ trách **ML inference, vòng đời mô hình và analytics phía ML** trên nhánh `ml-service`. Detection Engine vẫn nắm quyền dựng đặc trưng và hợp nhất điểm rủi ro; mô hình hiện tại chỉ là **thực nghiệm chi vật**, chưa nhập Production điện.
 
-## Architecture
+## Kiến Trúc — Lôi Trận
 
 `Core/Auth → Detection → build_features() → POST /api/v1/internal/ml/score → ML Service → sentinel_ml`
 
-Detection gọi ML với thời hạn 5 giây rồi tự quyết định điểm rủi ro cuối. Khi ML lỗi hoặc quá hạn, hệ thống suy giảm an toàn về chấm điểm thuần rule.
+Detection triệu ML trong thời hạn **5 giây**, sau đó tự định điểm rủi ro cuối. Nếu ML lỗi hoặc quá hạn, hệ thống **thoái thủ an toàn** về chấm điểm thuần rule.
 
-## Canonical six features
+
+## Lục Đại Đặc Trưng — Canonical Six Features
 
 - `hour_of_day`: giờ UTC của lần đăng nhập hiện tại, từ 0 đến 23.
 - `fail_count_24h`: số lần thất bại của cùng người dùng trong 24 giờ trước sự kiện hiện tại.
@@ -19,17 +26,17 @@ Detection gọi ML với thời hạn 5 giây rồi tự quyết định điểm
 - `average_login_interval_seconds`: khoảng cách trung bình giữa tối đa 10 lần đăng nhập lịch sử gần nhất.
 - `deviation_score`: độ lệch đã chuẩn hóa của khoảng cách hiện tại so với khoảng cách lịch sử trung bình.
 
-Các truy vấn lịch sử chỉ xét sự kiện có `timestamp < timestamp` của lần đăng nhập đang chấm điểm.
+Mọi truy vấn lịch sử chỉ xét sự kiện có `timestamp < timestamp` của lần đăng nhập đang chấm điểm — **hậu sự bất khả nghịch tiền nhân**.
 
-## ML API
+## ML API — Lôi Môn
 
 - `POST /api/v1/internal/ml/score`
 - `GET /api/v1/internal/ml/health`
 - `GET /api/v1/internal/ml/features`
 
-Implementation nằm tại `app/ml.py`; caller là `app/detection.py::call_ml_service()`. URL lấy từ `ML_SERVICE_URL` (mặc định `http://localhost:8002`), timeout 5 giây và xác thực nội bộ bằng header `X-Internal-Secret`. Không ghi secret vào tài liệu được theo dõi bởi Git.
+Implementation đặt tại `app/ml.py`; caller là `app/detection.py::call_ml_service()`. URL lấy từ `ML_SERVICE_URL` (mặc định `http://localhost:8002`), timeout 5 giây và xác thực nội bộ bằng header `X-Internal-Secret`. **Mật lệnh bất khả lưu nhập Git.**
 
-## Database
+## Database — Huyền Khố
 
 ML Service dùng database `sentinel_ml`:
 
@@ -42,14 +49,16 @@ ML Service dùng database `sentinel_ml`:
 - `local_ml_stats`: view tổng hợp số liệu suy luận cục bộ.
 - hạ tầng local: `docker-compose.yml`
 
-## Training / Research
+> *“Kiếm có danh, chiêu có phổ; mỗi lần xuất thủ đều phải lưu dấu.”*
+
+## Luyện Mô Hình — Training / Research
 
 - Notebook: `research/kaggle/sentinel_rba_isolation_forest.ipynb`
 - Kaggle: `lebaokhang/sentinel-auth-train`
-- Benchmark 10 triệu dòng đã hoàn tất.
-- Isolation Forest hiện là baseline thực nghiệm; artifact giữ `is_production=false` và không được promote.
+- Benchmark **10 triệu dòng** đã hoàn tất.
+- Isolation Forest hiện là baseline thực nghiệm; artifact giữ `is_production=false` và **không được phong vương Production**.
 
-## Tests
+## Thí Luyện — Tests
 
 ```powershell
 pytest tests/test_ml.py -q
@@ -58,9 +67,9 @@ pytest tests/test_ml_runtime.py -q
 pytest -q
 ```
 
-Các test PostgreSQL cần database/driver và biến môi trường tương ứng; thiếu các điều kiện này là environment blocker. Baseline hiện còn lỗi ngoài phạm vi ML tại `app/auth.py` do thiếu `datetime`; không sửa Core trong nhánh này.
+Các test PostgreSQL cần database/driver và biến môi trường tương ứng; thiếu các điều kiện này là **environment blocker**. Baseline hiện còn lỗi ngoài phạm vi ML tại `app/auth.py` do thiếu `datetime`; nhánh này **bất can thiệp Core**.
 
-## Repository map
+## Bản Đồ Tàng Kinh — Repository Map
 
 ```text
 app/                  dịch vụ và tích hợp runtime
@@ -74,10 +83,17 @@ docker-compose.yml    hạ tầng local
 
 Tài liệu nội bộ, báo cáo làm việc và ảnh nghiệm thu cục bộ nằm trong `docs/ml/`, được loại khỏi Git bằng `.git/info/exclude`.
 
-## Current status
+## Hiện Trạng — Chiến Tuyến
 
-- Feature parity đã được sửa; runtime và model registry đã được triển khai.
-- Benchmark 10M cho thấy Isolation Forest có tín hiệu ATO yếu/không ổn định; chưa đạt acceptance gate để tích hợp production.
+- Feature parity đã được hiệu chỉnh; runtime và model registry đã được triển khai.
+- Benchmark 10M cho thấy Isolation Forest có tín hiệu ATO yếu/không ổn định; **chưa vượt acceptance gate** để nhập Production.
 - Không promote artifact, không tuning thêm và không thay đổi Detection trước khi có quyết định của owner.
 - PR hiện vẫn chờ human review.
 - `dev` là baseline chỉ đọc; mọi công việc ML thực hiện tại `sentinel-auth-ml-service-worktree`.
+
+```bash
+Lấy thực chứng làm cương.
+Lấy nhân quả làm giới.
+Lấy reproducibility làm kiếm.
+Lấy sự thật của số liệu định thiên hạ.
+```
