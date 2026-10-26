@@ -164,10 +164,14 @@ CREATE TABLE IF NOT EXISTS mfa_transactions (
     id                  UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     user_id             UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     mfa_type            TEXT NOT NULL DEFAULT 'one_time'
-                           CHECK (mfa_type IN ('one_time', 'persistent')),
+                           CHECK (mfa_type IN ('one_time', 'persistent', 'trusted_device')),
     status              TEXT NOT NULL DEFAULT 'pending'
                            CHECK (status IN ('pending', 'completed', 'expired', 'failed')),
     bound_ip            INET,
+    trusted_device_fingerprint TEXT,
+    trusted_device_name TEXT,
+    trusted_device_user_agent TEXT,
+    consumed_at         TIMESTAMPTZ,
     notification_id     UUID,
     fail_count          INTEGER NOT NULL DEFAULT 0,
     expires_at          TIMESTAMPTZ NOT NULL,

@@ -185,6 +185,9 @@ Refresh:
 | GET | `/api/v1/devices` | List trusted devices |
 | POST | `/api/v1/devices` | Add trusted device |
 | POST | `/api/v1/devices/check` | Check if device trusted |
+| POST | `/api/v1/devices/pending` | Request approval for a new device |
+| POST | `/api/v1/devices/pending/{request_id}/approve` | Approve a pending device from an existing session |
+| POST | `/api/v1/devices/pending/{request_id}/complete` | Complete the approved device login |
 | DELETE | `/api/v1/devices/{id}` | Remove trusted device |
 | DELETE | `/api/v1/devices/all` | Remove all trusted devices |
 
@@ -294,16 +297,16 @@ Tests:   test_auth.py, test_risk_gate.py
 Acceptance: login works, pre-token check integrated
 ```
 
-### S2b — Login Event Delivery to Detection  [IMPLEMENTATION PENDING]
+### S2b — Login Event Delivery to Detection  [IMPLEMENTED]
 
 ```
 Inputs:  Detection receiver endpoint (already implemented by Tuấn Anh)
 Outputs: Core producer: POST /api/v1/internal/login-events after each login attempt
-         Retry behavior (implementation decision)
+         Retry behavior (one retry for transport/5xx failures)
 Actions: Inspect detection.py receive_login_event endpoint first
-         Implement httpx producer in auth.py after login_attempt is committed
+         Implement httpx producer in auth.py after the Core auth transaction commits
          Coordinate with Tuấn Anh on contract tests
-         NOTE: Detection receiver is implemented; Core producer is NOT YET IMPLEMENTED
+         NOTE: Detection receiver and Core producer are implemented; Redis/outbox flow is out of scope
 Tests:   Core↔Detection contract tests (joint with Tuấn Anh)
 Acceptance: Detection receives login events from Core; idempotency via event_id works
 ```
@@ -311,8 +314,8 @@ Acceptance: Detection receives login events from Core; idempotency via event_id 
 **Evidence from source:**
 - Detection receiver: `app/detection.py:779` (`receive_login_event`)
 - Detection tests: `tests/test_detection.py:365-379`
-- Core producer: **NOT FOUND** in `app/auth.py` — no httpx call to `/login-events`
-- Login events are written to `sentinel_core.login_attempts` only; not sent to Detection
+- Core producer: `app/auth.py` sends `/api/v1/internal/login-events` after Core commits
+- Core does not persist Detection's `login_attempts`; Detection owns that table
 
 
 ### S3 — Pre-Token Detection Integration
@@ -360,6 +363,17 @@ Outputs: device fingerprinting
          IP-based rate limiting on login
 Tests:   test_devices.py
 Acceptance: devices stored; rate limits enforced
+
+Trusted-device safety rule implemented in Core:
+- A device can be registered directly only from an active session whose source
+  IP matches the session's familiar IP.
+- A new device may create a short-lived pending request after proving the
+  password, but it cannot create a trusted row or session by itself. An already
+  signed-in session for the same user must approve the request from its
+  familiar IP; the new device must then complete from the original IP and
+  fingerprint.
+- `admin_mfa_required` and Detection-mandated MFA always take precedence over
+  trusted-device convenience. No trusted-device path bypasses either control.
 ```
 
 ### S7 — IAM-Side Security Admin

@@ -24,7 +24,7 @@ from sqlalchemy.orm import Session as OrmSession
 
 from app.db import get_db
 from app.internal_auth import verify_internal_secret
-from app.models import Role, Session, User, UserRole
+from app.models import AuditLog, Role, Session, User, UserRole
 from app.schemas import ActionRequest, ActionResponse
 
 logger = logging.getLogger(__name__)
@@ -98,6 +98,38 @@ async def apply_action(
             detail="Target user not found",
         )
 
+    # Detection may retry a request after a timeout.  The idempotency key is
+    # persisted in Core's audit log so a retry cannot execute the action twice,
+    # even when the original action is no longer visibly active (for example,
+    # REVOKE_SESSIONS after the first revocation).
+    idempotency_reason = f"idempotency:{payload.idempotency_key}" if payload.idempotency_key else None
+    if idempotency_reason:
+        previous = (
+            db.query(AuditLog)
+            .filter(
+                AuditLog.action == f"protective_action:{payload.action.value}",
+                AuditLog.resource == "user",
+                AuditLog.resource_id == user.id,
+                AuditLog.change_reason == idempotency_reason,
+            )
+            .order_by(AuditLog.created_at.desc())
+            .first()
+        )
+        if previous is not None:
+            details = dict(previous.after_state or {})
+            details["idempotency_key"] = payload.idempotency_key
+            details["deduplicated"] = True
+            return ActionResponse(
+                status="already_applied",
+                action=payload.action,
+                target_user_id=user.id,
+                details=details,
+            )
+
+    before_state = {
+        "status": user.status,
+        "detection_mfa_once": bool(user.detection_mfa_once),
+    }
     details = {"reason": payload.reason}
     if payload.alert_id is not None:
         details["alert_id"] = str(payload.alert_id)
@@ -145,6 +177,21 @@ async def apply_action(
         details["sessions_revoked"] = _revoke_active_sessions()
         already_applied = details["sessions_revoked"] == 0
 
+    details["idempotency_key"] = payload.idempotency_key
+    _audit = AuditLog(
+        actor_type="system",
+        action=f"protective_action:{action}",
+        resource="user",
+        resource_id=user.id,
+        before_state=before_state,
+        after_state={
+            "status": user.status,
+            "detection_mfa_once": bool(user.detection_mfa_once),
+            **details,
+        },
+        change_reason=idempotency_reason or payload.reason,
+    )
+    db.add(_audit)
     db.commit()
 
     return ActionResponse(

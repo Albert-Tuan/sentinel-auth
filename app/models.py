@@ -215,7 +215,10 @@ class MfaTransaction(Base):
     """MFA challenge transactions (pending login before session creation)."""
     __tablename__ = "mfa_transactions"
     __table_args__ = (
-        CheckConstraint("mfa_type IN ('one_time', 'persistent')", name="chk_mfa_transactions_type"),
+        CheckConstraint(
+            "mfa_type IN ('one_time', 'persistent', 'trusted_device')",
+            name="chk_mfa_transactions_type",
+        ),
         CheckConstraint(
             "status IN ('pending', 'completed', 'expired', 'failed')",
             name="chk_mfa_transactions_status",
@@ -231,6 +234,14 @@ class MfaTransaction(Base):
     mfa_type: Mapped[str] = Column(Text, nullable=False, default="one_time")
     status: Mapped[str] = Column(Text, nullable=False, default="pending")
     bound_ip: Mapped[Optional[str]] = Column(inet_type(), nullable=True)
+    # Trusted-device approval requests reuse the Core MFA transaction
+    # lifecycle.  Keeping the request state here avoids introducing a
+    # fourteenth Core table while still giving approval/consumption durable,
+    # row-locked semantics.
+    trusted_device_fingerprint: Mapped[Optional[str]] = Column(Text, nullable=True)
+    trusted_device_name: Mapped[Optional[str]] = Column(Text, nullable=True)
+    trusted_device_user_agent: Mapped[Optional[str]] = Column(Text, nullable=True)
+    consumed_at: Mapped[Optional[datetime]] = Column(DateTime(timezone=True), nullable=True)
     # The SQL adds this FK via ALTER TABLE (fk_mfa_transaction_notification);
     # declared here so the ORM can resolve the circular relationship.
     notification_id: Mapped[Optional[str]] = Column(

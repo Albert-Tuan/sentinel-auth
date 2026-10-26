@@ -256,10 +256,31 @@ sequenceDiagram
     end
 
     opt Trust Device
-        U->>CA: POST /mfa/trust-device {fingerprint}
-        CA->>CDB: INSERT user_trusted_devices
+        U->>CA: POST /api/v1/devices {device_name}
+        CA->>CA: Require active session + familiar source IP
+        CA->>CDB: UPSERT user_trusted_devices
+        CA->>CDB: INSERT audit_logs
         CA-->>U: 200 {trusted: true, expires_at: +30d}
     end
+
+    opt New device needs owner approval
+        U->>CA: POST /api/v1/devices/pending {username,password,device_name}
+        CA->>CA: Verify password + pre-token risk
+        CA->>CDB: INSERT mfa_transactions(type=trusted_device,status=pending)
+        CA-->>U: 202 {request_id, status=pending}
+        Note over U: Existing signed-in device reviews the request
+        U->>CA: POST /api/v1/devices/pending/{request_id}/approve
+        CA->>CA: Require same user's active session + familiar IP
+        CA->>CDB: UPSERT user_trusted_devices
+        CA->>CDB: UPDATE mfa_transactions(status=completed)
+        U->>CA: POST /api/v1/devices/pending/{request_id}/complete
+        CA->>CA: Require original IP + fingerprint; re-run pre-token check
+        CA->>CDB: INSERT sessions
+        CA-->>U: 200 {access_token,refresh_token}
+    end
+
+    Note over CA: admin_mfa_required and Detection high/critical always require Email OTP;
+    Note over CA: trusted-device approval never bypasses either control.
 ```
 
 ---
