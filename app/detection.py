@@ -314,8 +314,9 @@ def evaluate_rules(
 def build_features(db, attempt: LoginAttempt) -> Dict[str, Any]:
     """Derive the 6 features a rule may reference from the login history."""
     now = attempt.timestamp or datetime.now(timezone.utc)
+    utc_now = now.astimezone(timezone.utc) if now.tzinfo is not None else now
     features: Dict[str, Any] = {
-        "hour_of_day": now.hour,
+        "hour_of_day": utc_now.hour,
         "fail_count_24h": 0,
         "ip_change_rate_7d": 0.0,
         "new_device": False,
@@ -335,25 +336,26 @@ def build_features(db, attempt: LoginAttempt) -> Dict[str, Any]:
         .filter(
             LoginAttempt.user_id == attempt.user_id,
             LoginAttempt.timestamp >= day_ago,
+            LoginAttempt.timestamp < now,
             LoginAttempt.outcome == "failure",
         )
         .count()
     )
     features["fail_count_24h"] = failures
 
-    # IP change rate over 7 days: distinct IPs / total logins
+    # Current-IP novelty over prior 7-day history (PROJECT_DEFINED_RBA_ADAPTATION)
     week_attempts = (
         db.query(LoginAttempt)
         .filter(
             LoginAttempt.user_id == attempt.user_id,
             LoginAttempt.timestamp >= week_ago,
+            LoginAttempt.timestamp < now,
         )
         .all()
     )
-    if week_attempts:
-        known_ips = {a.ip_address for a in week_attempts if a.ip_address}
-        total = len(known_ips) + 1  # +1 for the IP of the current attempt
-        features["ip_change_rate_7d"] = min(1.0, len(known_ips) / total)
+    if week_attempts and attempt.ip_address:
+        current_ip_count = sum(a.ip_address == attempt.ip_address for a in week_attempts)
+        features["ip_change_rate_7d"] = 1.0 - current_ip_count / len(week_attempts)
 
     # New device: unknown user agent in the last 30 days
     if attempt.user_agent:
@@ -364,6 +366,7 @@ def build_features(db, attempt: LoginAttempt) -> Dict[str, Any]:
             .filter(
                 LoginAttempt.user_id == attempt.user_id,
                 LoginAttempt.timestamp >= month_ago,
+                LoginAttempt.timestamp < now,
                 LoginAttempt.user_agent.isnot(None),
             )
             .distinct()

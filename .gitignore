@@ -22,6 +22,16 @@ coverage.xml
 .mypy_cache/
 .ruff_cache/
 .ipynb_checkpoints/
+.superpowers/
+
+# Local/experimental ML artifacts
+*.joblib
+*.pkl
+benchmark_metrics.csv
+
+# Private ML review material
+docs/ml/BaoCao_ML_SentinelAuth_Khang.docx
+docs/ml/INTERNAL_TEST_KEYS.txt
 
 # Secrets / local config
 .env

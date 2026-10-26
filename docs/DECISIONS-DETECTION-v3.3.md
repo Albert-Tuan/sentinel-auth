@@ -109,7 +109,7 @@ Quy tắc lưu trong `policies.rules` (JSONB), mỗi phần tử có **7 trườ
         "weight": 0.30,
         "score": 0.80,
         "enabled": true,
-        "description": "Login outside 07:00-22:59 local time"
+        "description": "Login outside 07:00-22:59 UTC"
     },
     {
         "name": "multiple_failures",
@@ -129,7 +129,7 @@ Quy tắc lưu trong `policies.rules` (JSONB), mỗi phần tử có **7 trườ
         "weight": 0.20,
         "score": 0.50,
         "enabled": true,
-        "description": "Login from a device not seen before"
+        "description": "Login from a User-Agent proxy not seen in the prior 30 days"
     },
     {
         "name": "high_deviation",
