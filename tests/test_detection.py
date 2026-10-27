@@ -495,22 +495,29 @@ def test_action_outbound_returns_false_when_secret_not_configured(monkeypatch):
     ``get_internal_secret`` to raise so the HTTP call is never reached.
     """
     from app import detection as det_mod
+    from app import internal_client
     from app.internal_auth import InternalAuthConfigurationError
 
-    # Patch get_internal_secret on the module so the function sees it.
+    # Patch get_internal_secret on the module that performs the call so the
+    # function sees it.  The outbound HTTP call lives in
+    # ``app.internal_client`` (the shared Detection -> Core boundary), so
+    # that is where the secret is read.
     monkeypatch.setattr(
-        det_mod, "get_internal_secret",
+        internal_client, "get_internal_secret",
         lambda: (_ for _ in ()).throw(
             InternalAuthConfigurationError("INTERNAL_SECRET is not set")
         ),
     )
 
     # Fake attempt with all attributes the function accesses before the secret check.
+    from datetime import datetime, timezone
+
     class _FakeAttempt:
         id = uuid4()
         user_id = uuid4()
         username_attempted = "alice"
         detection_decision = "REQUIRE_MFA"
+        timestamp = datetime.now(timezone.utc)
 
     result = None
 

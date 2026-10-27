@@ -28,8 +28,9 @@ from fastapi import APIRouter, Depends, Header, HTTPException, status as http_st
 from pydantic import BaseModel
 from sqlalchemy.orm import Session as OrmSession
 
-from app.db import get_db
+from app.db import get_detection_db
 from app.internal_auth import get_internal_secret, InternalAuthConfigurationError, verify_internal_secret
+from app import internal_client
 from app.models import Alert, DetectionLog, LoginAttempt, Policy, RiskAssessment
 from app.schemas import (
     ActionRequest,
@@ -59,7 +60,9 @@ ML_TIMEOUT_SECONDS = 5.0
 
 #: Callback into Core App to enforce a protective action. Kept short: the
 #: scoring endpoint must not be held open waiting on an auth service.
-ACTION_ENFORCE_TIMEOUT_SECONDS = 3.0
+#: The constant itself lives in :mod:`app.internal_client`, which owns the
+#: shared Core action boundary.
+ACTION_ENFORCE_TIMEOUT_SECONDS = internal_client.ACTION_ENFORCE_TIMEOUT_SECONDS
 
 #: Risk level -> (decision, action label, create_alert)
 DECISION_MATRIX = {
@@ -78,11 +81,11 @@ def ml_service_url() -> str:
 def core_app_url() -> str:
     """Base URL of the Core App, without trailing slash.
 
-    The Detection Engine calls back into Core App to enforce protective
-    actions; the address is not hardcoded so tests and deployments can
-    point it elsewhere.
+    Re-exported from :mod:`app.internal_client` so existing importers of
+    ``app.detection.core_app_url`` keep working while the implementation
+    lives in one place.
     """
-    return os.getenv("CORE_APP_URL", "http://localhost:8000").rstrip("/")
+    return internal_client.core_app_url()
 
 
 #: Risk level -> protective action to enforce in Core App.
@@ -311,8 +314,28 @@ def evaluate_rules(
 # Feature building (UC-DE-02)
 # =============================================================================
 
+#: How long a device signal stays "known" for the same user.  The 30-day
+#: window is the canonical device-history window of the project (it matches
+#: the trusted-device TTL) and is documented in
+#: docs/DECISIONS-DETECTION-v3.3.md.
+DEVICE_HISTORY_WINDOW_DAYS = 30
+
+#: Values of ``device_signal_source``.  This is Detection-side LOGGING
+#: metadata only - it is NOT one of the 6 ML features and must never enter
+#: the ML feature vector.
+DEVICE_SIGNAL_FINGERPRINT = "fingerprint"
+DEVICE_SIGNAL_USER_AGENT_PROXY = "user_agent_proxy"
+DEVICE_SIGNAL_UNAVAILABLE = "unavailable"
+
+
 def build_features(db, attempt: LoginAttempt) -> Dict[str, Any]:
-    """Derive the 6 features a rule may reference from the login history."""
+    """Derive the 6 features a rule may reference from the login history.
+
+    The returned dictionary contains EXACTLY the 6 canonical ML features, in
+    the canonical order.  Device-signal provenance is reported separately by
+    :func:`device_signal_source` so that it can be logged without polluting
+    the ML feature vector.
+    """
     now = attempt.timestamp or datetime.now(timezone.utc)
     utc_now = now.astimezone(timezone.utc) if now.tzinfo is not None else now
     features: Dict[str, Any] = {
@@ -355,24 +378,12 @@ def build_features(db, attempt: LoginAttempt) -> Dict[str, Any]:
     )
     if week_attempts and attempt.ip_address:
         current_ip_count = sum(a.ip_address == attempt.ip_address for a in week_attempts)
-        features["ip_change_rate_7d"] = 1.0 - current_ip_count / len(week_attempts)
+        features["ip_change_rate_7d"] = min(
+            1.0, max(0.0, 1.0 - current_ip_count / len(week_attempts))
+        )
 
-    # New device: unknown user agent in the last 30 days
-    if attempt.user_agent:
-        month_ago = now - timedelta(days=30)
-        known_agents = {
-            row[0]
-            for row in db.query(LoginAttempt.user_agent)
-            .filter(
-                LoginAttempt.user_id == attempt.user_id,
-                LoginAttempt.timestamp >= month_ago,
-                LoginAttempt.timestamp < now,
-                LoginAttempt.user_agent.isnot(None),
-            )
-            .distinct()
-            .all()
-        }
-        features["new_device"] = attempt.user_agent not in known_agents
+    # New device: fingerprint-first, User-Agent proxy as fallback.
+    features["new_device"] = _compute_new_device(db, attempt, now)
 
     # Average interval between consecutive logins
     recent = (
@@ -401,6 +412,75 @@ def build_features(db, attempt: LoginAttempt) -> Dict[str, Any]:
             )
 
     return features
+
+
+def _compute_new_device(db, attempt: LoginAttempt, now: datetime) -> bool:
+    """Decide device novelty for one attempt (fingerprint-first).
+
+    Resolution order:
+
+    1. No user -> not a new device (there is no device history to compare).
+    2. A device fingerprint is present -> the fingerprint is compared against
+       the user's prior fingerprints in the device-history window.  The
+       attempt is a new device when that fingerprint was never seen before.
+    3. No fingerprint but a User-Agent is present -> the exact User-Agent is
+       used as a PROXY for the device identity.
+    4. Neither -> the signal is unavailable and the attempt is not new.
+
+    In every case the history window is ``[now - 30 days, now)`` and the
+    current event is excluded from the history.
+    """
+    if not attempt.user_id:
+        return False
+
+    window_start = now - timedelta(days=DEVICE_HISTORY_WINDOW_DAYS)
+
+    if attempt.device_fingerprint:
+        known_fingerprints = {
+            row[0]
+            for row in db.query(LoginAttempt.device_fingerprint)
+            .filter(
+                LoginAttempt.user_id == attempt.user_id,
+                LoginAttempt.timestamp >= window_start,
+                LoginAttempt.timestamp < now,
+                LoginAttempt.device_fingerprint.isnot(None),
+            )
+            .distinct()
+            .all()
+        }
+        return attempt.device_fingerprint not in known_fingerprints
+
+    if attempt.user_agent:
+        known_agents = {
+            row[0]
+            for row in db.query(LoginAttempt.user_agent)
+            .filter(
+                LoginAttempt.user_id == attempt.user_id,
+                LoginAttempt.timestamp >= window_start,
+                LoginAttempt.timestamp < now,
+                LoginAttempt.user_agent.isnot(None),
+            )
+            .distinct()
+            .all()
+        }
+        return attempt.user_agent not in known_agents
+
+    return False
+
+
+def device_signal_source(attempt: LoginAttempt) -> str:
+    """Report which device signal produced ``new_device``.
+
+    This is Detection-side contextual evidence for logging.  It is NOT an ML
+    feature and is never part of the 6-feature vector sent to the ML Service.
+    """
+    if not attempt.user_id:
+        return DEVICE_SIGNAL_UNAVAILABLE
+    if attempt.device_fingerprint:
+        return DEVICE_SIGNAL_FINGERPRINT
+    if attempt.user_agent:
+        return DEVICE_SIGNAL_USER_AGENT_PROXY
+    return DEVICE_SIGNAL_UNAVAILABLE
 
 
 # =============================================================================
@@ -524,6 +604,9 @@ async def process_attempt(db, attempt: LoginAttempt, request_id: UUID) -> Detect
         log("scoring", stage_detail="policy_config", reason="invalid_thresholds", details={"problem": problem})
 
     features = build_features(db, attempt)
+    # Detection-side logging metadata.  NOT part of the 6-feature ML vector:
+    # it only records which device signal produced ``new_device``.
+    signal_source = device_signal_source(attempt)
 
     # Step 1 - rules
     rule_score, hits, rule_problems = evaluate_rules(policy.rules, features)
@@ -553,7 +636,11 @@ async def process_attempt(db, attempt: LoginAttempt, request_id: UUID) -> Detect
         "ml_call",
         stage_detail="ml_inference" if ml.status == "success" else (ml.error or "ml_failed"),
         reason=ml.error,
-        details={"ml_status": ml.status, "features_used": features},
+        details={
+            "ml_status": ml.status,
+            "features_used": features,
+            "device_signal_source": signal_source,
+        },
     )
 
     # Step 3 - combine
@@ -667,59 +754,34 @@ async def enforce_action_in_core(
     the scoring endpoint, and a Core App outage must not lose the alert
     that was already persisted. The failure is logged for the reconciliation
     job to pick up.
+
+    The HTTP call itself lives in :mod:`app.internal_client`, which is
+    shared with the SOC alert workflow so both Detection entry points use
+    exactly one implementation of the Core action boundary.
     """
     action = RISK_ACTION_MAP.get(risk_level)
     if action is None or attempt.user_id is None:
         return False
 
-    payload: dict = {
-        "action": action,
-        "target_user_id": str(attempt.user_id),
-        "reason": (
-            f"detection risk_level={risk_level} "
-            f"decision={attempt.detection_decision} attempt={attempt.id}"
-        ),
-        # Idempotency key ties the action to this exact login attempt, so a
-        # redelivery after a timeout is a no-op rather than a second revoke.
-        "idempotency_key": f"detection:{attempt.id}:{action}",
-    }
-    if alert_id is not None:
-        payload["alert_id"] = str(alert_id)
-    if risk_level in ("high", "critical"):
-        payload["severity"] = risk_level
+    # Idempotency key ties the action to this exact login attempt, so a
+    # redelivery after a timeout is a no-op rather than a second revoke.
+    idempotency_key = f"detection:{attempt.id}:{action}"
+    reason = (
+        f"detection risk_level={risk_level} "
+        f"decision={attempt.detection_decision} attempt={attempt.id}"
+    )
+    severity = risk_level if risk_level in ("high", "critical") else None
 
-    try:
-        headers = {"X-Internal-Secret": get_internal_secret()}
-    except InternalAuthConfigurationError:
-        logger.warning(
-            "internal secret not configured, action %s not enforced for attempt %s",
-            action, attempt.id,
-        )
-        return False
-
-    try:
-        async with httpx.AsyncClient(timeout=ACTION_ENFORCE_TIMEOUT_SECONDS) as client:
-            response = await client.post(
-                f"{core_app_url()}/api/v1/internal/actions",
-                json=payload,
-                headers=headers,
-            )
-    except httpx.HTTPError as exc:
-        logger.warning(
-            "core-app unreachable, action %s not enforced for attempt %s: %s",
-            action, attempt.id, exc.__class__.__name__,
-        )
-        return False
-
-    if response.status_code >= 400:
-        logger.warning(
-            "core-app rejected action %s for attempt %s: HTTP %s",
-            action, attempt.id, response.status_code,
-        )
-        return False
-
-    logger.info("enforced %s in core-app for attempt %s", action, attempt.id)
-    return True
+    response = await internal_client.enforce_action_in_core(
+        action,
+        attempt.user_id,
+        reason,
+        idempotency_key=idempotency_key,
+        alert_id=alert_id,
+        severity=severity,
+        detected_at=attempt.timestamp,
+    )
+    return response is not None
 
 
 async def rescore_failed_attempts(db, limit: int = 50) -> int:
@@ -783,7 +845,7 @@ class InternalHealthResponse(BaseModel):
 async def receive_login_event(
     payload: LoginEventRequest,
     x_internal_secret: Optional[str] = Header(None),
-    db=Depends(get_db),
+    db=Depends(get_detection_db),
 ) -> LoginEventResponse:
     """UC-DE-01 - accept a login event from core-app and score it.
 
@@ -814,6 +876,7 @@ async def receive_login_event(
         mfa_used=payload.mfa_used,
         ip_address=payload.ip_address,
         user_agent=payload.user_agent,
+        device_fingerprint=payload.device_fingerprint,
         timestamp=payload.timestamp,
         status="pending",
         request_id=request_id,
@@ -880,7 +943,7 @@ async def receive_login_event(
 async def get_login_attempt_status(
     login_attempt_id: UUID,
     x_internal_secret: Optional[str] = Header(None),
-    db=Depends(get_db),
+    db=Depends(get_detection_db),
 ) -> LoginAttemptStatusResponse:
     """Poll the processing state of a previously submitted login event."""
     verify_internal_secret(x_internal_secret)
@@ -921,7 +984,7 @@ class PreTokenCheckResponse(BaseModel):
 async def pre_token_check(
     payload: PreTokenCheckRequest,
     x_internal_secret: Optional[str] = Header(None),
-    db=Depends(get_db),
+    db=Depends(get_detection_db),
 ) -> PreTokenCheckResponse:
     """Score a login *before* Core App issues a token (phương án C).
 
@@ -968,7 +1031,7 @@ async def pre_token_check(
 
 
 @router.get("/health", response_model=InternalHealthResponse)
-async def detection_health(db=Depends(get_db)) -> InternalHealthResponse:
+async def detection_health(db=Depends(get_detection_db)) -> InternalHealthResponse:
     """Liveness probe; also reports which policy is active."""
     policy = None
     try:
@@ -986,7 +1049,7 @@ async def detection_health(db=Depends(get_db)) -> InternalHealthResponse:
 @policy_router.get("", response_model=list)
 async def list_policies(
     ctx: AuthContext = Depends(require_roles("SECURITY_ADMIN", "SECURITY_MANAGER")),
-    db=Depends(get_db),
+    db=Depends(get_detection_db),
 ) -> list:
     """List every policy, newest first. SECURITY_ADMIN or SECURITY_MANAGER only."""
     policies = db.query(Policy).order_by(Policy.created_at.desc()).all()
@@ -1009,7 +1072,7 @@ async def list_policies(
 async def activate_policy(
     policy_id: UUID,
     ctx: AuthContext = Depends(require_roles("SECURITY_ADMIN")),
-    db=Depends(get_db),
+    db=Depends(get_detection_db),
 ) -> dict:
     """Activate a policy. SECURITY_ADMIN only."""
     policy = db.query(Policy).filter(Policy.id == policy_id).first()

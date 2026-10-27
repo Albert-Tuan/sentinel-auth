@@ -29,6 +29,8 @@ import sqlalchemy as sa
 from sqlalchemy import create_engine, text
 from sqlalchemy.engine import Connection
 
+from tests.postgres_env import assert_disposable_database, require_postgres_env
+
 
 # ---------------------------------------------------------------------------
 # Configuration (mirrors test_postgres_auth.py)
@@ -44,6 +46,10 @@ ENGINE_URL = (
     f"postgresql+psycopg2://{POSTGRES_USER}:{POSTGRES_PASSWORD}"
     f"@{POSTGRES_HOST}:{POSTGRES_PORT}/{POSTGRES_DB}"
 )
+
+# Without a configured PostgreSQL the whole module is skipped with an
+# explicit reason, instead of erroring during fixture setup.
+require_postgres_env(__name__)
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SCHEMA_CORE = os.path.join(REPO_ROOT, "infra", "postgres", "schema-core-v3.3.sql")
@@ -188,7 +194,7 @@ def _request(
         def _get_db_override():
             yield db_session
 
-    app.dependency_overrides[_auth_mod.get_db] = _get_db_override
+    app.dependency_overrides[_auth_mod.get_core_db] = _get_db_override
 
     try:
         with TestClient(app) as client:
@@ -202,7 +208,7 @@ def _request(
         _restore_ip_override(orig_get_client_ip)
         _auth_mod.RUN_PRE_TOKEN_CHECK = orig_run_pre
         _auth_mod.generate_otp = orig_gen_otp
-        app.dependency_overrides.pop(_auth_mod.get_db, None)
+        app.dependency_overrides.pop(_auth_mod.get_core_db, None)
         if eng is not None:
             eng.dispose()
 
@@ -263,6 +269,9 @@ def _mfa_verify(
 
 @pytest.fixture(scope="module")
 def engine():
+    # The bootstrap fixture recreates the public schema, so the target must
+    # not be a canonical production database.
+    assert_disposable_database(ENGINE_URL, "the PostgreSQL MFA concurrency tests")
     eng = create_engine(
         ENGINE_URL,
         isolation_level="AUTOCOMMIT",

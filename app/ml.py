@@ -34,7 +34,7 @@ from fastapi import APIRouter, Depends, Header, HTTPException, Request
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from sqlalchemy.orm import Session
 
-from app.db import get_db
+from app.db import get_ml_db
 from app.internal_auth import verify_internal_secret
 from app.models import FeatureStatistic, InferenceLog, ModelVersion
 
@@ -243,7 +243,7 @@ def refresh_feature_statistics(db: Session, since: datetime) -> int:
 async def score(
     request: Request,
     x_internal_secret: Optional[str] = Header(None),
-    db: Session = Depends(get_db),
+    db: Session = Depends(get_ml_db),
 ) -> MlScoreResponse:
     """UC-DE-03 - score a login event for anomaly likelihood."""
     verify_internal_secret(x_internal_secret)
@@ -301,7 +301,7 @@ async def score(
 
 
 @router.get("/ml/health")
-async def ml_health(db: Session = Depends(get_db)) -> dict:
+async def ml_health(db: Session = Depends(get_ml_db)) -> dict:
     """Liveness probe reporting which model is loaded."""
     try:
         runtime = get_ml_runtime(db)

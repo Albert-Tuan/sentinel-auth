@@ -20,10 +20,16 @@ CHUONG_III_A: list[tuple[str, object]] = [
         "P",
         "Sơ đồ use case tổng quát thể hiện toàn bộ chức năng của hệ thống và các tác "
         "nhân có quyền thực hiện chúng. Hệ thống có bốn tác nhân con người và hai tác nhân "
-        "hệ thống.",
+        "hệ thống. Hình 3.1 trình bày tổng quan. Ba hình bổ sung trình bày chi tiết use "
+        "case theo nhóm tác nhân: Hình 3.2 cho nhóm SOC Analyst, Hình 3.3 cho nhóm "
+        "Security Administrator, và Hình 3.19 cho nhóm Security Manager.",
     ),
     ("IMG", {"key": "usecase", "width_cm": 17.5, "caption": None}),
     ("CAP", "Hình 3.1  Sơ đồ use case tổng quát của hệ thống"),
+    ("IMG", {"key": "usecase_b", "width_cm": 17.0, "caption": None}),
+    ("CAP", "Hình 3.2  Use case của SOC Analyst — tiếp nhận, điều tra và kết luận cảnh báo"),
+    ("IMG", {"key": "usecase_c", "width_cm": 17.0, "caption": None}),
+    ("CAP", "Hình 3.3  Use case của Security Administrator — quản lý chính sách, tài khoản và nhật ký"),
     ("P", "Bảng dưới liệt kê các tác nhân và chức năng tương ứng:"),
     (
         "TABLE",
@@ -111,9 +117,9 @@ CHUONG_III_A: list[tuple[str, object]] = [
                 ["UC-15", "Kết luận hoặc đánh dấu báo nhầm", "SOC Analyst",
                  "Kết thúc vòng đời cảnh báo. Bắt buộc có nội dung kết luận; ghi người thực "
                  "hiện và thời điểm. Bao hàm ghi dòng thời gian."],
-                ["UC-18", "Yêu cầu hành động bảo vệ", "SOC Analyst",
-                 "Thực hiện một trong bốn hành động bảo vệ kèm lý do. Mở rộng quy trình "
-                 "tiếp nhận cảnh báo. Phản hồi trả về số phiên đã thu hồi; ghi audit."],
+                ["UC-18", "Thực hiện hành động bảo vệ", "SOC Analyst",
+                 "Gửi yêu cầu hệ thống thực thi một trong bốn hành động bảo vệ kèm lý do. "
+                 "Phản hồi trả về số phiên đã thu hồi; ghi audit."],
                 ["UC-20", "Quản lý chính sách", "Security Administrator",
                  "Xem, kiểm tra tính hợp lệ và kích hoạt chính sách chấm điểm. Ràng buộc chỉ "
                  "một chính sách kích hoạt; từ chối kích hoạt chính sách sai."],
@@ -144,7 +150,7 @@ CHUONG_III_A: list[tuple[str, object]] = [
         "báo nhầm theo từng quy tắc.",
     ),
     ("IMG", {"key": "state_alert", "width_cm": 12.0, "caption": None}),
-    ("CAP", "Hình 3.2  Sơ đồ trạng thái vòng đời cảnh báo SOC"),
+    ("CAP", "Hình 3.4  Sơ đồ trạng thái vòng đời cảnh báo SOC"),
     (
         "TABLE",
         {
@@ -172,7 +178,7 @@ CHUONG_III_A: list[tuple[str, object]] = [
     ),
     ("H3", "Trạng thái giao dịch xác thực đa yếu tố"),
     ("IMG", {"key": "state_mfa_session", "width_cm": 9.5, "caption": None}),
-    ("CAP", "Hình 3.3  Sơ đồ trạng thái của giao dịch MFA và phiên đăng nhập"),
+    ("CAP", "Hình 3.5  Sơ đồ trạng thái của giao dịch MFA và phiên đăng nhập"),
     (
         "P",
         "Giao dịch xác thực có bốn trạng thái kết thúc. Điểm thiết kế cần lưu ý là ngưỡng "
@@ -216,7 +222,7 @@ CHUONG_III_A: list[tuple[str, object]] = [
         "token nào được tạo.",
     ),
     ("IMG", {"key": "seq_login", "width_cm": 16.0, "caption": None}),
-    ("CAP", "Hình 3.4  Sơ đồ tuần tự quy trình đăng nhập và xác thực"),
+    ("CAP", "Hình 3.6  Sơ đồ tuần tự quy trình đăng nhập và xác thực"),
     ("H3", "Tuần tự phát hiện"),
     (
         "P",
@@ -226,7 +232,7 @@ CHUONG_III_A: list[tuple[str, object]] = [
         "sai, cấu hình ngưỡng sai, và ML Service không phản hồi.",
     ),
     ("IMG", {"key": "seq_detection", "width_cm": 15.0, "caption": None}),
-    ("CAP", "Hình 3.5  Sơ đồ tuần tự quy trình phát hiện và chấm điểm rủi ro"),
+    ("CAP", "Hình 3.7  Sơ đồ tuần tự quy trình phát hiện và chấm điểm rủi ro"),
     ("H3", "Tuần tự xử lý cảnh báo SOC"),
     (
         "P",
@@ -236,13 +242,13 @@ CHUONG_III_A: list[tuple[str, object]] = [
         "Core App, và phản hồi trả về số phiên đã thu hồi để đối chiếu.",
     ),
     ("IMG", {"key": "seq_soc", "width_cm": 15.0, "caption": None}),
-    ("CAP", "Hình 3.6  Sơ đồ tuần tự quy trình xử lý cảnh báo SOC"),
+    ("CAP", "Hình 3.8  Sơ đồ tuần tự quy trình xử lý cảnh báo SOC"),
     ("H3", "Tuần tự xác thực đa yếu tố"),
     ("IMG", {"key": "seq_mfa", "width_cm": 15.0, "caption": None}),
-    ("CAP", "Hình 3.7  Sơ đồ tuần tự quy trình xác thực đa yếu tố"),
+    ("CAP", "Hình 3.9  Sơ đồ tuần tự quy trình xác thực đa yếu tố"),
     ("H3", "Tuần tự quản lý phiên"),
     ("IMG", {"key": "seq_session", "width_cm": 14.0, "caption": None}),
-    ("CAP", "Hình 3.8  Sơ đồ tuần tự quản lý phiên đăng nhập"),
+    ("CAP", "Hình 3.10  Sơ đồ tuần tự quản lý phiên đăng nhập"),
     ("H3", "Tuần tự suy luận mô hình"),
     (
         "P",
@@ -253,7 +259,7 @@ CHUONG_III_A: list[tuple[str, object]] = [
         "kết quả đánh giá.",
     ),
     ("IMG", {"key": "seq_ml", "width_cm": 14.0, "caption": None}),
-    ("CAP", "Hình 3.9  Sơ đồ tuần tự quy trình suy luận mô hình"),
+    ("CAP", "Hình 3.11  Sơ đồ tuần tự quy trình suy luận mô hình"),
     ("H3", "Các kịch bản xử lý chi tiết"),
     (
         "P",
@@ -262,7 +268,7 @@ CHUONG_III_A: list[tuple[str, object]] = [
         "một quyết định thiết kế mà nếu không vẽ ra rất dễ bị hiểu sai.",
     ),
     ("IMG", {"key": "st01", "width_cm": 12.0, "caption": None}),
-    ("CAP", "Hình 3.10  Kịch bản đăng nhập thành công theo đường không cảnh báo"),
+    ("CAP", "Hình 3.12  Kịch bản đăng nhập thành công theo đường không cảnh báo"),
     ("P",
         "Kịch bản này là trường hợp đường chuẩn: cổng kiểm duyệt trả mức thấp, token được cấp "
         "ngay, bản ghi lần đăng nhập vẫn được ghi lại để chấm điểm ở luồng bất đồng bộ và sinh "
@@ -270,7 +276,7 @@ CHUONG_III_A: list[tuple[str, object]] = [
         "không chặn, hệ thống vẫn ghi và chấm điểm đầy đủ.",
     ),
     ("IMG", {"key": "st03", "width_cm": 13.0, "caption": None}),
-    ("CAP", "Hình 3.11  Kịch bản đăng nhập bị chặn ở mức rủi ro nghiêm trọng"),
+    ("CAP", "Hình 3.13  Kịch bản đăng nhập bị chặn ở mức rủi ro nghiêm trọng"),
     ("P",
         "Kịch bản này thể hiện tác động kép của mức nghiêm trọng: cổng đồng bộ chặn trước khi "
         "cấp token, và luồng bất đồng bộ sau đó vẫn tạo cảnh báo rồi gửi yêu cầu thu hồi "
@@ -278,9 +284,9 @@ CHUONG_III_A: list[tuple[str, object]] = [
         "bộ tạo hồ sơ để điều tra.",
     ),
     ("IMG", {"key": "st04", "width_cm": 12.0, "caption": None}),
-    ("CAP", "Hình 3.12  Kịch bản phân viên SOC tiếp nhận và kết luận cảnh báo"),
+    ("CAP", "Hình 3.14  Kịch bản phân viên SOC tiếp nhận và kết luận cảnh báo"),
     ("IMG", {"key": "st06", "width_cm": 12.0, "caption": None}),
-    ("CAP", "Hình 3.13  Kịch bản suy giảm về điểm quy tắc khi ML Service lỗi"),
+    ("CAP", "Hình 3.15  Kịch bản suy giảm về điểm quy tắc khi ML Service lỗi"),
     (
         "NOTE",
          "Bốn kịch bản này được nhóm lại như sơ đồ bổ trợ, không thay thế cho sáu sơ đồ tuần "
@@ -305,7 +311,7 @@ CHUONG_III_A: list[tuple[str, object]] = [
         "duyệt nằm sau phân vùng xác thực, thể hiện đúng thứ tự đã chốt trong thiết kế.",
     ),
     ("IMG", {"key": "act_login", "width_cm": 12.0, "caption": None}),
-    ("CAP", "Hình 3.14  Sơ đồ hoạt động quy trình đăng nhập và xác thực"),
+    ("CAP", "Hình 3.16  Sơ đồ hoạt động quy trình đăng nhập và xác thực"),
     ("H3", "Hoạt động phát hiện và quyết định rủi ro"),
     (
         "P",
@@ -315,7 +321,7 @@ CHUONG_III_A: list[tuple[str, object]] = [
         "Service có hạn năm giây nhưng vẫn tiếp tục xử lý bằng điểm quy tắc.",
     ),
     ("IMG", {"key": "act_detection", "width_cm": 12.0, "caption": None}),
-    ("CAP", "Hình 3.15  Sơ đồ hoạt động quy trình phát hiện và quyết định rủi ro"),
+    ("CAP", "Hình 3.17  Sơ đồ hoạt động quy trình phát hiện và quyết định rủi ro"),
     ("H3", "Hoạt động điều tra cảnh báo"),
     (
         "P",
@@ -325,7 +331,7 @@ CHUONG_III_A: list[tuple[str, object]] = [
         "vì danh tính người bị nghi ngờ nằm ở cơ sở dữ liệu khác.",
     ),
     ("IMG", {"key": "act_soc", "width_cm": 12.0, "caption": None}),
-    ("CAP", "Hình 3.16  Sơ đồ hoạt động quy trình điều tra cảnh báo SOC"),
+    ("CAP", "Hình 3.18  Sơ đồ hoạt động quy trình điều tra cảnh báo SOC"),
 
     # ================================================================ III.5
     ("H2", "Sơ đồ lớp"),
@@ -336,8 +342,14 @@ CHUONG_III_A: list[tuple[str, object]] = [
         "còn lớp nghiệp vụ phản ánh trách nhiệm và quy tắc. Trộn hai mức sẽ khiến sơ đồ lớp "
         "trở thành bản sao của sơ đồ quan hệ thực thể và mất đi ý nghĩa về thiết kế.",
     ),
-    ("IMG", {"key": "class", "width_cm": 17.0, "caption": None}),
-    ("CAP", "Hình 3.17  Sơ đồ lớp miền nghiệp vụ của hệ thống"),
+    ("IMG", {"key": "class_a", "width_cm": 17.0, "caption": None}),
+    ("CAP", "Hình 3.19  Sơ đồ lớp — nhóm lớp xác thực và quản lý phiên"),
+    ("IMG", {"key": "class_b", "width_cm": 17.0, "caption": None}),
+    ("CAP", "Hình 3.20  Sơ đồ lớp — nhóm lớp phát hiện và cảnh báo"),
+    ("IMG", {"key": "class_c", "width_cm": 17.0, "caption": None}),
+    ("CAP", "Hình 3.21  Sơ đồ lớp — nhóm lớp suy luận và hợp đồng"),
+    ("IMG", {"key": "class_d", "width_cm": 17.0, "caption": None}),
+    ("CAP", "Hình 3.22  Sơ đồ lớp — nhóm lớp giao diện hệ thống và chuyển đổi"),
     ("H4", "Nhóm lớp xác thực"),
     (
         "P",
@@ -407,12 +419,18 @@ CHUONG_III_A: list[tuple[str, object]] = [
         "đồ. Ba sơ đồ dùng ký hiệu Chen với thể hiện quan hệ và số nhiều rõ ràng, và đánh "
         "dấu đầy đủ khoá chính, khoá ngoại và ràng buộc duy nhất.",
     ),
-    ("IMG", {"key": "erd_core", "width_cm": 17.0, "caption": None}),
-    ("CAP", "Hình 3.18  Mô hình quan hệ thực thể của cơ sở dữ liệu core-db"),
-    ("IMG", {"key": "erd_detection", "width_cm": 17.0, "caption": None}),
-    ("CAP", "Hình 3.19  Mô hình quan hệ thực thể của cơ sở dữ liệu detection-db"),
+    ("IMG", {"key": "erd_core_a", "width_cm": 7.9, "caption": None}),
+    ("CAP", "Hình 3.23  ERD core-db — phần 1: bảng người dùng, vai trò, và nhật ký"),
+    ("IMG", {"key": "erd_core_b", "width_cm": 7.9, "caption": None}),
+    ("CAP", "Hình 3.24  ERD core-db — phần 2: bảng phiên, MFA, và thiết bị tin cậy"),
+    ("IMG", {"key": "erd_core_c", "width_cm": 7.9, "caption": None}),
+    ("CAP", "Hình 3.25  ERD core-db — phần 3: bảng outbox, rate limit, và cấu hình"),
+    ("IMG", {"key": "erd_detection_a", "width_cm": 7.9, "caption": None}),
+    ("CAP", "Hình 3.26  ERD detection-db — phần 1: bảng chính của dịch vụ phát hiện"),
+    ("IMG", {"key": "erd_detection_b", "width_cm": 7.9, "caption": None}),
+    ("CAP", "Hình 3.27  ERD detection-db — phần 2: bảng phụ, nhật ký và chỉ mục"),
     ("IMG", {"key": "erd_ml", "width_cm": 11.0, "caption": None}),
-    ("CAP", "Hình 3.20  Mô hình quan hệ thực thể của cơ sở dữ liệu ml-service-db"),
+    ("CAP", "Hình 3.28  ERD ml-service-db — mô hình, phiên bản và nhật ký suy luận"),
     ("H3", "Sơ đồ quan hệ bảng"),
     (
         "P",

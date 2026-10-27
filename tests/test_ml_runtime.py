@@ -70,7 +70,7 @@ def client(db, artifact, monkeypatch):
     ml.reset_runtime()
     app = FastAPI()
     app.include_router(ml.router)
-    app.dependency_overrides[ml.get_db] = lambda: db
+    app.dependency_overrides = {ml.get_ml_db: lambda: db}
     yield ApiClient(app)
     ml.reset_runtime()
 

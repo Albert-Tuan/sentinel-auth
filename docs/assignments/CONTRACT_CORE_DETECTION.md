@@ -108,9 +108,56 @@ POST /api/v1/internal/login-events
   "mfa_used": false,
   "ip_address": "string",
   "user_agent": "string | null",
-  "timestamp": "iso8601"
+  "timestamp": "iso8601",
+  "request_id": "uuid | null",   // Correlates the event with Core's request trace
+  "device_fingerprint": "string | null"  // Optional SHA-256 hex digest; see below
 }
 ```
+
+#### `device_fingerprint` (optional, backward compatible)
+
+- **Type:** `string | null`, max length 128.
+- **Value:** the SHA-256 hex digest (64 lowercase hex characters) of the
+  canonical fingerprint material. Core derives the material from the
+  request headers and hashes it **before** leaving the process, so **no raw
+  header value and no browser secret ever crosses the service boundary**.
+- **Derivation (Core side):**
+  `SHA-256(User-Agent | Accept-Language | Accept-Encoding)`.
+  Missing headers are tolerated and contribute an empty segment, so a
+  request without any fingerprint header still yields a stable digest.
+- **Nullability:** `null` is valid and means "this event carries no device
+  identity". Core sends `null` whenever it cannot derive a fingerprint.
+- **Compatibility:** the field is **optional**. An event sent by an older
+  Core (or any other producer that omits it) is accepted unchanged, and
+  Detection then decides device novelty with the User-Agent proxy instead.
+- **Strictness:** `LoginEventRequest` is declared with `extra="forbid"`, so
+  a misspelled field (e.g. `device_fingerprint_typo`) is rejected with
+  `422` instead of being silently dropped. Silently ignoring it would
+  degrade the fingerprint-first logic to the User-Agent proxy with no
+  visible error.
+- **Persistence:** Detection stores the value in the nullable column
+  `login_attempts.device_fingerprint` (Detection database) and indexes it
+  (`idx_login_attempts_device_fingerprint`).
+
+#### Device novelty semantics (Detection side)
+
+The `new_device` feature is resolved **fingerprint-first**:
+
+| `device_fingerprint` | User-Agent | Resolution | `new_device` |
+|----------------------|-----------|------------|--------------|
+| present | any | compare against the user's 30-day fingerprint history | `True` if unseen, else `False` |
+| absent | present | compare against the user's 30-day User-Agent history | `True` if unseen, else `False` |
+| absent | absent | no device signal available | `False` |
+
+A **known** User-Agent does **not** rescue an **unseen** fingerprint, and a
+**known** fingerprint wins over an **unknown** User-Agent. Two devices that
+share a User-Agent are still distinguished by their fingerprint.
+
+The provenance of the decision (which signal was used) is recorded in
+`detection_logs` as `device_signal_source` with one of the values
+`fingerprint`, `user_agent_proxy`, `unavailable`. **This is logging
+metadata only:** it is never passed to the ML feature vector, which always
+carries exactly the six canonical features.
 
 ### Response
 
@@ -165,12 +212,13 @@ POST /api/v1/internal/actions
 
 ```json
 {
-  "idempotency_key": "uuid",    // Prevents duplicate action execution
+  "idempotency_key": "string",  // Prevents duplicate action execution
   "action": "REQUIRE_MFA | REVOKE_SESSIONS | LOCK_USER | FORCE_LOGOUT",
   "target_user_id": "uuid",
   "reason": "string",
-  "alert_id": "uuid | null",    // Optional: links action to an alert
-  "detected_at": "iso8601"
+  "alert_id": "uuid | null",     // Optional: links action to an alert
+  "severity": "low|medium|high|critical | null",  // Optional
+  "detected_at": "iso8601 | null" // Optional: when the risky event was observed
 }
 ```
 
@@ -178,16 +226,36 @@ POST /api/v1/internal/actions
 
 ```json
 {
-  "action_applied": true,
-  "action_type": "REQUIRE_MFA | REVOKE_SESSIONS | LOCK_USER | FORCE_LOGOUT",
+  "status": "applied | already_applied",
+  "action": "REQUIRE_MFA | REVOKE_SESSIONS | LOCK_USER | FORCE_LOGOUT",
+  "target_user_id": "uuid",
   "details": {
+    "reason": "string",
     "sessions_revoked": 3,
-    "action": "REQUIRE_MFA",
-    "user_locked": false
-  },
-  "already_applied": false
+    "revoked_count": 3,
+    "already_applied": false,
+    "one_time": true,
+    "mfa_enabled": true,
+    "status": "locked",
+    "idempotency_key": "string",
+    "deduplicated": false
+  }
 }
 ```
+
+> The response field is `status` (not `action_applied`): the value is
+> `"applied"` or `"already_applied"`. `details` carries the per-action
+> detail; `already_applied` and `deduplicated` are booleans inside
+> `details`, not top-level fields.
+
+### Callers
+- **Detection Engine** - idempotency key `detection:{attempt_id}:{action}`
+- **SOC alert workflow** (`POST /api/v1/alerts/{alert_id}/actions`) -
+  idempotency key `alert:{alert_id}:{action}`
+
+Both callers use the same shared client (`app/internal_client.py`), so the
+timeout, error handling and payload shape are defined in exactly one place.
+The SOC workflow does NOT mutate Core tables directly.
 
 ### Supported Actions
 
@@ -296,6 +364,12 @@ Both Sony and Tuấn Anh are responsible for writing contract tests.
 | Pre-token invalid secret → fail open | Both | 401 from Detection → Core allows login |
 | Login event idempotency | Sony + Tuấn Anh | Duplicate event_id → 202, same login_attempt_id |
 | Login event invalid → 422 | Sony | Core sends invalid → Detection rejects |
+| Login event unknown field → 422 | Sony | Misspelled field (e.g. `device_fingerprint_typo`) is rejected, not ignored |
+| Login event optional fingerprint | Sony + Tuấn Anh | Event with `device_fingerprint: null` is accepted |
+| Fingerprint-first device novelty | Sony + Tuấn Anh | Known fingerprint + unknown User-Agent → `new_device = false` |
+| Fingerprint-first device novelty | Sony + Tuấn Anh | Unseen fingerprint + known User-Agent → `new_device = true` |
+| User-Agent fallback | Sony + Tuấn Anh | Event without fingerprint → User-Agent proxy decides |
+| Device-signal provenance | Tuấn Anh | `device_signal_source` is logged and never enters the feature vector |
 | Action REQUIRE_MFA | Tuấn Anh | Detection sends → Core enforces |
 | Action REVOKE_SESSIONS | Tuấn Anh | Detection sends → Core revokes sessions |
 | Action LOCK_USER | Tuấn Anh | Detection sends → Core locks user |
@@ -331,13 +405,19 @@ Both Sony and Tuấn Anh are responsible for writing contract tests.
 
 ### Versioning
 
-This contract uses document versioning. The current version is `1.0`.
+This contract uses document versioning. The current version is `1.1`.
 
 Add version header to all contract documents:
 ```
-Contract Version: 1.0
-Last Updated: 2026-10-10
+Contract Version: 1.1
+Last Updated: 2026-10-26
 ```
+
+**Version 1.1 changes (2026-10-26):** added the optional `request_id` and
+`device_fingerprint` fields to the Login Event request schema, documented
+the fingerprint-first device-novelty semantics and the
+`device_signal_source` logging metadata, and recorded the strict
+(`extra="forbid"`) request contract.
 
 ---
 

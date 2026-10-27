@@ -17,7 +17,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from sqlalchemy import or_
 
 from app.authz import AuthContext, require_roles
-from app.db import get_db
+from app.db import get_core_db
 from app.models import AuditLog, Role, Session, User, UserRole
 from app.schemas import (
     AuditLogItem,
@@ -116,7 +116,7 @@ async def list_users(
     role: Optional[UserRoleEnum] = None,
     account_status: Optional[UserStatus] = Query(None, alias="status"),
     ctx: AuthContext = Depends(require_roles("SECURITY_ADMIN")),
-    db=Depends(get_db),
+    db=Depends(get_core_db),
 ) -> UserList:
     query = db.query(User)
     if role is not None:
@@ -140,7 +140,7 @@ async def assign_role(
     body: RoleAssignRequest,
     request: Request,
     ctx: AuthContext = Depends(require_roles("SECURITY_ADMIN")),
-    db=Depends(get_db),
+    db=Depends(get_core_db),
 ) -> UserItem:
     role_id = body.role.value
     if role_id not in {"USER", *_SPECIAL_ROLES}:
@@ -175,7 +175,7 @@ async def revoke_role(
     role_id: str,
     request: Request,
     ctx: AuthContext = Depends(require_roles("SECURITY_ADMIN")),
-    db=Depends(get_db),
+    db=Depends(get_core_db),
 ) -> UserItem:
     if role_id == "USER":
         raise HTTPException(status_code=422, detail="The USER base role cannot be removed")
@@ -210,7 +210,7 @@ async def lock_user(
     user_id: UUID,
     request: Request,
     ctx: AuthContext = Depends(require_roles("SECURITY_ADMIN")),
-    db=Depends(get_db),
+    db=Depends(get_core_db),
 ) -> UserItem:
     target = db.query(User).filter(User.id == user_id).first()
     if target is None:
@@ -240,7 +240,7 @@ async def unlock_user(
     user_id: UUID,
     request: Request,
     ctx: AuthContext = Depends(require_roles("SECURITY_ADMIN")),
-    db=Depends(get_db),
+    db=Depends(get_core_db),
 ) -> UserItem:
     target = db.query(User).filter(User.id == user_id).first()
     if target is None:
@@ -268,7 +268,7 @@ async def toggle_mfa(
     body: MfaToggleRequest,
     request: Request,
     ctx: AuthContext = Depends(require_roles("SECURITY_ADMIN")),
-    db=Depends(get_db),
+    db=Depends(get_core_db),
 ) -> UserItem:
     target = db.query(User).filter(User.id == user_id).first()
     if target is None:
@@ -303,7 +303,7 @@ async def list_audit_logs(
     from_time: Optional[datetime] = Query(None, alias="from"),
     to_time: Optional[datetime] = Query(None, alias="to"),
     ctx: AuthContext = Depends(require_roles("SECURITY_ADMIN")),
-    db=Depends(get_db),
+    db=Depends(get_core_db),
 ) -> AuditLogList:
     query = db.query(AuditLog)
     if actor:

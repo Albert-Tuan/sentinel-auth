@@ -25,7 +25,8 @@ from argon2 import PasswordHasher
 from argon2.exceptions import VerifyMismatchError, InvalidHash
 
 from app.authz import hash_token, get_current_auth_context, AuthContext
-from app.db import get_db
+from app.db import get_core_db
+from app.device_fingerprint import fingerprint_from_request
 from app.models import (
     IpAddress,
     AuditLog,
@@ -77,6 +78,12 @@ class LoginEvent:
     ip_address: Optional[str]
     user_agent: Optional[str]
     timestamp: datetime
+    #: Hashed device fingerprint (SHA-256 hex digest) or ``None``.
+    #:
+    #: Optional and backward compatible: an event without a fingerprint is
+    #: still valid, and Detection then falls back to the User-Agent proxy to
+    #: decide device novelty.  It never carries raw header values.
+    device_fingerprint: Optional[str] = None
 
 
 def _audit(
@@ -131,6 +138,10 @@ async def _send_login_event(attempt: Optional[LoginEvent]) -> bool:
         "user_agent": attempt.user_agent,
         "timestamp": attempt.timestamp.isoformat(),
         "request_id": str(attempt.request_id) if attempt.request_id else None,
+        # Optional, backward compatible: older Detection receivers ignore
+        # the unknown field, and a missing fingerprint simply means the
+        # User-Agent proxy is used for device novelty.
+        "device_fingerprint": attempt.device_fingerprint,
     }
     try:
         headers = {"X-Internal-Secret": get_internal_secret()}
@@ -245,6 +256,7 @@ def _login_event(
     mfa_used: bool = False,
     ip_address: Optional[str] = None,
     user_agent: Optional[str] = None,
+    device_fingerprint: Optional[str] = None,
 ) -> LoginEvent:
     """Build a stable event without touching Detection's database tables."""
     return LoginEvent(
@@ -257,6 +269,7 @@ def _login_event(
         ip_address=ip_address,
         user_agent=user_agent,
         timestamp=timestamp,
+        device_fingerprint=device_fingerprint,
     )
 
 
@@ -282,7 +295,7 @@ class RegisterResponse(BaseModel):
 # =============================================================================
 
 @router.post("/register", response_model=UserRegisterResponse, status_code=status.HTTP_201_CREATED)
-async def register(request: UserRegisterRequest, db=Depends(get_db)) -> UserRegisterResponse:
+async def register(request: UserRegisterRequest, db=Depends(get_core_db)) -> UserRegisterResponse:
     """
     Register a new user account.
 
@@ -444,7 +457,7 @@ async def _pre_token_risk(user, client_ip: str, user_agent: Optional[str]) -> Op
 async def login(
     request: LoginRequest,
     req: Request,
-    db=Depends(get_db),
+    db=Depends(get_core_db),
 ) -> LoginResponse:
     """
     Authenticate user credentials.
@@ -458,6 +471,10 @@ async def login(
     """
     client_ip = get_client_ip(req)
     request_id = uuid4()
+    # Canonical device fingerprint (hashed).  It is attached to every login
+    # event so the Detection Engine can decide device novelty in a
+    # fingerprint-first way.  It never carries raw header values.
+    device_fingerprint = fingerprint_from_request(req)
 
     # 1. Rate limit check
     now = utc_now()
@@ -479,6 +496,7 @@ async def login(
             timestamp=now,
             outcome="rate_limited",
             ip_address=client_ip,
+            device_fingerprint=device_fingerprint,
         )
         db.commit()
         await _send_login_event(la)
@@ -513,6 +531,7 @@ async def login(
             outcome="failure",
             ip_address=client_ip,
             user_agent=req.headers.get("User-Agent"),
+            device_fingerprint=device_fingerprint,
         )
         db.commit()
         await _send_login_event(la)
@@ -531,6 +550,7 @@ async def login(
             outcome="failure",
             ip_address=client_ip,
             user_agent=req.headers.get("User-Agent"),
+            device_fingerprint=device_fingerprint,
         )
         db.commit()
         await _send_login_event(la)
@@ -546,6 +566,7 @@ async def login(
             outcome="locked",
             ip_address=client_ip,
             user_agent=req.headers.get("User-Agent"),
+            device_fingerprint=device_fingerprint,
         )
         db.commit()
         await _send_login_event(la)
@@ -627,6 +648,7 @@ async def login(
             ip_address=client_ip,
             user_agent=req.headers.get("User-Agent"),
             mfa_used=True,
+            device_fingerprint=device_fingerprint,
         )
         db.commit()
         await _send_login_event(la)
@@ -642,7 +664,8 @@ async def login(
 
     # 5. No MFA - create session directly
     result, login_event = await _create_session(
-        user, client_ip, req.headers.get("User-Agent"), db
+        user, client_ip, req.headers.get("User-Agent"), db,
+        device_fingerprint=device_fingerprint,
     )
     db.commit()
     await _send_login_event(login_event)
@@ -654,6 +677,7 @@ async def _create_session(
     client_ip: str,
     user_agent: Optional[str],
     db,
+    device_fingerprint: Optional[str] = None,
 ) -> tuple[LoginResponse, LoginEvent]:
     """Create a new session and generate tokens.
 
@@ -698,6 +722,7 @@ async def _create_session(
         outcome="success",
         ip_address=client_ip,
         user_agent=user_agent,
+        device_fingerprint=device_fingerprint,
     )
     db.flush()  # Populate session.id before recording its audit resource.
     _audit(
@@ -729,7 +754,7 @@ async def _create_session(
 async def mfa_verify(
     request: MfaVerifyRequest,
     req: Request,
-    db=Depends(get_db),
+    db=Depends(get_core_db),
 ) -> MfaVerifyResponse:
     """
     Verify MFA code for a pre-auth transaction (P0-05: atomic OTP consumption).
@@ -745,6 +770,8 @@ async def mfa_verify(
     """
     client_ip = get_client_ip(req)
     now = utc_now()
+    # Canonical device fingerprint (hashed) for the event sent to Detection.
+    device_fingerprint = fingerprint_from_request(req)
 
     # ------------------------------------------------------------------
     # STEP 1: Lock the MFA transaction row with SELECT ... FOR UPDATE.
@@ -826,6 +853,7 @@ async def mfa_verify(
             ip_address=client_ip,
             user_agent=req.headers.get("User-Agent"),
             mfa_used=True,
+            device_fingerprint=device_fingerprint,
         )
         db.commit()
         await _send_login_event(la)
@@ -870,7 +898,8 @@ async def mfa_verify(
     # All of these commit together or none do.
     # ------------------------------------------------------------------
     result, _ = await _create_session(
-        user, client_ip, req.headers.get("User-Agent"), db
+        user, client_ip, req.headers.get("User-Agent"), db,
+        device_fingerprint=device_fingerprint,
     )
 
     la = _login_event(
@@ -882,6 +911,7 @@ async def mfa_verify(
         ip_address=client_ip,
         user_agent=req.headers.get("User-Agent"),
         mfa_used=True,
+        device_fingerprint=device_fingerprint,
     )
     db.commit()
     await _send_login_event(la)
@@ -896,7 +926,7 @@ async def mfa_verify(
 @router.post("/refresh", response_model=RefreshResponse)
 async def refresh_token(
     request: RefreshRequest,
-    db=Depends(get_db),
+    db=Depends(get_core_db),
 ) -> RefreshResponse:
     """
     Refresh access token using refresh token.
@@ -951,7 +981,7 @@ async def refresh_token(
 @router.post("/logout", response_model=LogoutResponse)
 async def logout(
     ctx: AuthContext = Depends(get_current_auth_context),
-    db=Depends(get_db),
+    db=Depends(get_core_db),
 ) -> LogoutResponse:
     """
     Logout current session.
@@ -979,7 +1009,7 @@ async def logout(
 @router.post("/logout-all", response_model=LogoutResponse)
 async def logout_all(
     ctx: AuthContext = Depends(get_current_auth_context),
-    db=Depends(get_db),
+    db=Depends(get_core_db),
 ) -> LogoutResponse:
     """Revoke every active session belonging to the authenticated user."""
     now = utc_now()
@@ -1005,7 +1035,7 @@ async def logout_all(
 @router.get("/me", response_model=UserItem)
 async def get_my_account(
     ctx: AuthContext = Depends(get_current_auth_context),
-    db=Depends(get_db),
+    db=Depends(get_core_db),
 ) -> UserItem:
     """Return the authenticated user's account projection and current roles."""
     return UserItem(
@@ -1026,7 +1056,7 @@ async def get_my_account(
 @router.get("/sessions", response_model=SessionList)
 async def list_sessions(
     ctx: AuthContext = Depends(get_current_auth_context),
-    db=Depends(get_db),
+    db=Depends(get_core_db),
 ) -> SessionList:
     """
     List current user's sessions.
@@ -1065,7 +1095,7 @@ async def list_sessions(
 async def revoke_session(
     session_id: UUID,
     ctx: AuthContext = Depends(get_current_auth_context),
-    db=Depends(get_db),
+    db=Depends(get_core_db),
 ) -> None:
     """
     Revoke a specific session.

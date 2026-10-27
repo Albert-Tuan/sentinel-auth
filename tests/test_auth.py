@@ -106,7 +106,7 @@ def _http_client(session: OrmSession):
     def _get_db():
         return session
 
-    app.dependency_overrides = {auth_mod.get_db: _get_db}
+    app.dependency_overrides = {auth_mod.get_core_db: _get_db}
     try:
         client = TestClient(app)
         yield client

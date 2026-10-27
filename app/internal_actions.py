@@ -22,7 +22,7 @@ from fastapi import APIRouter, Depends, Header, HTTPException, status as http_st
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session as OrmSession
 
-from app.db import get_db
+from app.db import get_core_db
 from app.internal_auth import verify_internal_secret
 from app.models import AuditLog, Role, Session, User, UserRole
 from app.schemas import ActionRequest, ActionResponse
@@ -81,7 +81,7 @@ class InternalUserResponse(BaseModel):
 async def apply_action(
     payload: ActionRequest,
     x_internal_secret: Optional[str] = Header(None),
-    db: OrmSession = Depends(get_db),
+    db: OrmSession = Depends(get_core_db),
 ) -> ActionResponse:
     """Apply a protective action requested by the Detection Engine.
 
@@ -119,6 +119,18 @@ async def apply_action(
             details = dict(previous.after_state or {})
             details["idempotency_key"] = payload.idempotency_key
             details["deduplicated"] = True
+            # The replayed ``after_state`` describes the FIRST application.
+            # This call revoked nothing, so the counts must say so instead
+            # of echoing the first call's numbers.
+            details["sessions_revoked"] = 0
+            details["revoked_count"] = 0
+            details["already_applied"] = True
+            action_value = payload.action.value
+            if action_value == "REQUIRE_MFA":
+                details["mfa_enabled"] = True
+                details["one_time"] = True
+            elif action_value == "LOCK_USER":
+                details["status"] = user.status
             return ActionResponse(
                 status="already_applied",
                 action=payload.action,
@@ -135,6 +147,8 @@ async def apply_action(
         details["alert_id"] = str(payload.alert_id)
     if payload.severity is not None:
         details["severity"] = payload.severity.value
+    if payload.detected_at is not None:
+        details["detected_at"] = payload.detected_at.isoformat()
 
     action = payload.action.value
     already_applied = False
@@ -159,9 +173,13 @@ async def apply_action(
         # ran would keep working until it expired, leaving the requirement
         # toothless.
         details["sessions_revoked"] = _revoke_active_sessions()
+        details["mfa_enabled"] = True
+        details["one_time"] = True
+        details["already_applied"] = already_applied
 
     elif action == "REVOKE_SESSIONS":
         details["sessions_revoked"] = _revoke_active_sessions()
+        details["revoked_count"] = details["sessions_revoked"]
         already_applied = details["sessions_revoked"] == 0
 
     elif action == "LOCK_USER":
@@ -170,11 +188,14 @@ async def apply_action(
             user.status = "locked"
             user.locked_at = _now_utc()
         details["sessions_revoked"] = _revoke_active_sessions()
+        details["status"] = user.status
+        details["already_applied"] = already_applied
 
     elif action == "FORCE_LOGOUT":
         # Same effect as REVOKE_SESSIONS; kept separate so the Detection
         # Engine can express intent without implying a lock.
         details["sessions_revoked"] = _revoke_active_sessions()
+        details["revoked_count"] = details["sessions_revoked"]
         already_applied = details["sessions_revoked"] == 0
 
     details["idempotency_key"] = payload.idempotency_key
@@ -210,7 +231,7 @@ async def apply_action(
 async def get_internal_user(
     user_id: UUID,
     x_internal_secret: Optional[str] = Header(None),
-    db: OrmSession = Depends(get_db),
+    db: OrmSession = Depends(get_core_db),
 ) -> InternalUserResponse:
     """Resolve a core-db user for the Detection Engine / SOC workflow.
 

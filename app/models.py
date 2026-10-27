@@ -528,6 +528,7 @@ class LoginAttempt(Base):
         Index("idx_login_attempts_ip", "ip_address"),
         Index("idx_login_attempts_policy", "policy_id"),
         Index("idx_login_attempts_status", "status"),
+        Index("idx_login_attempts_device_fingerprint", "device_fingerprint"),
     )
 
     id: Mapped[str] = Column(uuid_type(), primary_key=True, default=uuid4)
@@ -540,6 +541,11 @@ class LoginAttempt(Base):
     mfa_used: Mapped[bool] = Column(Boolean, nullable=False, default=False)
     ip_address: Mapped[Optional[str]] = Column(inet_type(), nullable=True)
     user_agent: Mapped[Optional[str]] = Column(Text, nullable=True)
+    # Optional device fingerprint (hashed representation) sent by core-app.
+    # Nullable and backward compatible: when it is absent the Detection
+    # Engine falls back to the User-Agent proxy to decide device novelty.
+    # There is deliberately NO cross-database foreign key here.
+    device_fingerprint: Mapped[Optional[str]] = Column(Text, nullable=True)
     timestamp: Mapped[datetime] = Column(DateTime(timezone=True), nullable=False, default=now_utc)
     # Work queue for the background detection worker
     status: Mapped[str] = Column(Text, nullable=False, default="pending")

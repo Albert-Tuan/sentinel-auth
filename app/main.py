@@ -1,5 +1,5 @@
 """FastAPI application entry point."""
-import os
+import logging
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -14,16 +14,37 @@ from app.ml import router as ml_router
 from app.alerts import router as alerts_router
 from app.devices import router as devices_router
 
+logger = logging.getLogger(__name__)
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Startup and shutdown events."""
+    """Startup and shutdown events.
+
+    The application never creates tables here.  The three logical databases
+    are bootstrapped by ``infra/postgres/init/00-init-databases.sh`` from the
+    canonical ``infra/postgres/schema-*-v3.3.sql`` files; calling
+    ``Base.metadata.create_all`` here would create every Core + Detection +
+    ML table inside ONE database and destroy the three-database topology.
+    """
     # Reject FORWARDED_ALLOW_IPS="*" before accepting any connections.
     validate_proxy_trust_config()
-    database_url = os.getenv("DATABASE_URL", "postgresql://sentinel:sentinel@postgres:5432/sentinel")
-    engine = db.get_engine(database_url)
-    db.get_session_maker(engine)
+
+    # Warm one engine/session-factory per bounded context so the first
+    # request of each context does not pay the connection setup cost.
+    for context in (db.CORE, db.DETECTION, db.ML):
+        url = db.resolve_database_url(context)
+        engine = db.get_engine(url, context=context)
+        db.get_session_maker(engine, context=context)
+        logger.info(
+            "database context %s -> %s",
+            context,
+            engine.url.render_as_string(hide_password=True),
+        )
+
     yield
+
+    db.dispose_engines()
 
 
 app = FastAPI(

@@ -18,7 +18,7 @@ from typing import TYPE_CHECKING, FrozenSet, Optional
 from fastapi import Depends, HTTPException, Request, status
 from sqlalchemy.orm import Session as OrmSession
 
-from app.db import get_db
+from app.db import get_core_db
 
 if TYPE_CHECKING:
     from app.models import Session as SessionModel, User as UserModel
@@ -57,7 +57,7 @@ class AuthContext:
 
 async def get_current_auth_context(
     request: Request,
-    db: OrmSession = Depends(get_db),
+    db: OrmSession = Depends(get_core_db),
 ) -> AuthContext:
     """FastAPI dependency: authenticate a bearer token and return the caller's context.
 

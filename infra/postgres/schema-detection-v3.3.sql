@@ -125,6 +125,11 @@ CREATE TABLE IF NOT EXISTS login_attempts (
     mfa_used              BOOLEAN NOT NULL DEFAULT FALSE,
     ip_address            INET,
     user_agent            TEXT,
+    -- Optional device fingerprint (hashed representation) sent by core-app.
+    -- NULL for events produced by an older Core; the Detection Engine then
+    -- falls back to the User-Agent proxy for device novelty.
+    -- No cross-database foreign key: a fingerprint is not a Core-DB row.
+    device_fingerprint    TEXT,
     timestamp             TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     status                TEXT NOT NULL DEFAULT 'pending'
                             CHECK (status IN ('pending', 'processed', 'failed')),
@@ -151,6 +156,7 @@ CREATE INDEX idx_login_attempts_username ON login_attempts(username_attempted);
 CREATE INDEX idx_login_attempts_ip ON login_attempts(ip_address);
 CREATE INDEX idx_login_attempts_policy ON login_attempts(policy_id);
 CREATE INDEX idx_login_attempts_status ON login_attempts(status);
+CREATE INDEX idx_login_attempts_device_fingerprint ON login_attempts(device_fingerprint);
 
 -- =============================================================================
 -- RISK ASSESSMENTS (Per Login Attempt - 1:1)

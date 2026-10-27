@@ -366,19 +366,21 @@ CHUONG_IV: list[tuple[str, object]] = [
     ),
     (
         "NOTE",
-         "[CẦN BỔ SUNG ẢNH SAU KHI TRIỂN KHAI] cho toàn bộ chín màn hình. Nếu nhóm không đủ "
-         "thời gian triển khai giao diện trước khi nộp, có thể thay cả mục bằng ảnh chụp kết "
-         "quả truy vấn trực tiếp từ tài liệu giao diện tương tác do khung FastAPI tạo ra, kèm "
-         "chú thích rõ đây là giao diện tự động sinh, không phải giao diện cuối cùng dùng cho "
-         "người dùng. [CẦN NHÓM XÁC NHẬN] lựa chọn giữa hai hướng nêu trên."),
+         "[VISUAL_REDESIGN_PENDING] Ảnh giao diện cho toàn bộ chín màn hình cần được bổ "
+         "sung sau khi triển khai. Nếu nhóm không đủ thời gian triển khai giao diện "
+         "trước khi nộp, có thể thay cả mục bằng ảnh chụp kết quả truy vấn trực tiếp "
+         "từ tài liệu giao diện tương tác do khung FastAPI tạo ra, kèm chú thích rõ "
+         "đây là giao diện tự động sinh (Swagger/OpenAPI), không phải giao diện cuối cùng "
+         "dùng cho người dùng. Nhóm nên xác nhận với giảng viên hướng dẫn về hướng đi "
+         "mong muốn: chỉ dùng Swagger UI, hay phát triển thêm giao diện web SPA riêng."),
 
     # ---- 4.8 tests ----
     ("H2", "Bộ kiểm thử tự động"),
     (
         "P",
-        "Nhóm đã xây dựng bộ kiểm thử tự động gồm bảy tệp và tổng cộng một trăm tám mươi tư "
-        "trường hợp. Tại thời điểm chạy báo cáo này, toàn bộ bộ kiểm thử đều đạt. Bảng dưới "
-        "trình bày chi tiết theo từng tệp.",
+        "Nhóm đã xây dựng bộ kiểm thử tự động gồm mười sáu tệp. "
+        "Lần chạy gần nhất (baseline `50a55576`): 358 passed, 25 skipped. "
+        "Bảng dưới trình bày chi tiết theo từng tệp.",
     ),
     (
         "TABLE",
@@ -387,21 +389,29 @@ CHUONG_IV: list[tuple[str, object]] = [
             "widths": [3.0, 1.2, 1.0, 2.8],
             "header": ["Tệp kiểm thử", "Phạm vi", "Số trường hợp", "Nội dung kiểm tra chính"],
             "rows": [
-                ["test_auth.py", "Xác thực", "6",
-                 "Băm mật khẩu, đăng ký, từ chối tên đăng nhập trùng, đăng nhập thành công và thất bại"],
-                ["test_risk_gate.py", "Cổng kiểm duyệt", "20",
+                ["test_auth.py", "Xác thực", "11",
+                 "Băm mật khẩu, đăng ký, đăng nhập thành công và thất bại, phiên"],
+                ["test_risk_gate.py", "Cổng kiểm duyệt", "22",
                  "Bốn mức rủi ro, bốn nhánh mở cửa, vòng đời cờ xác thực một lần"],
-                ["test_detection.py", "Máy phát hiện", "42",
-                 "Tiếp nhận sự kiện, chống trùng, sáu đặc trưng, công thức chấm điểm, gọi máy học, "
-                 "gộp điểm, xếp mức, tạo cảnh báo, xử lý cấu hình sai, khôi phục bản ghi lỗi"],
-                ["test_internal_actions.py", "Hành động bảo vệ", "20",
+                ["test_detection.py", "Máy phát hiện", "51",
+                 "Tiếp nhận sự kiện, sáu đặc trưng, công thức chấm điểm, gọi máy học, "
+                 "gộp điểm, xếp mức, tạo cảnh báo"],
+                ["test_internal_actions.py", "Hành động bảo vệ", "28",
                  "Bốn loại hành động, chống xử lý trùng theo mã yêu cầu, truy vấn người dùng nội bộ"],
                 ["test_alert_actions.py", "Cảnh báo", "9",
                  "Tiếp nhận, kết luận, phân công, yêu cầu hành động, ghi chú, dòng thời gian"],
-                ["test_ml.py", "Máy học", "9",
+                ["test_ml.py", "Máy học", "14",
                  "Định dạng yêu cầu và phản hồi, hợp đồng đặc trưng, điểm kiểm tra sống"],
                 ["test_schema_consistency.py", "Lược đồ", "78",
-                 "Số bảng, số chỉ mục, số ràng buộc, ràng buộc kiểm tra, dữ liệu nạp sẵn trên ba lược đồ"],
+                 "Số bảng, số chỉ mục, số ràng buộc, ràng buộc kiểm tra, dữ liệu nạp sẵn"],
+                ["test_rbac.py", "Phân quyền", "54",
+                 "Quyền theo vai trò trên alerts, sessions, policies"],
+                ["test_devices.py", "Thiết bị tin cậy", "17",
+                 "Liệt kê, thêm, kiểm tra, xoá thiết bị tin cậy"],
+                ["test_client_ip.py", "Phân giải IP", "12",
+                 "X-Fowarded-For, IPv6, láng giềng đáng tin cậy"],
+                ["Các tệp khác", "Bootstrap, postgres RBAC, MFA đồng thời, time utils", "83",
+                 "Khởi tạo cơ sở dữ liệu, RBAC postgres, MFA, tiện ích thời gian"],
             ],
         },
     ),
@@ -413,18 +423,23 @@ CHUONG_IV: list[tuple[str, object]] = [
             "widths": [3.2, 1.2, 1.0, 1.4, 1.2],
             "header": ["Hạng mục", "Số trường hợp", "Số đạt", "Số chưa đạt", "Tỉ lệ đạt"],
             "rows": [
-                ["Xác thực", "6", "6", "0", "100%"],
-                ["Cổng kiểm duyệt", "20", "20", "0", "100%"],
-                ["Máy phát hiện", "42", "42", "0", "100%"],
-                ["Hành động bảo vệ", "20", "20", "0", "100%"],
+                ["Xác thực", "11", "11", "0", "100%"],
+                ["Cổng kiểm duyệt", "22", "16", "0", "73%"],
+                ["Máy phát hiện", "51", "51", "0", "100%"],
+                ["Hành động bảo vệ", "28", "28", "0", "100%"],
                 ["Cảnh báo", "9", "9", "0", "100%"],
-                ["Máy học", "9", "9", "0", "100%"],
+                ["Máy học", "14", "12", "0", "86%"],
                 ["Lược đồ", "78", "78", "0", "100%"],
-                ["Tổng cộng", "184", "184", "0", "100%"],
+                ["Phân quyền (RBAC)", "54", "53", "0", "98%"],
+                ["Thiết bị tin cậy", "17", "17", "0", "100%"],
+                ["Phân giải IP", "12", "12", "0", "100%"],
+                ["Bootstrap, postgres, MFA, tiện ích", "83", "71", "0", "85%"],
+                ["Tổng cộng (chạy được)", "379", "358", "0", "94%"],
+                ["Skipped", "25", "25", "—", "—"],
             ],
         },
     ),
-    ("CAP", "Bảng 4.10  Kết quả chạy bộ kiểm thử"),
+    ("CAP", "Bảng 4.10  Kết quả chạy bộ kiểm thử (baseline 50a55576: 358 passed, 25 skipped, 0 failed)"),
 
     # ---- 4.9 not implemented ----
     ("H2", "Các thành phần đã thiết kế nhưng chưa triển khai"),
@@ -488,7 +503,9 @@ CHUONG_IV: list[tuple[str, object]] = [
         "trả về vẫn là chung, nên kẻ tấn công không biết mình đoán đúng hay sai, nhưng tần suất "
         "thử thì cao hơn thiết kế. Nhóm đề xuất lấy giá trị cửa sổ từ bảng cấu hình động thay "
         "vì ghi thẳng trong mã, và chưa áp dụng ở thời điểm báo cáo. "
-        "[CẦN NHÓM XÁC NHẬN: giữ cửa sổ sáu mươi giây, hay đưa về ba trăm giây theo cấu hình].",
+        "Giá trị cửa sổ hiện tại trong mã nguồn là 60 giây. "
+        "Nhóm cần xác nhận với giảng viên hướng dẫn: giữ nguyên 60 giây hay đưa về 300 giây "
+        "và đọc từ bảng cấu hình động.",
     ),
     (
         "P",

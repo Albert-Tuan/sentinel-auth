@@ -19,13 +19,18 @@ from typing import Optional, List
 from uuid import UUID
 
 from app.client_ip import get_client_ip
+from app.device_fingerprint import (
+    fingerprint_hash_from_headers,
+    fingerprint_material_from_headers,
+)
+from app.device_fingerprint import hash_fingerprint as hash_fingerprint_raw
 from app.time_utils import utc_now, as_utc
 
 from fastapi import APIRouter, HTTPException, Header, Depends, Request
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session as DBSession
 
-from app.db import get_db
+from app.db import get_core_db
 from app.models import AuditLog, MfaTransaction, RateLimit, User, Session, UserTrustedDevice
 from app.authz import get_current_auth_context, AuthContext
 from app.schemas import LoginResponse
@@ -40,6 +45,11 @@ router = APIRouter(prefix="/api/v1/devices", tags=["devices"])
 # then store a SHA-256 hash.  This is intentionally lightweight — no browser
 # canvas, WebGL, or audio fingerprinting.  It is sufficient to distinguish
 # a browser/OS combination without tracking individuals.
+#
+# The canonical implementation lives in ``app/device_fingerprint`` so that
+# Core (``app.auth``) and Detection (``app.detection``) share ONE algorithm
+# instead of growing a second one.  The helpers below are thin wrappers kept
+# for backward compatibility with existing call sites and tests.
 
 def generate_device_fingerprint(request: Request) -> str:
     """Derive a deterministic device fingerprint from request headers.
@@ -48,16 +58,12 @@ def generate_device_fingerprint(request: Request) -> str:
     single string and returns it.  The result is hashed before storage so the
     raw header values never appear in the database.
     """
-    user_agent = request.headers.get("User-Agent", "")
-    accept_language = request.headers.get("Accept-Language", "")
-    accept_encoding = request.headers.get("Accept-Encoding", "")
-    material = f"{user_agent}|{accept_language}|{accept_encoding}"
-    return material
+    return fingerprint_material_from_headers(request.headers)
 
 
 def hash_fingerprint(fingerprint: str) -> str:
     """Return the SHA-256 hex digest of ``fingerprint``."""
-    return hashlib.sha256(fingerprint.encode()).hexdigest()
+    return hash_fingerprint_raw(fingerprint)
 
 
 # =============================================================================
@@ -187,7 +193,7 @@ def _audit_device_action(
 async def list_trusted_devices(
     request: Request,
     ctx: AuthContext = Depends(get_current_auth_context),
-    db=Depends(get_db),
+    db=Depends(get_core_db),
 ) -> TrustedDeviceList:
     """
     List all trusted devices for current user (UC-05).
@@ -210,7 +216,7 @@ async def trust_device(
     request: Request,
     body: TrustDeviceRequest,
     ctx: AuthContext = Depends(get_current_auth_context),
-    db=Depends(get_db),
+    db=Depends(get_core_db),
 ) -> TrustDeviceResponse:
     """
     Register current device as trusted (UC-05).
@@ -302,7 +308,7 @@ async def trust_device(
 async def request_trusted_device_approval(
     body: PendingTrustedDeviceRequest,
     request: Request,
-    db=Depends(get_db),
+    db=Depends(get_core_db),
 ) -> PendingTrustedDeviceResponse:
     """Ask a currently logged-in device to approve this new device.
 
@@ -455,7 +461,7 @@ async def approve_trusted_device(
     request_id: UUID,
     request: Request,
     ctx: AuthContext = Depends(get_current_auth_context),
-    db=Depends(get_db),
+    db=Depends(get_core_db),
 ) -> TrustedDeviceApprovalResponse:
     """Approve a new device from a familiar, already-authenticated session."""
     pending = (
@@ -533,7 +539,7 @@ async def approve_trusted_device(
 async def complete_trusted_device_login(
     request_id: UUID,
     request: Request,
-    db=Depends(get_db),
+    db=Depends(get_core_db),
 ) -> LoginResponse:
     """Finish a trusted-device login after an existing device approved it."""
     from app.auth import _create_session, _login_event, _pre_token_risk, _send_login_event
@@ -589,6 +595,9 @@ async def complete_trusted_device_login(
         client_ip,
         request.headers.get("User-Agent"),
         db,
+        # The trusted-device flow already verified the fingerprint, so the
+        # event carries the same canonical (hashed) fingerprint.
+        device_fingerprint=_device_fingerprint_hash(request),
     )
     _audit_device_action(
         db,
@@ -606,7 +615,7 @@ async def complete_trusted_device_login(
 @router.delete("/all", status_code=204)
 async def untrust_all_devices(
     ctx: AuthContext = Depends(get_current_auth_context),
-    db=Depends(get_db),
+    db=Depends(get_core_db),
 ) -> None:
     """
     Remove all trusted devices for current user.
@@ -623,7 +632,7 @@ async def untrust_all_devices(
 async def untrust_device(
     device_id: UUID,
     ctx: AuthContext = Depends(get_current_auth_context),
-    db=Depends(get_db),
+    db=Depends(get_core_db),
 ) -> None:
     """
     Remove a device from trusted list (UC-05).
@@ -647,7 +656,7 @@ async def untrust_device(
 async def check_device_trusted(
     request: Request,
     authorization: Optional[str] = Header(None),
-    db=Depends(get_db),
+    db=Depends(get_core_db),
 ) -> dict:
     """
     Check if current device is trusted.

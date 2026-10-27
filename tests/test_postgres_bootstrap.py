@@ -28,6 +28,8 @@ import sqlalchemy as sa
 from sqlalchemy import create_engine, text
 from sqlalchemy.engine import Connection
 
+from tests.postgres_env import assert_disposable_database, require_postgres_env
+
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -42,6 +44,11 @@ POSTGRES_PASSWORD = os.environ.get("POSTGRES_PASSWORD", "sentinel123")
 
 def _pg_url() -> str:
     return f"postgresql+psycopg2://{POSTGRES_USER}:{POSTGRES_PASSWORD}@{POSTGRES_HOST}:{POSTGRES_PORT}/{POSTGRES_DB}"
+
+
+# Without a configured PostgreSQL the whole module is skipped with an
+# explicit reason, instead of erroring during fixture setup.
+require_postgres_env(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -61,6 +68,9 @@ SCHEMA_ML = os.path.join(REPO_ROOT, "infra", "postgres", "schema-ml-service-v3.3
 @pytest.fixture(scope="module")
 def engine():
     """PostgreSQL engine for the module."""
+    # The bootstrap recreates the public schema, so the target must not be a
+    # canonical production database.
+    assert_disposable_database(_pg_url(), "the PostgreSQL bootstrap tests")
     eng = create_engine(_pg_url(), isolation_level="AUTOCOMMIT")
     yield eng
     eng.dispose()
@@ -87,6 +97,13 @@ def reset_seed_state(engine: sa.Engine, bootstrap_done):
 
     Creates its own connection directly from the engine to avoid
     fixture ordering issues with the autouse+yield db chain.
+
+    The seeded model ``v1.0-isolation-forest`` is a NON-PRODUCTION PLACEHOLDER
+    (``status='staged'``, ``is_production=FALSE``).  It must stay that way:
+    no measured artifact has passed the production acceptance benchmark, so
+    promoting it would be a false claim.  The tests that exercise the
+    single-active-production-model constraint create their OWN temporary
+    production row instead of promoting the seed.
     """
     with engine.connect() as conn:
         # Safety net: archive any stale active production models
@@ -101,10 +118,10 @@ def reset_seed_state(engine: sa.Engine, bootstrap_done):
         conn.execute(
             text("DELETE FROM model_versions WHERE version != 'v1.0-isolation-forest'")
         )
-        # Restore seed model to active production
+        # Restore the seed model to its canonical STAGED / non-production state
         conn.execute(
             text(
-                "UPDATE model_versions SET status = 'active', is_production = TRUE "
+                "UPDATE model_versions SET status = 'staged', is_production = FALSE "
                 "WHERE version = 'v1.0-isolation-forest'"
             )
         )
@@ -357,15 +374,8 @@ class TestSingleActiveModelEnforcement:
 
     def test_sequential_model_activation_succeeds(self, db: Connection):
         """Sequential deactivate-then-activate flow works without errors."""
-        # Archive the seeded production model
-        db.execute(
-            text(
-                "UPDATE model_versions SET status = 'archived' "
-                "WHERE version = 'v1.0-isolation-forest'"
-            )
-        )
-
-        # Insert new production model
+        # The seed model is a non-production placeholder, so this test owns
+        # the production slot itself instead of promoting the seed.
         db.execute(
             text(
                 "INSERT INTO model_versions "
@@ -409,12 +419,14 @@ class TestSingleActiveModelEnforcement:
 
     def test_concurrent_active_model_insert_fails(self, db: Connection):
         """Attempting to insert a second active production model raises a DB error."""
-        # Ensure seeded model is active
+        # Occupy the single production slot with our own row.
         db.execute(
             text(
-                "UPDATE model_versions SET status = 'active', is_production = TRUE "
-                "WHERE version = 'v1.0-isolation-forest'"
-            )
+                "INSERT INTO model_versions "
+                "(name, version, algorithm, model_path, config, status, is_production) "
+                "VALUES (:n, :v, 'TestAlgo', '/tmp/model.joblib', '{}'::jsonb, 'active', TRUE)"
+            ),
+            {"n": "Existing Production Model", "v": "v1.0-test-pg-ml-holder"},
         )
 
         # Second insert fails with unique violation

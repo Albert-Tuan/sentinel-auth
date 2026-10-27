@@ -50,7 +50,7 @@ CHUONG_II: list[tuple[str, object]] = [
           "trả về nghìn không bốn trăm hai mươi chín. Chỉ khi còn trong ngưỡng mới tăng "
           "bộ đếm."),
     ("P", "Bước hai, tra cứu tài khoản theo tên đăng nhập. Nếu không tìm thấy, ghi "
-          "bản ghi lần đăng nhập với kết quian thất bại và mã người dùng để trống, rồi "
+          "bản ghi lần đăng nhập với kết quả thất bại và mã người dùng để trống, rồi "
           "trả thông báo chung chung. Việc dùng thông báo chung có chủ ý: phân biệt "
           "tài khoản không tồn tại với mật khẩu sai sẽ cho kẻ tấn công biết tên đăng "
           "nhập nào hợp lệ."),
@@ -591,10 +591,12 @@ CHUONG_II: list[tuple[str, object]] = [
     (
         "P",
         "Có bốn hành động mà phân viên SOC thực hiện. Tiếp nhận: ghi nhận trách nhiệm. Ghi "
-        "chú: bổ sung thông tin điều tra. Yêu cầu hành động bảo vệ: thực thi một trong bốn "
-        "hành động ở bảng 2.13. Kết luận hoặc đánh dấu báo nhầm: kết thúc vòng đời cảnh báo. "
-        "Riêng leo thang được ghi thêm vào dòng thời gian mà không đóng cảnh báo, vì vấn đề "
-        "chưa được giải quyết.",
+        "chú: bổ sung thông tin điều tra. Thực hiện hành động bảo vệ: gửi yêu cầu hệ "
+        "thống thực thi một trong bốn hành động ở Bảng 2.13. Kết luận hoặc đánh dấu báo "
+        "nhầm: kết thúc vòng đời cảnh báo. Riêng ghi nhận leo thang (event_type=escalated "
+        "trong alert_timeline) chỉ tạo dòng thời gian mà không đổi trạng thái cảnh báo, "
+        "vì ESCALATED không phải trạng thái — trạng thái chỉ gồm open, acknowledged, "
+        "resolved, false_positive.",
     ),
     (
         "TABLE",
@@ -611,7 +613,7 @@ CHUONG_II: list[tuple[str, object]] = [
                  "Chỉ được khi chưa có người nhận; nếu đã có người nhận thì trả mã xung đột"],
                 ["Ghi chú điều tra", "Phân viên SOC",
                  "Ghi vào dòng thời gian với loại sự kiện ghi chú; không đổi trạng thái"],
-                ["Yêu cầu hành động bảo vệ", "Phân viên SOC, quản trị viên",
+                ["Thực hiện hành động bảo vệ", "Phân viên SOC, quản trị viên",
                  "Bắt buộc có lý do; hệ thống trả về số phiên đã thu hồi"],
                 ["Kết luận", "Phân viên SOC",
                  "Bắt buộc có nội dung kết luận; ghi người kết luận và thời điểm"],
@@ -882,13 +884,13 @@ CHUONG_II: list[tuple[str, object]] = [
                  "- Ghi người kết luận và thời điểm kết luận\n"
                  "- Chuyển trạng thái sang đã kết luận và ghi dòng thời gian",
                  "Chi tiết cảnh báo", "Có ghi audit"],
-                ["7", "Leo thang cảnh báo", "Cập nhật",
+                ["7", "Ghi nhận leo thang", "Cập nhật",
                  "- Theo quyền được cấp\n"
-                 "- Không đóng cảnh báo, chỉ ghi dòng thời gian loại leo thang\n"
-                 "- Chuyển quyết định phê duyệt lên quản lý bảo mật\n"
-                 "- Có thể ghi kèm ghi chú lý do leo thang",
+                 "- Không đổi trạng thái cảnh báo — ESCALATED không phải trạng thái\n"
+                 "- Chỉ ghi dòng thời gian event_type=escalated (supervisory marker)\n"
+                 "- APPROVED DESIGN / IMPLEMENTATION PENDING: endpoint chuyên biệt",
                  "Chi tiết cảnh báo", "Có ghi audit"],
-                ["8", "Yêu cầu hành động bảo vệ", "Cập nhật",
+                ["8", "Thực hiện hành động bảo vệ", "Cập nhật",
                  "- Bắt buộc có lý do\n"
                  "- Kiểm tra hành động hợp lệ, trả mã 400 nếu không\n"
                  "- Phản hồi trả về số phiên đã thu hồi\n"
@@ -1299,9 +1301,9 @@ CHUONG_II: list[tuple[str, object]] = [
     ),
     ("CAP", "Bảng 2.22  Yêu cầu chất lượng và mức độ đáp ứng hiện tại"),
     ("NOTE",
-     "[CẦN XÁC NHẬN TIÊU CHÍ ĐỊNH LƯỢNG] — Nhóm chưa xác lập được các ngưỡng định lượng "
-     "cụ thể cho: thời gian phản hồi của điểm cuối đăng nhập, số lần đăng nhập đồng thời "
-     "chịu được, tỉ lệ cảnh báo báo nhầm chấp nhận được, thời gian tối đa để một cảnh báo "
-     "được phân viên tiếp nhận, và thời gian lưu giữ dữ liệu chấm điểm và nhật ký kiểm "
-     "toán. Các ngưỡng này cần được chốt cùng giảng viên hướng dẫn và ghi bổ sung vào báo cáo."),
+     "Nhóm chưa xác lập được các ngưỡng định lượng cụ thể cho: thời gian phản hồi của "
+     "điểm cuối đăng nhập, số lần đăng nhập đồng thời chịu được, tỉ lệ cảnh báo nhầm "
+     "chấp nhận được, thời gian tối đa để một cảnh báo được phân viên tiếp nhận, và thời "
+     "gian lưu giữ dữ liệu chấm điểm và nhật ký kiểm toán. "
+     "Các ngưỡng này cần được chốt cùng giảng viên hướng dẫn và ghi bổ sung vào báo cáo."),
 ]
