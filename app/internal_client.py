@@ -51,6 +51,33 @@ logger = logging.getLogger(__name__)
 ACTION_ENFORCE_TIMEOUT_SECONDS = 3.0
 
 
+class ActionOutcome:
+    """The full result of a Core action call.
+
+    ``response`` holds the decoded Core body when the action WAS enforced.
+    ``error`` describes why it was not, and is ``None`` on success.  The
+    boolean ``enforced`` is the single question callers usually need.
+    """
+
+    def __init__(
+        self,
+        response: Optional[Dict[str, Any]] = None,
+        error: Optional[str] = None,
+        status_code: Optional[int] = None,
+    ):
+        self.response = response
+        self.error = error
+        self.status_code = status_code
+
+    @property
+    def enforced(self) -> bool:
+        """True when Core accepted and applied the action."""
+        return self.response is not None
+
+    def __bool__(self) -> bool:
+        return self.enforced
+
+
 def core_app_url() -> str:
     """Base URL of the Core App, without trailing slash.
 
@@ -61,7 +88,7 @@ def core_app_url() -> str:
     return os.getenv("CORE_APP_URL", "http://localhost:8000").rstrip("/")
 
 
-async def enforce_action_in_core(
+async def enforce_action_in_core_detailed(
     action: str,
     target_user_id: UUID,
     reason: str,
@@ -71,12 +98,11 @@ async def enforce_action_in_core(
     severity: Optional[str] = None,
     detected_at: Optional[datetime] = None,
     timeout: float = ACTION_ENFORCE_TIMEOUT_SECONDS,
-) -> Optional[Dict[str, Any]]:
+) -> ActionOutcome:
     """Ask the Core context to enforce a protective action.
 
-    Returns the decoded Core response on success, or ``None`` when the
-    action was not enforced (secret missing, Core unreachable, or Core
-    rejected the request).
+    Returns an :class:`ActionOutcome` that says whether the action was
+    enforced and, when it was not, why.
 
     The idempotency key is what makes a retry safe: Core records it in its
     audit log, so re-delivering the same key reports ``already_applied``
@@ -103,7 +129,7 @@ async def enforce_action_in_core(
             "internal secret not configured, action %s not enforced for user %s",
             action, target_user_id,
         )
-        return None
+        return ActionOutcome(error="internal_auth_not_configured")
 
     try:
         async with httpx.AsyncClient(timeout=timeout) as client:
@@ -117,19 +143,55 @@ async def enforce_action_in_core(
             "core-app unreachable, action %s not enforced for user %s: %s",
             action, target_user_id, exc.__class__.__name__,
         )
-        return None
+        return ActionOutcome(error=f"core_unreachable:{exc.__class__.__name__}")
 
     if response.status_code >= 400:
         logger.warning(
             "core-app rejected action %s for user %s: HTTP %s",
             action, target_user_id, response.status_code,
         )
-        return None
+        return ActionOutcome(
+            error=f"core_http_{response.status_code}",
+            status_code=response.status_code,
+        )
 
     try:
         body = response.json()
     except ValueError:
         body = {}
 
+    if not isinstance(body, dict):
+        body = {}
+
     logger.info("enforced %s in core-app for user %s", action, target_user_id)
-    return body
+    return ActionOutcome(response=body, status_code=response.status_code)
+
+
+async def enforce_action_in_core(
+    action: str,
+    target_user_id: UUID,
+    reason: str,
+    *,
+    idempotency_key: Optional[str] = None,
+    alert_id: Optional[UUID] = None,
+    severity: Optional[str] = None,
+    detected_at: Optional[datetime] = None,
+    timeout: float = ACTION_ENFORCE_TIMEOUT_SECONDS,
+) -> Optional[Dict[str, Any]]:
+    """Ask the Core context to enforce a protective action.
+
+    Returns the decoded Core response on success, or ``None`` when the
+    action was not enforced (secret missing, Core unreachable, or Core
+    rejected the request).
+    """
+    outcome = await enforce_action_in_core_detailed(
+        action,
+        target_user_id,
+        reason,
+        idempotency_key=idempotency_key,
+        alert_id=alert_id,
+        severity=severity,
+        detected_at=detected_at,
+        timeout=timeout,
+    )
+    return outcome.response

@@ -49,6 +49,20 @@ class AlertStatusEnum(str):
     FALSE_POSITIVE = "false_positive"
 
 
+#: The four canonical alert statuses.  ``ESCALATED`` is deliberately NOT a
+#: status - escalation is recorded as an ``alert_timeline`` event.
+ALERT_STATUSES = frozenset({
+    AlertStatusEnum.OPEN,
+    AlertStatusEnum.ACKNOWLEDGED,
+    AlertStatusEnum.RESOLVED,
+    AlertStatusEnum.FALSE_POSITIVE,
+})
+
+#: Risk levels an alert can carry.  Kept in sync with the CHECK constraint
+#: on ``alerts.risk_level``.
+RISK_LEVELS = frozenset({"low", "medium", "high", "critical"})
+
+
 class TimelineEventType(str):
     CREATED = "created"
     ASSIGNED = "assigned"
@@ -59,6 +73,21 @@ class TimelineEventType(str):
     STATUS_CHANGED = "status_changed"
     RESOLVED = "resolved"
     FALSE_POSITIVE = "false_positive"
+
+
+#: The canonical timeline event types.  Kept in sync with the CHECK
+#: constraint on ``alert_timeline.event_type`` in the canonical schema.
+TIMELINE_EVENT_TYPES = frozenset({
+    TimelineEventType.CREATED,
+    TimelineEventType.ASSIGNED,
+    TimelineEventType.UNASSIGNED,
+    TimelineEventType.ACKNOWLEDGED,
+    TimelineEventType.ESCALATED,
+    TimelineEventType.NOTE_ADDED,
+    TimelineEventType.STATUS_CHANGED,
+    TimelineEventType.RESOLVED,
+    TimelineEventType.FALSE_POSITIVE,
+})
 
 
 # =============================================================================
@@ -316,8 +345,22 @@ async def list_alerts(
 
     Allowed roles: SOC_ANALYST or SECURITY_MANAGER only.
     SECURITY_ADMIN is NOT a SOC role and gets 403.
+
+    The filters are validated against the canonical vocabularies so an
+    unknown status or risk level returns a clear 400 instead of an
+    empty list that looks like "no alerts matched".
     """
-    """List alerts with filtering."""
+    if status is not None and status not in ALERT_STATUSES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"status must be one of {sorted(ALERT_STATUSES)}",
+        )
+    if risk_level is not None and risk_level not in RISK_LEVELS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"risk_level must be one of {sorted(RISK_LEVELS)}",
+        )
+
     query = db.query(Alert)
 
     if status:
@@ -693,7 +736,7 @@ async def request_security_action(
             detail=f"Unsupported action: {action.value}",
         )
 
-    core_response = await internal_client.enforce_action_in_core(
+    outcome = await internal_client.enforce_action_in_core_detailed(
         action.value,
         login_attempt.user_id,
         request.reason,
@@ -704,10 +747,29 @@ async def request_security_action(
         detected_at=login_attempt.timestamp,
     )
 
-    if core_response is None:
+    actor_id = get_authenticated_user_id(ctx)
+    client_ip = get_client_ip(ctx.request) if ctx.request else None
+
+    if not outcome.enforced:
         # Core did not enforce the action (unreachable, rejected, or the
         # internal secret is not configured).  Report the failure honestly
-        # instead of claiming the action was applied.
+        # instead of claiming the action was applied, and record the failed
+        # attempt in the timeline so the SOC can see that the action was
+        # requested but did not take effect.
+        _create_timeline_event(
+            db=db,
+            alert_id=alert_id,
+            event_type=TimelineEventType.NOTE_ADDED,
+            actor_id=actor_id,
+            actor_type="user",
+            new_value=action.value,
+            comment=(
+                f"Security action {action.value} was NOT enforced by Core "
+                f"({outcome.error or 'unknown error'}). Reason: {request.reason}"
+            ),
+            ip_address=client_ip,
+        )
+        db.commit()
         raise HTTPException(
             status_code=502,
             detail=(
@@ -716,12 +778,10 @@ async def request_security_action(
             ),
         )
 
+    core_response = outcome.response or {}
     details = dict(core_response.get("details") or {})
     details["reason"] = request.reason
     details["alert_id"] = str(alert_id)
-
-    actor_id = get_authenticated_user_id(ctx)
-    client_ip = get_client_ip(ctx.request) if ctx.request else None
 
     _create_timeline_event(
         db=db,
@@ -778,6 +838,15 @@ async def add_timeline_event(
     alert = db.query(Alert).filter(Alert.id == alert_id).first()
     if not alert:
         raise HTTPException(status_code=404, detail="Alert not found")
+
+    if request.event_type not in TIMELINE_EVENT_TYPES:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"event_type must be one of {sorted(TIMELINE_EVENT_TYPES)}, "
+                f"got {request.event_type!r}"
+            ),
+        )
 
     actor_id = get_authenticated_user_id(ctx)
     client_ip = get_client_ip(ctx.request) if ctx.request else None

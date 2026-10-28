@@ -26,12 +26,13 @@ from uuid import UUID, uuid4
 import httpx
 from fastapi import APIRouter, Depends, Header, HTTPException, status as http_status
 from pydantic import BaseModel
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session as OrmSession
 
 from app.db import get_detection_db
 from app.internal_auth import get_internal_secret, InternalAuthConfigurationError, verify_internal_secret
 from app import internal_client
-from app.models import Alert, DetectionLog, LoginAttempt, Policy, RiskAssessment
+from app.models import Alert, AlertTimeline, DetectionLog, LoginAttempt, Policy, RiskAssessment
 from app.schemas import (
     ActionRequest,
     ActionResponse,
@@ -505,8 +506,26 @@ class MlOutcome:
         self.error = error
 
 
-async def call_ml_service(features: Dict[str, Any], request_id: UUID) -> MlOutcome:
-    """POST /api/v1/internal/ml/score with a 5s timeout and safe fallback."""
+async def call_ml_service(
+    features: Dict[str, Any],
+    request_id: UUID,
+    timeout: float = ML_TIMEOUT_SECONDS,
+) -> MlOutcome:
+    """POST /api/v1/internal/ml/score with a 5s timeout and safe fallback.
+
+    ``timeout`` defaults to the canonical 5 seconds.  The pre-token gate
+    passes a smaller budget because Core abandons the gate after 3 seconds
+    (DECISIONS section 10.6); 5 seconds remains the ceiling.
+
+    Failure handling follows the contract (CONTRACT_DETECTION_ML section F):
+
+    * timeout or unreachable  -> ``ml_status = "unavailable"``
+    * HTTP >= 400, a malformed body, an out-of-range score or
+      ``model_status = "error"`` -> ``ml_status = "error"``
+
+    In every failure case the caller falls back to ``combined_score =
+    rule_score``, so the login pipeline is never blocked by a dead ML.
+    """
     url = f"{ml_service_url()}/api/v1/internal/ml/score"
     payload = {
         "request_id": str(request_id),
@@ -517,7 +536,7 @@ async def call_ml_service(features: Dict[str, Any], request_id: UUID) -> MlOutco
     except InternalAuthConfigurationError:
         return MlOutcome(None, "unavailable", error="internal_auth_not_configured")
     try:
-        async with httpx.AsyncClient(timeout=ML_TIMEOUT_SECONDS) as client:
+        async with httpx.AsyncClient(timeout=timeout) as client:
             response = await client.post(
                 url,
                 json=payload,
@@ -529,11 +548,28 @@ async def call_ml_service(features: Dict[str, Any], request_id: UUID) -> MlOutco
             return MlOutcome(None, "error", error=f"ml_service_http_{response.status_code}")
 
         body = response.json()
+        if not isinstance(body, dict):
+            return MlOutcome(None, "error", error="ml_service_bad_payload")
+
+        # ``model_status = "error"`` means the model itself is unavailable.
+        # The contract (section H) requires a rule-only fallback in that
+        # case, even when a score happens to be present in the body.
+        model_status = body.get("model_status")
+        if model_status == "error":
+            return MlOutcome(None, "error", error="ml_model_status_error")
+
         score = body.get("normalized_anomaly_score", body.get("anomaly_score"))
         if not isinstance(score, (int, float)) or isinstance(score, bool):
             return MlOutcome(None, "error", error="ml_service_bad_payload")
+        score = float(score)
+        if not 0.0 <= score <= 1.0:
+            # The contract pins the score to [0, 1].  A value outside that
+            # range is a broken contract, not a score to silently clamp:
+            # clamping would hide the fault and still move the verdict.
+            return MlOutcome(None, "error", error="ml_service_score_out_of_range")
+
         return MlOutcome(
-            score=float(min(1.0, max(0.0, float(score)))),
+            score=score,
             status="success",
             model_version=body.get("model_version"),
             reason_codes=body.get("reason_codes") or [],
@@ -561,12 +597,33 @@ def map_score_to_risk_level(score: float, thresholds: Dict[str, float]) -> str:
     return "critical"
 
 
-async def process_attempt(db, attempt: LoginAttempt, request_id: UUID) -> DetectionResponse:
+async def process_attempt(
+    db,
+    attempt: LoginAttempt,
+    request_id: UUID,
+    *,
+    persist: bool = True,
+) -> DetectionResponse:
     """Score one login attempt, persist the results and create an alert.
 
     Implements DECISIONS sections 2 and 4.
+
+    ``persist=False`` scores the attempt WITHOUT writing an assessment, an
+    alert or a lifecycle change.  That mode exists for the pre-token gate
+    (section 10): Core asks for a verdict *before* it emits the canonical
+    LoginEvent, so the gate must not create a second
+    ``login_attempts`` row, a second ``risk_assessments`` row or a second
+    alert for the same login.  The later ``/login-events`` delivery performs
+    the real, persisted scoring exactly once.
+
+    The function is idempotent for a given attempt: the assessment is
+    updated in place (it is 1:1 with the attempt) and an existing alert is
+    reused instead of duplicated.  Re-scoring an attempt therefore never
+    produces a second alert or a second destructive Core action.
     """
     def log(stage: str, **kwargs) -> None:
+        if not persist:
+            return
         db.add(
             DetectionLog(
                 login_attempt_id=attempt.id,
@@ -585,10 +642,11 @@ async def process_attempt(db, attempt: LoginAttempt, request_id: UUID) -> Detect
             reason="no_policy",
             details={"note": "no active policy, allow and skip scoring"},
         )
-        attempt.status = "processed"
-        attempt.risk_level = "low"
-        attempt.detection_decision = "allow"
-        db.commit()
+        if persist:
+            attempt.status = "processed"
+            attempt.risk_level = "low"
+            attempt.detection_decision = "allow"
+            db.commit()
         return DetectionResponse(
             rule_score=0.0,
             ml_score=None,
@@ -675,26 +733,63 @@ async def process_attempt(db, attempt: LoginAttempt, request_id: UUID) -> Detect
         },
     )
 
-    # Persist the assessment
-    assessment = RiskAssessment(
-        login_attempt_id=attempt.id,
-        policy_id=policy.id,
-        rule_score=rule_score,
-        ml_score=ml.score,
-        combined_score=combined,
-        ml_status=ml.status,
-        ml_model_version=ml.model_version,
-        rule_hits=[h.model_dump() for h in hits],
-        ml_reason_codes=ml.reason_codes,
-        ml_features_used=features,
-        risk_level=risk_level,
-        decision=decision,
-    )
-    db.add(assessment)
+    # Persist the assessment.  ``risk_assessments`` is 1:1 with
+    # ``login_attempts`` (uq_risk_assessment_login), so a re-score updates
+    # the existing row instead of violating the constraint.  That keeps the
+    # "one attempt -> exactly one assessment" invariant even when the rescore
+    # sweep revisits an attempt that was partially processed.
+    #
+    # A non-persisted run (the pre-token gate) writes nothing at all: the
+    # attempt is transient, so an assessment pointing at it would violate
+    # the foreign key.
+    if persist:
+        existing_assessment = (
+            db.query(RiskAssessment)
+            .filter(RiskAssessment.login_attempt_id == attempt.id)
+            .first()
+        )
+        if existing_assessment is None:
+            existing_assessment = RiskAssessment(
+                login_attempt_id=attempt.id,
+                policy_id=policy.id,
+            )
+            db.add(existing_assessment)
+        existing_assessment.policy_id = policy.id
+        existing_assessment.rule_score = rule_score
+        existing_assessment.ml_score = ml.score
+        existing_assessment.combined_score = combined
+        existing_assessment.ml_status = ml.status
+        existing_assessment.ml_model_version = ml.model_version
+        existing_assessment.rule_hits = [h.model_dump() for h in hits]
+        existing_assessment.ml_reason_codes = ml.reason_codes
+        existing_assessment.ml_features_used = features
+        existing_assessment.risk_level = risk_level
+        existing_assessment.decision = decision
 
-    # Create the alert for high and critical risk
+    # Create the alert for high and critical risk.
+    #
+    # The alert is created only when the attempt does not already have one.
+    # The re-score sweep revisits attempts that a previous run may have
+    # alerted on before it crashed; without this check a re-score would
+    # produce a second alert - and a second destructive Core action - for
+    # a single login.
     alert_id = None
-    if create_alert:
+    existing_alert = (
+        db.query(Alert)
+        .filter(Alert.login_attempt_id == attempt.id)
+        .first()
+    )
+    if existing_alert is not None:
+        alert_id = existing_alert.id
+        attempt.primary_alert_id = existing_alert.id
+        log(
+            "action_sent",
+            stage_detail="no_alert",
+            decision=decision,
+            reason="alert_already_exists",
+            details={"alert_id": str(existing_alert.id)},
+        )
+    elif create_alert and persist:
         alert = Alert(
             login_attempt_id=attempt.id,
             policy_id=policy.id,
@@ -716,15 +811,36 @@ async def process_attempt(db, attempt: LoginAttempt, request_id: UUID) -> Detect
         db.flush()
         attempt.primary_alert_id = alert.id
         alert_id = alert.id
+        # The alert timeline is the SOC's audit trail.  A pipeline-created
+        # alert must start its own trail, otherwise the first timeline
+        # entry claims the analyst opened an alert that Detection opened.
+        db.add(
+            AlertTimeline(
+                alert_id=alert.id,
+                event_type="created",
+                actor_type="system",
+                new_value="open",
+                comment=(
+                    f"Alert created automatically by the Detection Engine "
+                    f"(risk_level={risk_level}, combined={combined:.4f})."
+                ),
+            )
+        )
         log("action_sent", stage_detail="alert_created", decision=decision, details={"alert_id": str(alert.id)})
-    else:
+    elif not create_alert:
         log("action_sent", stage_detail="no_alert", decision=decision, reason="risk below alert threshold")
 
-    attempt.policy_id = policy.id
-    attempt.status = "processed"
-    attempt.risk_level = risk_level
-    attempt.detection_decision = decision
-    db.commit()
+    if persist:
+        attempt.policy_id = policy.id
+        attempt.status = "processed"
+        attempt.risk_level = risk_level
+        attempt.detection_decision = decision
+        db.commit()
+    else:
+        # Nothing was written: the assessment, the alert and the lifecycle
+        # change are all skipped in a non-persisted run.  Roll back so the
+        # session is clean for the caller's next use.
+        db.rollback()
 
     return DetectionResponse(
         rule_score=round(rule_score, 4),
@@ -744,6 +860,7 @@ async def enforce_action_in_core(
     attempt: LoginAttempt,
     risk_level: str,
     alert_id: Optional[UUID] = None,
+    db=None,
 ) -> bool:
     """Ask Core App to enforce a protective action for a risky login (UC-DE-07).
 
@@ -758,6 +875,10 @@ async def enforce_action_in_core(
     The HTTP call itself lives in :mod:`app.internal_client`, which is
     shared with the SOC alert workflow so both Detection entry points use
     exactly one implementation of the Core action boundary.
+
+    When ``db`` is given, the outcome is recorded in ``detection_logs``
+    (stage ``action_sent``) so that a failed enforcement is observable
+    instead of only appearing in the application log.
     """
     action = RISK_ACTION_MAP.get(risk_level)
     if action is None or attempt.user_id is None:
@@ -772,7 +893,7 @@ async def enforce_action_in_core(
     )
     severity = risk_level if risk_level in ("high", "critical") else None
 
-    response = await internal_client.enforce_action_in_core(
+    outcome = await internal_client.enforce_action_in_core_detailed(
         action,
         attempt.user_id,
         reason,
@@ -781,7 +902,62 @@ async def enforce_action_in_core(
         severity=severity,
         detected_at=attempt.timestamp,
     )
-    return response is not None
+
+    if db is not None:
+        _record_action_outcome(
+            db,
+            attempt=attempt,
+            request_id=attempt.request_id,
+            action=action,
+            risk_level=risk_level,
+            enforced=outcome.enforced,
+            error=outcome.error,
+            alert_id=alert_id,
+        )
+
+    return outcome.enforced
+
+
+def _record_action_outcome(
+    db,
+    *,
+    attempt: LoginAttempt,
+    request_id,
+    action: str,
+    risk_level: str,
+    enforced: bool,
+    error: Optional[str],
+    alert_id: Optional[UUID],
+) -> None:
+    """Record whether Core enforced the protective action.
+
+    The verdict and the alert are already committed at this point, so a
+    failure here must be recorded rather than raised: the Detection verdict
+    stands and the SOC picks the alert up manually.  Writing the failure
+    into ``detection_logs`` is what makes "the action was NOT enforced"
+    visible to a SOC analyst reading the evidence.
+    """
+    try:
+        db.add(
+            DetectionLog(
+                login_attempt_id=attempt.id,
+                request_id=request_id,
+                stage="action_sent",
+                stage_detail=action,
+                decision=attempt.detection_decision,
+                reason=None if enforced else (error or "action_not_enforced"),
+                details={
+                    "action": action,
+                    "enforced": enforced,
+                    "risk_level": risk_level,
+                    "alert_id": str(alert_id) if alert_id else None,
+                },
+            )
+        )
+        db.commit()
+    except Exception:  # noqa: BLE001 - observability must not break scoring
+        logger.exception("could not record the action outcome for attempt %s", attempt.id)
+        db.rollback()
 
 
 async def rescore_failed_attempts(db, limit: int = 50) -> int:
@@ -815,7 +991,7 @@ async def rescore_failed_attempts(db, limit: int = 50) -> int:
             logger.exception("rescore still failing for attempt %s", attempt.id)
             db.rollback()
             continue
-        await enforce_action_in_core(attempt, result.risk_level, result.alert_id)
+        await enforce_action_in_core(attempt, result.risk_level, result.alert_id, db=db)
         recovered += 1
 
     logger.info("rescored %s/%s failed login attempts", recovered, len(failed))
@@ -882,7 +1058,27 @@ async def receive_login_event(
         request_id=request_id,
     )
     db.add(attempt)
-    db.commit()
+    try:
+        db.commit()
+    except IntegrityError:
+        # Two deliveries of the same event raced each other.  The unique
+        # constraint on ``event_id`` is the final arbiter: the loser of the
+        # race reads the winner's row and returns it, so the business effect
+        # stays exactly-once.
+        db.rollback()
+        existing = (
+            db.query(LoginAttempt)
+            .filter(LoginAttempt.event_id == payload.event_id)
+            .first()
+        )
+        if existing is None:
+            raise
+        return LoginEventResponse(
+            status="accepted",
+            event_id=payload.event_id,
+            login_attempt_id=existing.id,
+            processing=existing.status,
+        )
     db.refresh(attempt)
 
     # Pre-computed features from core-app override the derived ones
@@ -929,7 +1125,7 @@ async def receive_login_event(
         # The verdict is committed; now let Core App enforce it. Runs after
         # the commit so a slow or dead Core App cannot roll back the
         # assessment or the alert we just wrote.
-        await enforce_action_in_core(attempt, result.risk_level, result.alert_id)
+        await enforce_action_in_core(attempt, result.risk_level, result.alert_id, db=db)
 
     return LoginEventResponse(
         status="accepted",
@@ -992,6 +1188,18 @@ async def pre_token_check(
     is advisory: Core App fails open if this endpoint is unavailable, because
     locking every user out when the Detection Engine is down is a worse
     outcome than letting one login through unscored.
+
+    The gate is a READ of the risk picture, not a second event.  Core emits
+    the canonical LoginEvent for the same login right afterwards, through
+    ``POST /api/v1/internal/login-events``, and THAT delivery is the one
+    that persists the attempt, the assessment, the alert and the protective
+    action.  If the gate persisted its own attempt, one login would produce
+    two ``login_attempts`` rows, two ``risk_assessments`` rows and - for a
+    high/critical verdict - two alerts and two destructive Core actions.
+
+    Therefore the gate scores against a transient, in-memory attempt: the
+    feature builder reads the user's real history from the Detection
+    database, but nothing about the gate's own attempt is written.
     """
     verify_internal_secret(x_internal_secret)
 
@@ -1005,12 +1213,14 @@ async def pre_token_check(
         timestamp=payload.timestamp or datetime.now(timezone.utc),
         status="pending",
     )
-    db.add(attempt)
-    db.commit()
-    db.refresh(attempt)
 
     try:
-        result = await process_attempt(db, attempt, attempt.request_id or uuid4())
+        result = await process_attempt(
+            db,
+            attempt,
+            attempt.request_id or uuid4(),
+            persist=False,
+        )
     except Exception:  # noqa: BLE001 - fail open, never block the login
         logger.exception("pre-token-check failed for user %s", payload.user_id)
         db.rollback()
@@ -1074,8 +1284,20 @@ async def activate_policy(
     ctx: AuthContext = Depends(require_roles("SECURITY_ADMIN")),
     db=Depends(get_detection_db),
 ) -> dict:
-    """Activate a policy. SECURITY_ADMIN only."""
-    policy = db.query(Policy).filter(Policy.id == policy_id).first()
+    """Activate a policy. SECURITY_ADMIN only.
+
+    Only ONE policy may be active at a time.  The canonical schema enforces
+    that with the partial unique index ``idx_policies_single_active``.  This
+    handler additionally takes a row lock on the policy being activated and
+    deactivates the current one inside the same transaction, so two
+    concurrent activations cannot both believe they succeeded.
+    """
+    policy = (
+        db.query(Policy)
+        .filter(Policy.id == policy_id)
+        .with_for_update()
+        .first()
+    )
     if policy is None:
         raise HTTPException(status_code=http_status.HTTP_404_NOT_FOUND, detail="Policy not found")
 
@@ -1093,9 +1315,21 @@ async def activate_policy(
         )
 
     now = datetime.now(timezone.utc)
-    for other in db.query(Policy).filter(Policy.is_active.is_(True)).all():
+    others = [
+        other
+        for other in db.query(Policy).filter(Policy.is_active.is_(True)).all()
+        if other.id != policy.id
+    ]
+    for other in others:
         other.is_active = False
         other.deactivated_at = now
+    if others:
+        # Flush the deactivations BEFORE claiming the active slot.  The
+        # partial unique index allows exactly one active policy, so the
+        # UPDATE that releases the slot has to reach the database first.
+        # Without this flush the ORM may order the two UPDATEs the other way
+        # round and the constraint would reject the activation.
+        db.flush()
     policy.is_active = True
     policy.activated_at = now
     policy.deactivated_at = None
