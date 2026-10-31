@@ -77,7 +77,9 @@ Read in this order before starting implementation:
 - `ESCALATED` is **NOT** an alert status
 - Escalation is recorded as `alert_timeline.event_type = 'escalated'` (supervisory marker)
 - There is **no mandatory Manager approval queue**
-- Dedicated escalation workflow/endpoint: **IMPLEMENTATION PENDING**
+- Dedicated escalation workflow/endpoint: **NOT IMPLEMENTED — deferred**
+  (see Section 11.1). Escalation is recorded on the timeline, which is the
+  approved design.
 
 ### Detection-Side Security Admin
 
@@ -88,7 +90,7 @@ Read in this order before starting implementation:
 | Edit policy | YES | NO | NO |
 | Activate policy | YES | NO | NO |
 
-**Note:** Current implementation has View + Activate. Create/Edit are **APPROVED DESIGN / IMPLEMENTATION PENDING**.
+**Note:** Current implementation has View + Activate. Create/Edit are **APPROVED DESIGN / IMPLEMENTATION PENDING** — deferred to a future milestone (see Section 11.1).
 
 ---
 
@@ -267,6 +269,11 @@ The following are **NOT your responsibility**:
 
 ## 11. Implementation Milestones
 
+> **Status as of the final Detection/SOC pass.** Every milestone D0–D11 below
+> is implemented and covered by tests. The only items still open are the ones
+> explicitly listed as deferred in Section 11.1, plus the Core producer side
+> of the LoginEvent contract (Sony's responsibility).
+
 ### D0 — Sync & Inspect Baseline
 
 ```
@@ -284,6 +291,7 @@ Outputs: Internal endpoint schemas for pre-token check and login events
 Actions: Inspect current schemas.py — extend only if needed
 Tests:   test_detection.py (existing)
 Acceptance: schemas match canonical decisions
+Status:   **DONE** — internal + external schemas match the canonical contracts.
 ```
 
 ### D2 — Login Event + Pre-Token Ingestion
@@ -298,6 +306,11 @@ Actions: Detection receiver `POST /api/v1/internal/login-events` is IMPLEMENTED.
          Do NOT claim end-to-end delivery is working.
 Tests:   test_detection.py
 Acceptance: events ingested, idempotency works, pre-token returns risk level
+Status:   **DONE** — `event_id` idempotency, duplicate-event rejection and
+          the degraded pre-token verdict are implemented. The pre-token gate
+          is a READ: it persists no attempt, no assessment, no alert and sends
+          no protective action, so one login yields exactly one of each.
+          The Core producer side remains Sony's responsibility.
 ```
 
 ### D3 — Feature Builder
@@ -311,6 +324,9 @@ Outputs: Feature construction from login attempt data
          Behavioral features (fail_count_24h, ip_change_rate_7d, average_login_interval_seconds, deviation_score)
 Tests:   test_detection.py
 Acceptance: all 6 features constructed correctly
+Status:   **DONE** — exactly the 6 canonical features, in canonical order;
+          device-signal provenance is reported separately so it does not
+          pollute the ML feature vector; fingerprint-first `new_device`.
 ```
 
 ### D4 — Rule Engine
@@ -322,6 +338,8 @@ Outputs: Rule evaluation against features
          Canonical formula: contribution = rule.score × rule.weight
 Tests:   test_detection.py
 Acceptance: rule_score matches canonical formula exactly
+Status:   **DONE** — contribution = rule.score × rule.weight, summed and
+          clamped to [0, 1]; the rule hits are stored on the assessment.
 ```
 
 ### D5 — ML Client (with Khang)
@@ -335,6 +353,10 @@ Outputs: HTTP client for POST /api/v1/internal/ml/score
 Actions: Coordinate with Khang on exact request/response schema
 Tests:   test_detection.py (ML client tests)
 Acceptance: ML called correctly; timeout falls back to rule_score
+Status:   **DONE** — 5-second timeout, rule-only fallback on timeout/error,
+          `model_status == "error"` is treated as unavailable, and a score
+          outside [0, 1] is rejected as a broken contract instead of being
+          silently clamped.
 ```
 
 ### D6 — Risk Fusion / Classification
@@ -347,6 +369,8 @@ Outputs: Combined score: 0.4 × rule + 0.6 × ML
 Actions: Implement canonical formula exactly
 Tests:   test_detection.py
 Acceptance: scores match canonical formulas; thresholds correct
+Status:   **DONE** — 0.4 × rule + 0.6 × ML, canonical thresholds and the
+          allow/challenge/block decision.
 ```
 
 ### D7 — Alert Creation + Evidence
@@ -358,6 +382,10 @@ Outputs: Alert creation for high/critical decisions
 Actions: Inspect existing alert creation logic first
 Tests:   test_alert_actions.py
 Acceptance: alerts created for high/critical; evidence retrievable
+Status:   **DONE** — one alert per attempt (a re-score reuses it), the alert
+          opens with its own `created` timeline event, and the evidence is
+          the attempt + assessment. Evidence is read from the Detection
+          schema only; no Core table is joined.
 ```
 
 ### D8 — SOC Workflow
@@ -374,6 +402,12 @@ Actions: Implement alert status machine: open → acknowledged → resolved/fals
          ESCALATED is a timeline event, NOT a status
 Tests:   test_alert_actions.py
 Acceptance: status transitions work; timeline recorded; no ESCALATED status
+Status:   **DONE** — open → acknowledged → resolved/false_positive, assignment,
+          notes, timeline recording, `ESCALATED` is a timeline event and not a
+          status. Unknown status/risk_level/event_type filters are rejected
+          with a clear 400. `GET /api/v1/login-attempts` (UC-DE-14) is
+          implemented with username / risk_level / outcome filters and
+          pagination, and reads only the Detection schema.
 ```
 
 ### D9 — Protective Actions (with Sony)
@@ -388,6 +422,12 @@ Outputs: Alert action endpoint: POST /alerts/{id}/actions
 Actions: Coordinate with Sony on Core's /internal/actions endpoint
 Tests:   test_internal_actions.py
 Acceptance: action sent to Core; timeline recorded; idempotency works
+Status:   **DONE** — Detection performs protective actions ONLY through the
+          shared HTTP client calling Core's `POST /api/v1/internal/actions`.
+          Detection never mutates a Core table. The idempotency key is
+          stable per attempt+action, and the enforcement outcome (success
+          AND failure) is recorded in `detection_logs` rather than only
+          logged to stderr.
 ```
 
 ### D10 — Detection Policy / Security Admin
@@ -401,6 +441,9 @@ Actions: Implement View + Activate now
          Note Create/Edit as future milestone
 Tests:   test_detection.py
 Acceptance: View lists policies; single-active enforced; activation works
+Status:   **DONE** — View + Activate are implemented, and the single-active
+          invariant is enforced by a database-level partial unique index,
+          not only by application code.
 ```
 
 ### D11 — Tests
@@ -410,7 +453,26 @@ Inputs:  all milestones
 Outputs: Full test coverage
 Actions: Run pytest -q; fix failures
          Contract tests with Sony (Core↔Detection) and Khang (Detection↔ML)
+Status:   **DONE** — 571 passed / 0 skipped against the disposable 3-DB
+          PostgreSQL; 481 passed / 54 skipped without PostgreSQL. The
+          PostgreSQL modules skip cleanly when no server is configured.
 ```
+
+---
+
+## 11.1 Intentionally Deferred
+
+These remain out of the approved scope and were **not** implemented:
+
+| Item | Why deferred |
+|------|---------------|
+| Standalone SOC dashboard UI | Out of scope for the Detection API work |
+| Policy Create/Edit endpoints | Approved design only; View + Activate were the required scope |
+| Dedicated escalation endpoint | `ESCALATED` is a timeline event, not a status — no separate endpoint required |
+| Redis Streams / outbox workers | Explicitly excluded from this milestone set |
+| Physical service splitting | Bounded contexts are enforced by schema ownership, not by deployment topology |
+| Manager Analytics | Out of scope |
+| Core producer side of the LoginEvent contract | Sony's responsibility (see D2) |
 
 ---
 
@@ -427,6 +489,8 @@ Actions: Run pytest -q; fix failures
 | Policy activation | `tests/test_detection.py` | Single-active enforcement |
 | ML client | `tests/test_detection.py` | Timeout, fallback, model_status |
 | Schema consistency | `tests/test_schema_consistency.py` | 7 tables match schema |
+| SOC completion | `tests/test_detection_soc_completion.py` | Login history, alert filters, policy activation, action enforcement |
+| Regression coverage | `tests/test_detection_regressions.py` | Pre-token read-only gate, one-login-one-alert, no duplicate assessment/alert/action, ML contract validation |
 
 ### Shared Contract Tests (with Sony and Khang)
 

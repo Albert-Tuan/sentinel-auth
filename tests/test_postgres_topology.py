@@ -595,6 +595,10 @@ class TestSessionRouting:
         monkeypatch.delenv("DETECTION_DATABASE_URL", raising=False)
         monkeypatch.delenv("ML_DATABASE_URL", raising=False)
         monkeypatch.delenv(db.LEGACY_SINGLE_DB_FLAG, raising=False)
+        # The legacy URL must be absent for the first assertion: with it
+        # set, the Detection/ML contexts raise instead of resolving to
+        # their own built-in default.
+        monkeypatch.delenv(db.LEGACY_DATABASE_URL_ENV, raising=False)
 
         # No legacy URL at all -> the built-in per-context default is used,
         # which still points at the context's own database.

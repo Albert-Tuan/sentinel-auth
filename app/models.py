@@ -31,6 +31,8 @@ from sqlalchemy import (
     Numeric,
     Text,
     UniqueConstraint,
+    literal_column,
+    text,
 )
 from sqlalchemy.dialects.postgresql import INET, UUID
 from sqlalchemy.ext.compiler import compiles
@@ -473,6 +475,20 @@ class Policy(Base):
         Index("idx_policies_version", "version"),
         Index("idx_policies_active", "is_active"),
         Index("idx_policies_created_by", "created_by"),
+        # Single active policy.  The canonical schema expresses this as a
+        # partial unique index over a constant expression:
+        #     CREATE UNIQUE INDEX idx_policies_single_active
+        #         ON policies ((1)) WHERE is_active = TRUE;
+        # The ORM mirrors it so the constraint also holds in the SQLite unit
+        # tests, where the SQL file is not applied.  PostgreSQL applies the
+        # index from the schema file; the two definitions are equivalent.
+        Index(
+            "idx_policies_single_active",
+            literal_column("(1)"),
+            unique=True,
+            sqlite_where=text("is_active = TRUE"),
+            postgresql_where=text("is_active = TRUE"),
+        ),
     )
 
     id: Mapped[str] = Column(uuid_type(), primary_key=True, default=uuid4)
