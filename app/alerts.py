@@ -21,10 +21,11 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field, field_validator
 from sqlalchemy.orm import Session as OrmSession
 
-from app.db import get_db
+from app.db import get_detection_db
+from app import internal_client
 from app.models import (
     Alert, AlertTimeline, LoginAttempt, RiskAssessment,
-    User, Session, DetectionLog, SocAnalyst,
+    DetectionLog, SocAnalyst,
 )
 from app.schemas import SecurityAction
 from app.authz import (
@@ -48,6 +49,20 @@ class AlertStatusEnum(str):
     FALSE_POSITIVE = "false_positive"
 
 
+#: The four canonical alert statuses.  ``ESCALATED`` is deliberately NOT a
+#: status - escalation is recorded as an ``alert_timeline`` event.
+ALERT_STATUSES = frozenset({
+    AlertStatusEnum.OPEN,
+    AlertStatusEnum.ACKNOWLEDGED,
+    AlertStatusEnum.RESOLVED,
+    AlertStatusEnum.FALSE_POSITIVE,
+})
+
+#: Risk levels an alert can carry.  Kept in sync with the CHECK constraint
+#: on ``alerts.risk_level``.
+RISK_LEVELS = frozenset({"low", "medium", "high", "critical"})
+
+
 class TimelineEventType(str):
     CREATED = "created"
     ASSIGNED = "assigned"
@@ -58,6 +73,21 @@ class TimelineEventType(str):
     STATUS_CHANGED = "status_changed"
     RESOLVED = "resolved"
     FALSE_POSITIVE = "false_positive"
+
+
+#: The canonical timeline event types.  Kept in sync with the CHECK
+#: constraint on ``alert_timeline.event_type`` in the canonical schema.
+TIMELINE_EVENT_TYPES = frozenset({
+    TimelineEventType.CREATED,
+    TimelineEventType.ASSIGNED,
+    TimelineEventType.UNASSIGNED,
+    TimelineEventType.ACKNOWLEDGED,
+    TimelineEventType.ESCALATED,
+    TimelineEventType.NOTE_ADDED,
+    TimelineEventType.STATUS_CHANGED,
+    TimelineEventType.RESOLVED,
+    TimelineEventType.FALSE_POSITIVE,
+})
 
 
 # =============================================================================
@@ -309,14 +339,28 @@ async def list_alerts(
     assigned_to_id: Optional[str] = Query(None),
     page: int = Query(1, ge=1),
     limit: int = Query(20, ge=1, le=100),
-    db: OrmSession = Depends(get_db),
+    db: OrmSession = Depends(get_detection_db),
 ) -> AlertListResponse:
     """List alerts with filtering.
 
     Allowed roles: SOC_ANALYST or SECURITY_MANAGER only.
     SECURITY_ADMIN is NOT a SOC role and gets 403.
+
+    The filters are validated against the canonical vocabularies so an
+    unknown status or risk level returns a clear 400 instead of an
+    empty list that looks like "no alerts matched".
     """
-    """List alerts with filtering."""
+    if status is not None and status not in ALERT_STATUSES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"status must be one of {sorted(ALERT_STATUSES)}",
+        )
+    if risk_level is not None and risk_level not in RISK_LEVELS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"risk_level must be one of {sorted(RISK_LEVELS)}",
+        )
+
     query = db.query(Alert)
 
     if status:
@@ -343,7 +387,7 @@ async def list_alerts(
 async def get_alert(
     alert_id: UUID,
     ctx: AuthContext = Depends(require_roles("SOC_ANALYST", "SECURITY_MANAGER")),
-    db: OrmSession = Depends(get_db),
+    db: OrmSession = Depends(get_detection_db),
 ) -> AlertItem:
     """Get single alert by ID."""
     alert = db.query(Alert).filter(Alert.id == alert_id).first()
@@ -356,9 +400,22 @@ async def get_alert(
 async def get_alert_evidence(
     alert_id: UUID,
     ctx: AuthContext = Depends(require_roles("SOC_ANALYST", "SECURITY_MANAGER")),
-    db: OrmSession = Depends(get_db),
+    db: OrmSession = Depends(get_detection_db),
 ) -> AlertEvidence:
-    """Get full evidence for alert investigation."""
+    """Get full evidence for alert investigation.
+
+    ``alerts``/``login_attempts``/``risk_assessments``/``detection_logs``/
+    ``alert_timeline`` all live in ``sentinel_detection``, so the whole
+    evidence bundle is read through ONE Detection session.
+
+    The alert subject is described by the Detection-owned
+    ``login_attempts.username_attempted`` / ``login_attempts.user_id``.
+    Detection does NOT query the Core ``users`` table: the Core database is
+    a different bounded context, and reaching into it here would couple
+    Detection's read path to Core's schema.  The username that Detection
+    already captured at login time is the authoritative display name for
+    the attempt, and ``user_id`` identifies the subject for actions.
+    """
     alert = db.query(Alert).filter(Alert.id == alert_id).first()
     if not alert:
         raise HTTPException(status_code=404, detail="Alert not found")
@@ -396,20 +453,12 @@ async def get_alert_evidence(
 
     login_summary = None
     if login_attempt:
-        user = (
-            db.query(User)
-            .filter(User.id == login_attempt.user_id)
-            .first()
-            if login_attempt.user_id else None
-        )
         login_summary = LoginAttemptSummary(
             id=str(login_attempt.id),
             event_id=str(login_attempt.event_id),
             timestamp=login_attempt.timestamp,
             outcome=login_attempt.outcome,
-            username_attempted=(
-                login_attempt.username_attempted or (user.username if user else None)
-            ),
+            username_attempted=login_attempt.username_attempted,
             ip_address=str(login_attempt.ip_address) if login_attempt.ip_address else None,
             user_agent=login_attempt.user_agent,
             user_id=str(login_attempt.user_id) if login_attempt.user_id else None,
@@ -451,7 +500,7 @@ async def acknowledge_alert(
     alert_id: UUID,
     request: AlertAcknowledgeRequest,
     ctx: AuthContext = Depends(require_roles("SOC_ANALYST", "SECURITY_MANAGER")),
-    db: OrmSession = Depends(get_db),
+    db: OrmSession = Depends(get_detection_db),
 ) -> AlertItem:
     """Acknowledge an open alert."""
     alert = db.query(Alert).filter(Alert.id == alert_id).first()
@@ -498,7 +547,7 @@ async def resolve_alert(
     alert_id: UUID,
     request: AlertResolveRequest,
     ctx: AuthContext = Depends(require_roles("SOC_ANALYST", "SECURITY_MANAGER")),
-    db: OrmSession = Depends(get_db),
+    db: OrmSession = Depends(get_detection_db),
 ) -> AlertItem:
     """Resolve or mark an alert as false positive."""
     alert = db.query(Alert).filter(Alert.id == alert_id).first()
@@ -577,7 +626,7 @@ async def assign_alert(
     alert_id: UUID,
     request: AlertAssignRequest,
     ctx: AuthContext = Depends(require_roles("SOC_ANALYST", "SECURITY_MANAGER")),
-    db: OrmSession = Depends(get_db),
+    db: OrmSession = Depends(get_detection_db),
 ) -> AlertItem:
     """Assign an alert to a SOC analyst."""
     alert = db.query(Alert).filter(Alert.id == alert_id).first()
@@ -636,14 +685,25 @@ async def request_security_action(
     alert_id: UUID,
     request: AlertActionRequest,
     ctx: AuthContext = Depends(require_roles("SOC_ANALYST", "SECURITY_MANAGER")),
-    db: OrmSession = Depends(get_db),
+    db: OrmSession = Depends(get_detection_db),
 ) -> AlertActionResponse:
     """Apply a protective action (UC-DE-13 / UC-DE-11).
 
-    NOTE: The documentation describes this as a SOC analyst "requesting"
-    a protective action. The current implementation directly applies it.
-    This semantic gap (request vs. apply) is a documented design question
-    not resolved in P0-04.
+    Detection does NOT mutate Core state directly.  The enforced state
+    (``users.detection_mfa_once``, ``users.status``, revoked ``sessions``)
+    lives in ``sentinel_core``, a different bounded context with its own
+    schema.  Detection asks Core to apply the action through the canonical
+    internal boundary:
+
+        POST /api/v1/internal/actions
+
+    (see ``docs/assignments/CONTRACT_CORE_DETECTION.md`` section C).  Core
+    owns the enforcement rules, the audit trail and the idempotency
+    bookkeeping; Detection owns the alert and its timeline.
+
+    The idempotency key is derived from the alert and the action, so
+    retrying the same request - or a redelivery after a timeout - is a
+    no-op on the Core side instead of a second revocation.
     """
     alert = db.query(Alert).filter(Alert.id == alert_id).first()
     if not alert:
@@ -661,67 +721,67 @@ async def request_security_action(
             detail="No user associated with this alert",
         )
 
-    user = db.query(User).filter(User.id == login_attempt.user_id).first()
-    if not user:
-        raise HTTPException(status_code=404, detail="User not found")
-
     action = request.action
-    details = {}
 
-    def _revoke_user_sessions() -> int:
-        """Revoke every active session of THIS user only."""
-        revoked = (
-            db.query(Session)
-            .filter(
-                Session.user_id == user.id,
-                Session.revoked_at.is_(None),
-            )
-            .all()
-        )
-        for session in revoked:
-            session.revoked_at = utc_now()
-        return len(revoked)
-
-    if action == SecurityAction.REQUIRE_MFA:
-        already_applied = bool(user.detection_mfa_once)
-        user.detection_mfa_once = True
-        details = {
-            "mfa_enabled": True,
-            "one_time": True,
-            "already_applied": already_applied,
-            "sessions_revoked": _revoke_user_sessions(),
-            "reason": request.reason,
-        }
-
-    elif action == SecurityAction.REVOKE_SESSIONS:
-        details = {
-            "revoked_count": _revoke_user_sessions(),
-            "reason": request.reason,
-        }
-
-    elif action == SecurityAction.LOCK_USER:
-        user.status = "locked"
-        user.locked_at = utc_now()
-        details = {
-            "status": "locked",
-            "sessions_revoked": _revoke_user_sessions(),
-            "reason": request.reason,
-        }
-
-    elif action == SecurityAction.FORCE_LOGOUT:
-        details = {
-            "revoked_count": _revoke_user_sessions(),
-            "reason": request.reason,
-        }
-
-    else:
+    # The Core boundary validates the action enum itself; an unsupported
+    # value is rejected before anything is sent.
+    if action not in (
+        SecurityAction.REQUIRE_MFA,
+        SecurityAction.REVOKE_SESSIONS,
+        SecurityAction.LOCK_USER,
+        SecurityAction.FORCE_LOGOUT,
+    ):
         raise HTTPException(
             status_code=400,
             detail=f"Unsupported action: {action.value}",
         )
 
+    outcome = await internal_client.enforce_action_in_core_detailed(
+        action.value,
+        login_attempt.user_id,
+        request.reason,
+        idempotency_key=f"alert:{alert_id}:{action.value}",
+        alert_id=alert_id,
+        # The Detection-owned timestamp of the risky attempt.  Core records
+        # it in its audit trail next to the enforcement time.
+        detected_at=login_attempt.timestamp,
+    )
+
     actor_id = get_authenticated_user_id(ctx)
     client_ip = get_client_ip(ctx.request) if ctx.request else None
+
+    if not outcome.enforced:
+        # Core did not enforce the action (unreachable, rejected, or the
+        # internal secret is not configured).  Report the failure honestly
+        # instead of claiming the action was applied, and record the failed
+        # attempt in the timeline so the SOC can see that the action was
+        # requested but did not take effect.
+        _create_timeline_event(
+            db=db,
+            alert_id=alert_id,
+            event_type=TimelineEventType.NOTE_ADDED,
+            actor_id=actor_id,
+            actor_type="user",
+            new_value=action.value,
+            comment=(
+                f"Security action {action.value} was NOT enforced by Core "
+                f"({outcome.error or 'unknown error'}). Reason: {request.reason}"
+            ),
+            ip_address=client_ip,
+        )
+        db.commit()
+        raise HTTPException(
+            status_code=502,
+            detail=(
+                f"Core did not apply the {action.value} action. "
+                "The protective action was NOT enforced."
+            ),
+        )
+
+    core_response = outcome.response or {}
+    details = dict(core_response.get("details") or {})
+    details["reason"] = request.reason
+    details["alert_id"] = str(alert_id)
 
     _create_timeline_event(
         db=db,
@@ -737,7 +797,7 @@ async def request_security_action(
     db.commit()
 
     return AlertActionResponse(
-        status="applied",
+        status=core_response.get("status", "applied"),
         action=action.value,
         details=details,
     )
@@ -751,7 +811,7 @@ async def request_security_action(
 async def get_alert_timeline(
     alert_id: UUID,
     ctx: AuthContext = Depends(require_roles("SOC_ANALYST", "SECURITY_MANAGER")),
-    db: OrmSession = Depends(get_db),
+    db: OrmSession = Depends(get_detection_db),
 ) -> List[TimelineEvent]:
     """Get timeline events for an alert."""
     alert = db.query(Alert).filter(Alert.id == alert_id).first()
@@ -772,12 +832,21 @@ async def add_timeline_event(
     alert_id: UUID,
     request: TimelineEventCreate,
     ctx: AuthContext = Depends(require_roles("SOC_ANALYST", "SECURITY_MANAGER")),
-    db: OrmSession = Depends(get_db),
+    db: OrmSession = Depends(get_detection_db),
 ) -> TimelineEvent:
     """Add a timeline event to an alert."""
     alert = db.query(Alert).filter(Alert.id == alert_id).first()
     if not alert:
         raise HTTPException(status_code=404, detail="Alert not found")
+
+    if request.event_type not in TIMELINE_EVENT_TYPES:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"event_type must be one of {sorted(TIMELINE_EVENT_TYPES)}, "
+                f"got {request.event_type!r}"
+            ),
+        )
 
     actor_id = get_authenticated_user_id(ctx)
     client_ip = get_client_ip(ctx.request) if ctx.request else None

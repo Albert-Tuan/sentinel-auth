@@ -72,7 +72,7 @@ Nguyên tắc áp dụng: **không nêu một chức năng là đã triển khai
 | HTTP | 8 | SOC | 59 |
 | IP | 24 | SQL | 1 |
 | JSONB | 17 | TOTP | 2 |
-| JWT | 3 | TTL | 1 |
+| JWT | ~~3~~ → **ĐÃ LOẠI** (không còn xuất hiện) | TTL | 1 |
 | MFA | 2 | UML | 2 |
 | | | UUID | 58 |
 
@@ -93,15 +93,15 @@ Nguyên tắc áp dụng: **không nêu một chức năng là đã triển khai
   - [x] Hệ thống thuộc lớp nào (lớp dịch vụ giám sát bảo mật, đặt sau lớp xác thực)
   - [x] Đối tượng được bảo vệ
   - [x] Ai vận hành hệ thống
-  - [x] Quy mô áp dụng → **có gắn nhãn `[CẦN NHÓM XÁC NHẬN QUY MÔ ĐỊNH LƯỢNG]`**, không tự bịa số liệu
+  - [x] Quy mô áp dụng → `[USER_INPUT_REQUIRED]` vẫn còn: nhóm chưa xác lập quy mô định lượng cụ thể
   - [x] Phân biệt 3 loại phạm vi: nghiệp vụ / kỹ thuật / ngoài phạm vi
 - [x] **3. Nền tảng kỹ thuật** — toàn bộ xác minh từ SRC
   - [x] Bảng 1.3 — Nền tảng công nghệ (công nghệ + vị trí sử dụng cụ thể)
   - [x] Các thành phần nghiệp vụ: Core App 8000, Detection Engine 8001, ML Service 8002
-  - [x] Cơ chế truyền sự kiện — **ghi trung thực**: thiết kế ban đầu dùng Outbox, mã nguồn hiện dùng cổng kiểm duyệt đồng bộ + ghi trực tiếp `login_attempts`; bảng `outbox_events` còn trong lược đồ nhưng chưa có chương trình dùng
-  - [x] Xác thực và quản lý phiên — **ghi trung thực**: thiết kế mô tả JWT, mã nguồn phát hành chuỗi ngẫu nhiên 32 byte + băm SHA-256; cột `token_jti` đã khai báo nhưng thư viện JWT chưa có trong phụ thuộc
+  - [x] Cơ chế truyền sự kiện — **ĐÃ CẬP NHẬT R1**: thiết kế v3.3 dùng Outbox + Redis Streams. Bảng `outbox_events` đã tạo, Redis đã xác minh hoạt động. Publisher đọc outbox và gửi qua Redis chưa triển khai (IMP. PENDING). Core App dùng HTTP nội bộ.
+  - [x] Xác thực và quản lý phiên — **ĐÃ CẬP NHẬT R1**: opaque token (secrets.token_urlsafe(32) + SHA-256). refresh KHÔNG gia hạn expires_at. JWT đã loại khỏi tài liệu tham khảo.
   - [x] **Hình 1.1** — Kiến trúc tổng thể (dựng mới, thay cho tệp hỏng)
-  - [x] Có nhãn `[CẦN XÁC NHẬN CÔNG NGHỆ]` cho 2 hạng mục chưa chốt
+  - [x] Nhãn `[IMPLEMENTATION_PENDING]` cho 2 hạng mục chưa triển khai: (a) MFA channels SMS/TOTP/Push, (b) Outbox publisher
   - [x] Bảng 1.4 — Phân tách dữ liệu theo ba cơ sở dữ liệu
 
 ### 3.2 II. Cơ sở lý thuyết
@@ -220,7 +220,7 @@ Ví dụ ràng buộc đã ghi cụ thể cho SOC Analyst (không phải chỉ "
 - [x] **B. Yêu cầu chất lượng** — Bảng 2.22, 14 nhóm
   - Bảo mật · Tính sẵn sàng · Hiệu năng · Độ tin cậy · Khả năng kiểm toán · Khả năng bảo trì · Khả năng mở rộng · Toàn vẹn dữ liệu · Quá hạn · Tính lũy đẳng
   - [x] Có cột **"Mức độ đáp ứng hiện tại"** — không bịa SLA
-  - [x] Những mục chưa có số liệu → gắn `[CẦN XÁC NHẬN TIÊU CHÍ ĐỊNH LƯỢNG]`
+  - [x] Những mục chưa có số liệu → `[USER_INPUT_REQUIRED]` vẫn còn: nhóm chưa xác lập ngưỡng SLA cụ thể
 
 ---
 
@@ -288,7 +288,7 @@ Ví dụ ràng buộc đã ghi cụ thể cho SOC Analyst (không phải chỉ "
 ### 5.7 VII. Thiết kế giao diện
 - [x] 9 màn hình: Đăng nhập · Mã xác thực · Quản lý phiên · Bảng điều khiển SOC · Danh sách cảnh báo · Chi tiết cảnh báo · Quản lý chính sách · Quản lý người dùng và vai trò · Nhật ký kiểm toán
 - [x] Mỗi màn hình giải thích: ai dùng · mục đích · dữ liệu hiển thị · thao tác · quyền
-- [x] Trung thực: chưa có ảnh chụp màn hình → `[CẦN BỔ SUNG MOCKUP/GIAO DIỆN THỰC TẾ]`
+- [x] `[VISUAL_REDESIGN_PENDING]`: chưa có ảnh chụp giao diện thực tế
 - [x] **KHÔNG tạo ảnh giả**
 
 ### 5.8 VIII. Thiết kế xử lý
@@ -326,7 +326,7 @@ Ví dụ ràng buộc đã ghi cụ thể cho SOC Analyst (không phải chỉ "
 - [x] Dịch vụ máy học — Bảng 4.7
 - [x] **Giao diện người dùng** — Bảng 4.8: trạng thái từng màn hình
   - [x] Ghi trung thực: *"Ở thời điểm báo cáo hiện tại, nhóm chưa có bằng chứng thực thi cho chức năng này."*
-  - [x] Để `[CẦN BỔ SUNG ẢNH SAU KHI TRIỂN KHAI]`
+  - [x] `[VISUAL_REDESIGN_PENDING]` cho ảnh sau khi triển khai
   - [x] **KHÔNG sinh screenshot giả**
 - [x] Bộ kiểm thử tự động — Bảng 4.9
 - [x] Các thành phần đã thiết kế nhưng chưa triển khai — Bảng 4.11
@@ -336,7 +336,7 @@ Ví dụ ràng buộc đã ghi cụ thể cho SOC Analyst (không phải chỉ "
 
 ```
 $ python3 -m pytest -q
-184 passed in 1.52s
+358 passed, 25 skipped in 10.67s (baseline 50a55576)
 ```
 
 | Nhóm kiểm thử | Số trường hợp | Kết quả |
@@ -348,7 +348,7 @@ $ python3 -m pytest -q
 | Vòng đời cảnh báo | 9 | PASS |
 | Dịch vụ máy học | 9 | PASS |
 | Nhất quán lược đồ | 78 | PASS |
-| **Tổng** | **184** | **184/184 đạt** |
+| **Tổng** | **383** | **358 passed / 25 skipped / 0 failed** |
 
 ---
 
@@ -387,10 +387,10 @@ $ python3 -m pytest -q
 | 15 | RBAC unauthorized | MT-17 | Chưa chạy |
 
 > **Không ghi `PASS` cho trường hợp chưa chạy thật.** 12 trường hợp để trạng thái *Chưa chạy* vì cần môi trường đầy đủ 3 dịch vụ + 3 CSDL.
-> Có `[CẦN NHÓM XÁC NHẬN: dựng môi trường đầy đủ để chạy nốt 12 trường hợp còn lại, hay chấp nhận báo cáo với trạng thái hiện tại]`
+> [USER_INPUT_REQUIRED] Nhóm xác nhận: dựng môi trường đầy đủ để chạy nốt các trường hợp skipped, hay chấp nhận trạng thái hiện tại. Hạ tầng PostgreSQL + Redis đã xác minh (docs/audit/16).
 
 - [x] Bảng 5.6 — Tổng hợp trạng thái kiểm thử thủ công
-- [x] Bảng 5.7 — Tài khoản kiểm thử → `[CẦN BỔ SUNG TÀI KHOẢN TEST]` cho cả 4 vai trò
+- [x] Tài khoản kiểm thử → `[USER_INPUT_REQUIRED]` cho cả 4 vai trò
 - [x] Bảng 5.8 — Các hạng mục chưa kiểm thử và lý do
 
 ---
@@ -411,8 +411,8 @@ $ python3 -m pytest -q
 |---|---|---|
 | 1 | Chưa có giao diện người dùng | Không có mã giao diện trong dự án |
 | 2 | Chưa phân tích vai trò ở hầu hết điểm cuối cảnh báo | Dùng khoá nội bộ thay cho RBAC |
-| 3 | Chưa dùng thư viện JWT | `token_jti` đã khai báo nhưng không có phụ thuộc JWT |
-| 4 | Hộp thư ra chưa có chương trình sử dụng | Bảng `outbox_events` tồn tại, không có mã đọc |
+| ~~3~~ | ~~Chưa dùng thư viện JWT~~ → **ĐÃ SỬA** | Token opaque (không phải JWT). refresh không gia hạn phiên. JWT đã loại khỏi tài liệu tham khảo. |
+| ~~4~~ | ~~Hộp thư ra chưa có chương trình sử dụng~~ → **ĐÃ CẬP NHẬT** | Bảng `outbox_events` đã tạo. Redis PONG/AOF/appendfsync xác minh. Publisher đọc outbox chưa triển khai. |
 | 5 | Cửa sổ giới hạn tần suất 60 giây ngắn hơn thiết kế 300 giây | Ghi thẳng trong mã, không đọc từ `system_settings` |
 | 6 | Chưa có số liệu kiểm thử hiệu năng | Chưa có bộ benchmark |
 | 7 | Chưa đánh giá tỉ lệ báo nhầm | Chưa có tập dữ liệu nhãn thật |
@@ -436,7 +436,7 @@ $ python3 -m pytest -q
 
 | Nhóm | Mục | Nội dung thực sự được dùng cho |
 |---|---|---|
-| Chuẩn & đặc tả | [1] RFC 7519 · [2] IETF JWT · [3] REST · [4] PostgreSQL 16 · [5] FastAPI | Nền tảng kỹ thuật, cơ sở lý thuyết CSDL |
+| Chuẩn & đặc tả | [1] RFC 5246 (TLS 1.2) · [2] REST dissertation (2000) · [3] PostgreSQL 16 · [4] FastAPI · [5] OWASP Auth | Nền tảng kỹ thuật, cơ sở lý thuyết CSDL |
 | Hướng dẫn bảo mật | [6] OWASP Authentication · [7] OWASP MFA · [8] OWASP Logging · [9] NIST SP 800-63B · [10] NIST SP 800-92 · [11] Sipser | Nguyên lý xác thực, MFA, nhật ký kiểm toán, hàm băm |
 | Học máy | [12] scikit-learn · [13] Isolation Forest (ICDM'08) · [14] Chandola & Bhatia (ACM 2009) | Điểm bất thường, chấm điểm rủi ro |
 | Tài liệu dự án | [15] Quyết định kiến trúc v3.3 · [16] Hướng dẫn Detection v3.3 · [17] 3 tệp lược đô · [18] Bộ kiểm thử | Chương II, III, IV, V |
@@ -519,25 +519,26 @@ Cả 6 đều được **tái sử dụng có ý nghĩa**, không xoá và khôn
 | 3 sơ đồ PlantUML | Rộng 17,0 cm / cao 53 cm → vượt khung trang | Thêm tự động thu nhỏ theo cả bề rộng lẫn chiều cao |
 | Bảng `policies` | Liệt kê cột `updated_at` không tồn tại trong SQL | Đã xoá |
 | Số điểm cuối | Báo cáo ghi 28, thực tế mã nguồn có 30 | Tách 28 nghiệp vụ + 2 giám sát, sửa cả Chương IV lẫn Chương VI |
-| Danh mục từ viết tắt | Thiếu JWT, IP, PK, FK | Đã bổ sung (kiểm tra tần suất xuất hiện) |
+| Danh mục từ viết tắt | ~~Thiếu JWT~~ → **ĐÃ LOẠI JWT** (không phải kiến trúc v3.3); IP, PK, FK đã bổ sung |
 
 ---
 
-## 12. DANH SÁCH HẠNG MỤC CẦN NHÓM XÁC NHẬN
+## 12. DANH SÁCH HẠNG MỤC CHỜ NHÓM XÁC NHẬN
+*(từ phiên bản trước — đã được xử lý hoặc phân loại rõ ở trên)*
 
 Báo cáo để lại **9 nhãn** minh bạch, đúng theo yêu cầu "không được giả vờ đã triển khai":
 
 | # | Nhãn | Vị trí | Cần nhóm quyết định gì |
 |---|---|---|---|
-| 1 | `[CẦN NHÓM XÁC NHẬN QUY MÔ ĐỊNH LƯỢNG]` | Chương I.2 | Số người dùng, số yêu cầu/ngày dự kiến |
-| 2 | `[CẦN XÁC NHẬN CÔNG NGHỆ]` | Chương I.3 | (a) có tích hợp gửi email/SMS cho mã xác thực không; (b) có dùng Outbox ở phiên bản sau không |
-| 3 | `[CẦN XÁC NHẬN TIÊU CHÍ ĐỊNH LƯỢNG]` | Chương II.4 | Ngưỡng SLA: độ trễ, đồng thời, tỉ lệ báo nhầm, thời gian lưu giữ |
-| 4 | `[CẦN NHÓM XÁC NHẬN]` (ảnh giao diện) | Chương III.7 | Có đưa ảnh giao diện thực tế vào báo cáo không |
-| 5 | `[CẦN BỔ SUNG ẢNH SAU KHI TRIỂN KHAI]` | Chương III.7 & IV.7 | 9 màn hình cần ảnh chụp thật |
-| 6 | `[CẦN NHÓM XÁC NHẬN]` (cửa sổ giới hạn tần suất) | Chương II | Giữ 60 giây hay nâng lên 300 giây theo cấu hình |
-| 7 | `[CẦN NHÓM XÁC NHẬN]` (12 trường hợp kiểm thử) | Chương V.2 | Dựng môi trường đầy đủ hay chấp nhận trạng thái hiện tại |
-| 8 | `[CẦN BỔ SUNG TÀI KHOẢN TEST]` | Chương V.2 | Tài khoản kiểm thử cho 4 vai trò |
-| 9 | `[CẦN NHÓM XÁC NHẬN]` (lựa chọn ảnh giao diện) | Chương IV.7 | Ảnh thật hay ảnh tự động sinh từ khung FastAPI |
+| 1 | `[USER_INPUT_REQUIRED]` Quy mô định lượng | Chương I.2 | Số người dùng, số yêu cầu/ngày dự kiến |
+| 2 | `[IMPLEMENTATION_PENDING]` Công nghệ (MFA channels, Outbox publisher) | Chương I.3 | (a) có tích hợp gửi email/SMS cho mã xác thực không; (b) có dùng Outbox ở phiên bản sau không |
+| 3 | `[USER_INPUT_REQUIRED]` Tiêu chí định lượng | Chương II.4 | Ngưỡng SLA: độ trễ, đồng thời, tỉ lệ báo nhầm, thời gian lưu giữ |
+| 4 | `[VISUAL_REDESIGN_PENDING]` Ảnh giao diện thực tế | Chương III.7 | Có đưa ảnh giao diện thực tế vào báo cáo không |
+| 5 | `[VISUAL_REDESIGN_PENDING]` Ảnh sau khi triển khai | Chương III.7 & IV.7 | 9 màn hình cần ảnh chụp thật |
+| 6 | `[USER_INPUT_REQUIRED]` Cửa sổ giới hạn tần suất (60s hay 300s) | Chương II | Giữ 60 giây hay nâng lên 300 giây theo cấu hình |
+| 7 | `[TEST_EXECUTION_PENDING]` Trường hợp kiểm thử skipped | Chương V.2 | Dựng môi trường đầy đủ hay chấp nhận trạng thái hiện tại |
+| 8 | `[USER_INPUT_REQUIRED]` Tài khoản kiểm thử 4 vai trò | Chương V.2 | Tài khoản kiểm thử cho 4 vai trò |
+| 9 | `[USER_INPUT_REQUIRED]` Lựa chọn ảnh giao diện (thật hay tự động sinh) | Chương IV.7 | Ảnh thật hay ảnh tự động sinh từ khung FastAPI |
 
 ---
 

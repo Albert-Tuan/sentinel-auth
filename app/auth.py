@@ -4,13 +4,17 @@ Mirrors infra/postgres/schema-core-v3.3.sql.
 """
 import hashlib
 import ipaddress
+import asyncio
 import logging
 import os
 import secrets
-from datetime import timedelta, timezone
+import smtplib
+from email.message import EmailMessage
+from datetime import datetime, timedelta, timezone
+from dataclasses import dataclass
 from typing import Optional
 
-from app.time_utils import utc_now
+from app.time_utils import utc_now, as_utc
 from uuid import UUID, uuid4
 
 import httpx
@@ -21,10 +25,11 @@ from argon2 import PasswordHasher
 from argon2.exceptions import VerifyMismatchError, InvalidHash
 
 from app.authz import hash_token, get_current_auth_context, AuthContext
-from app.db import get_db
+from app.db import get_core_db
+from app.device_fingerprint import fingerprint_from_request
 from app.models import (
     IpAddress,
-    LoginAttempt,
+    AuditLog,
     MfaNotification,
     MfaTransaction,
     RateLimit,
@@ -39,6 +44,7 @@ from app.schemas import (
     MfaVerifyRequest, MfaVerifyResponse,
     RefreshRequest, RefreshResponse,
     LogoutResponse, SessionItem, SessionList,
+    UserItem,
 )
 
 from app.internal_auth import (
@@ -50,6 +56,152 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/v1/auth", tags=["auth"])
 ph = PasswordHasher()
+
+LOGIN_EVENT_TIMEOUT = float(os.getenv("LOGIN_EVENT_TIMEOUT", "3"))
+RUN_LOGIN_EVENT_DELIVERY = os.getenv("RUN_LOGIN_EVENT_DELIVERY", "1")
+
+
+@dataclass(frozen=True)
+class LoginEvent:
+    """Core-owned event payload sent to Detection over HTTP.
+
+    This deliberately is not a SQLAlchemy model: ``login_attempts`` belongs
+    to the Detection database and Core must not persist it locally.
+    """
+
+    event_id: UUID
+    request_id: UUID
+    user_id: Optional[UUID]
+    username_attempted: str
+    outcome: str
+    mfa_used: bool
+    ip_address: Optional[str]
+    user_agent: Optional[str]
+    timestamp: datetime
+    #: Hashed device fingerprint (SHA-256 hex digest) or ``None``.
+    #:
+    #: Optional and backward compatible: an event without a fingerprint is
+    #: still valid, and Detection then falls back to the User-Agent proxy to
+    #: decide device novelty.  It never carries raw header values.
+    device_fingerprint: Optional[str] = None
+
+
+def _audit(
+    db,
+    *,
+    action: str,
+    resource: str,
+    resource_id=None,
+    actor_id=None,
+    actor_type: str = "system",
+    before_state: Optional[dict] = None,
+    after_state: Optional[dict] = None,
+    change_reason: Optional[str] = None,
+    request_id=None,
+    ip_address: Optional[str] = None,
+    user_agent: Optional[str] = None,
+) -> AuditLog:
+    """Queue an immutable audit record in the Core database transaction."""
+    row = AuditLog(
+        request_id=request_id,
+        actor_id=actor_id,
+        actor_type=actor_type,
+        action=action,
+        resource=resource,
+        resource_id=resource_id,
+        before_state=before_state,
+        after_state=after_state,
+        change_reason=change_reason,
+        ip_address=ip_address,
+        user_agent=user_agent,
+    )
+    db.add(row)
+    return row
+
+
+async def _send_login_event(attempt: Optional[LoginEvent]) -> bool:
+    """Deliver one stable LoginEvent to Detection over the service boundary.
+
+    Detection owns ``login_attempts``. Core only sends this HTTP event and never
+    opens or writes the Detection database. Delivery is best-effort so a
+    Detection outage cannot turn a valid credential check into an auth outage.
+    """
+    if attempt is None or RUN_LOGIN_EVENT_DELIVERY != "1" or not DETECTION_URL:
+        return False
+    payload = {
+        "event_id": str(attempt.event_id),
+        "user_id": str(attempt.user_id) if attempt.user_id else None,
+        "username_attempted": attempt.username_attempted or "",
+        "outcome": attempt.outcome,
+        "mfa_used": bool(attempt.mfa_used),
+        "ip_address": attempt.ip_address,
+        "user_agent": attempt.user_agent,
+        "timestamp": attempt.timestamp.isoformat(),
+        "request_id": str(attempt.request_id) if attempt.request_id else None,
+        # Optional, backward compatible: older Detection receivers ignore
+        # the unknown field, and a missing fingerprint simply means the
+        # User-Agent proxy is used for device novelty.
+        "device_fingerprint": attempt.device_fingerprint,
+    }
+    try:
+        headers = {"X-Internal-Secret": get_internal_secret()}
+    except InternalAuthConfigurationError:
+        logger.warning("login event delivery skipped: internal secret is not configured")
+        return False
+    for delivery_attempt in range(2):
+        try:
+            async with httpx.AsyncClient(timeout=LOGIN_EVENT_TIMEOUT) as client:
+                response = await client.post(
+                    f"{DETECTION_URL}/api/v1/internal/login-events",
+                    json=payload,
+                    headers=headers,
+                )
+            if response.status_code < 500:
+                if response.status_code >= 400:
+                    logger.warning("login event rejected with HTTP %s", response.status_code)
+                    return False
+                return True
+        except httpx.HTTPError as exc:
+            logger.warning(
+                "login event delivery failed (attempt %s): %s",
+                delivery_attempt + 1,
+                exc.__class__.__name__,
+            )
+        if delivery_attempt == 0:
+            await asyncio.sleep(0)
+    return False
+
+
+def _smtp_config() -> tuple[str, int, str, float, bool]:
+    host = os.getenv("MFA_SMTP_HOST", "localhost")
+    port = int(os.getenv("MFA_SMTP_PORT", "1025"))
+    sender = os.getenv("MFA_FROM_EMAIL", "no-reply@sentinel-auth.local")
+    timeout = float(os.getenv("MFA_SMTP_TIMEOUT", "3"))
+    starttls = os.getenv("MFA_SMTP_STARTTLS", "0") == "1"
+    return host, port, sender, timeout, starttls
+
+
+def _send_otp_email_sync(recipient: str, otp: str) -> None:
+    """Send the OTP through the configured SMTP provider (Mailpit by default)."""
+    host, port, sender, timeout, starttls = _smtp_config()
+    message = EmailMessage()
+    message["Subject"] = "Sentinel Auth verification code"
+    message["From"] = sender
+    message["To"] = recipient
+    message.set_content(
+        "Your Sentinel Auth verification code is "
+        f"{otp}. It expires in 5 minutes."
+    )
+    with smtplib.SMTP(host, port, timeout=timeout) as smtp:
+        if starttls:
+            smtp.starttls()
+        smtp.send_message(message)
+
+
+async def _send_otp_email(recipient: str, otp: str) -> None:
+    if not recipient:
+        raise ValueError("MFA email recipient is empty")
+    await asyncio.to_thread(_send_otp_email_sync, recipient, otp)
 
 
 # =============================================================================
@@ -94,6 +246,33 @@ def normalize_ip(value: str) -> str:
     return str(ipaddress.ip_address(value))
 
 
+def _login_event(
+    *,
+    request_id: UUID,
+    username_attempted: str,
+    outcome: str,
+    timestamp: datetime,
+    user_id: Optional[UUID] = None,
+    mfa_used: bool = False,
+    ip_address: Optional[str] = None,
+    user_agent: Optional[str] = None,
+    device_fingerprint: Optional[str] = None,
+) -> LoginEvent:
+    """Build a stable event without touching Detection's database tables."""
+    return LoginEvent(
+        event_id=uuid4(),
+        request_id=request_id,
+        user_id=user_id,
+        username_attempted=username_attempted,
+        outcome=outcome,
+        mfa_used=mfa_used,
+        ip_address=ip_address,
+        user_agent=user_agent,
+        timestamp=timestamp,
+        device_fingerprint=device_fingerprint,
+    )
+
+
 # =============================================================================
 # Request/Response schemas
 # =============================================================================
@@ -116,7 +295,7 @@ class RegisterResponse(BaseModel):
 # =============================================================================
 
 @router.post("/register", response_model=UserRegisterResponse, status_code=status.HTTP_201_CREATED)
-async def register(request: UserRegisterRequest, db=Depends(get_db)) -> UserRegisterResponse:
+async def register(request: UserRegisterRequest, db=Depends(get_core_db)) -> UserRegisterResponse:
     """
     Register a new user account.
 
@@ -180,6 +359,21 @@ async def register(request: UserRegisterRequest, db=Depends(get_db)) -> UserRegi
     )
     db.add(ur)
 
+    _audit(
+        db,
+        action="register",
+        resource="user",
+        resource_id=user.id,
+        actor_id=user.id,
+        actor_type="user",
+        after_state={
+            "username": user.username,
+            "email": user.email,
+            "status": user.status,
+            "roles": ["USER"],
+        },
+    )
+
     db.commit()
     db.refresh(user)
 
@@ -227,6 +421,7 @@ async def _pre_token_risk(user, client_ip: str, user_agent: Optional[str]) -> Op
                     "user_id": str(user.id),
                     "ip_address": client_ip,
                     "user_agent": user_agent,
+                    "timestamp": utc_now().isoformat(),
                 },
                 headers={"X-Internal-Secret": get_internal_secret()},
             )
@@ -262,7 +457,7 @@ async def _pre_token_risk(user, client_ip: str, user_agent: Optional[str]) -> Op
 async def login(
     request: LoginRequest,
     req: Request,
-    db=Depends(get_db),
+    db=Depends(get_core_db),
 ) -> LoginResponse:
     """
     Authenticate user credentials.
@@ -276,34 +471,44 @@ async def login(
     """
     client_ip = get_client_ip(req)
     request_id = uuid4()
+    # Canonical device fingerprint (hashed).  It is attached to every login
+    # event so the Detection Engine can decide device novelty in a
+    # fingerprint-first way.  It never carries raw header values.
+    device_fingerprint = fingerprint_from_request(req)
 
     # 1. Rate limit check
     now = utc_now()
     window_start = now - timedelta(minutes=1)
 
+    # ``rate_limits`` has a natural primary key ``(ip_address, action)``.
+    # Reuse and reset the row when its window has elapsed; never attempt to
+    # insert a second row for the same key.
     rate = db.query(RateLimit).filter(
         RateLimit.ip_address == client_ip,
         RateLimit.action == "login",
-        RateLimit.window_start >= window_start,
-    ).first()
+    ).with_for_update().first()
 
-    if rate and rate.count >= rate.max_count:
+    if rate and as_utc(rate.window_start) >= window_start and rate.count >= rate.max_count:
         # Record rate-limited login attempt
-        la = LoginAttempt(
-            event_id=uuid4(),
+        la = _login_event(
             request_id=request_id,
             username_attempted=request.username,
             timestamp=now,
             outcome="rate_limited",
             ip_address=client_ip,
+            device_fingerprint=device_fingerprint,
         )
-        db.add(la)
         db.commit()
+        await _send_login_event(la)
         raise HTTPException(status_code=429, detail="Too many requests. Try again later.")
 
     # Update or create rate limit
     if rate:
-        rate.count += 1
+        if as_utc(rate.window_start) < window_start:
+            rate.window_start = now
+            rate.count = 1
+        else:
+            rate.count += 1
     else:
         rate = RateLimit(
             ip_address=client_ip,
@@ -319,17 +524,17 @@ async def login(
 
     if not user:
         # Generic error - don't reveal account existence
-        la = LoginAttempt(
-            event_id=uuid4(),
+        la = _login_event(
             request_id=request_id,
             username_attempted=request.username,
             timestamp=now,
             outcome="failure",
             ip_address=client_ip,
             user_agent=req.headers.get("User-Agent"),
+            device_fingerprint=device_fingerprint,
         )
-        db.add(la)
         db.commit()
+        await _send_login_event(la)
         raise HTTPException(status_code=401, detail="Invalid credentials")
 
     try:
@@ -337,8 +542,7 @@ async def login(
     except VerifyMismatchError:
         # Wrong password
         user.failed_login_count += 1
-        la = LoginAttempt(
-            event_id=uuid4(),
+        la = _login_event(
             request_id=request_id,
             user_id=user.id,
             username_attempted=request.username,
@@ -346,15 +550,15 @@ async def login(
             outcome="failure",
             ip_address=client_ip,
             user_agent=req.headers.get("User-Agent"),
+            device_fingerprint=device_fingerprint,
         )
-        db.add(la)
         db.commit()
+        await _send_login_event(la)
         raise HTTPException(status_code=401, detail="Invalid credentials")
 
     # 3. Check account status
     if user.status == "locked":
-        la = LoginAttempt(
-            event_id=uuid4(),
+        la = _login_event(
             request_id=request_id,
             user_id=user.id,
             username_attempted=request.username,
@@ -362,9 +566,10 @@ async def login(
             outcome="locked",
             ip_address=client_ip,
             user_agent=req.headers.get("User-Agent"),
+            device_fingerprint=device_fingerprint,
         )
-        db.add(la)
         db.commit()
+        await _send_login_event(la)
         raise HTTPException(status_code=423, detail="Account is locked")
 
     # Reset failed login count on successful credential verification
@@ -390,12 +595,20 @@ async def login(
         mfa_type = "persistent" if user.admin_mfa_required else "one_time"
         expires_at = now + timedelta(minutes=5)
 
+        try:
+            bound_ip = normalize_ip(client_ip) if client_ip and client_ip != "unknown" else None
+        except ValueError:
+            # ASGI test clients and some local adapters use a non-IP peer
+            # label. Production proxy validation supplies a real IP; leave
+            # the binding unset for an explicitly non-address peer.
+            bound_ip = None
+
         mfa_txn = MfaTransaction(
             user_id=user.id,
             mfa_type=mfa_type,
             expires_at=expires_at,
             status="pending",
-            bound_ip=normalize_ip(client_ip) if client_ip and client_ip != "unknown" else None,
+            bound_ip=bound_ip,
         )
         db.add(mfa_txn)
         db.flush()
@@ -418,20 +631,27 @@ async def login(
         # Link notification to mfa_txn
         mfa_txn.notification_id = notification.id
 
-        # TODO: Send email OTP via Mailpit (smtp localhost:1025)
+        try:
+            await _send_otp_email(notification.recipient, otp)
+            notification.delivered_at = utc_now()
+        except Exception as exc:  # noqa: BLE001 - delivery status is persisted
+            notification.failed_at = utc_now()
+            notification.failure_reason = exc.__class__.__name__
+            logger.warning("MFA email delivery failed: %s", exc.__class__.__name__)
 
-        la = LoginAttempt(
-            event_id=uuid4(),
+        la = _login_event(
             request_id=request_id,
             user_id=user.id,
+            username_attempted=request.username,
             timestamp=now,
             outcome="mfa_required",
             ip_address=client_ip,
             user_agent=req.headers.get("User-Agent"),
             mfa_used=True,
+            device_fingerprint=device_fingerprint,
         )
-        db.add(la)
         db.commit()
+        await _send_login_event(la)
 
         # Return MFA challenge response
         # In production, email OTP would be sent here
@@ -443,8 +663,12 @@ async def login(
         )
 
     # 5. No MFA - create session directly
-    result, _ = await _create_session(user, client_ip, req.headers.get("User-Agent"), db)
+    result, login_event = await _create_session(
+        user, client_ip, req.headers.get("User-Agent"), db,
+        device_fingerprint=device_fingerprint,
+    )
     db.commit()
+    await _send_login_event(login_event)
     return result
 
 
@@ -453,13 +677,15 @@ async def _create_session(
     client_ip: str,
     user_agent: Optional[str],
     db,
-) -> tuple[LoginResponse, LoginAttempt]:
+    device_fingerprint: Optional[str] = None,
+) -> tuple[LoginResponse, LoginEvent]:
     """Create a new session and generate tokens.
 
     Does NOT commit. Caller owns the transaction boundary and must call
     db.commit() after all related state changes are flushed.
 
-    Returns (LoginResponse, LoginAttempt) so caller can add audit events
+    Returns (LoginResponse, LoginEvent) so caller can deliver the Detection
+    event after the Core transaction commits.
     before the single commit.
     """
     now = utc_now()
@@ -485,19 +711,33 @@ async def _create_session(
     # Update user last login
     user.last_login_at = now
 
-    # Record successful login
+    # Build a Core-owned event. Detection persists the corresponding
+    # ``login_attempts`` row after receiving it over HTTP.
     request_id = uuid4()
-    la = LoginAttempt(
-        event_id=uuid4(),
+    la = _login_event(
         request_id=request_id,
         user_id=user.id,
+        username_attempted=user.username,
         timestamp=now,
         outcome="success",
         ip_address=client_ip,
         user_agent=user_agent,
+        device_fingerprint=device_fingerprint,
     )
-    db.add(la)
-    db.flush()  # Ensure session.id is populated before caller reads it
+    db.flush()  # Populate session.id before recording its audit resource.
+    _audit(
+        db,
+        action="login_success",
+        resource="session",
+        resource_id=session.id,
+        actor_id=user.id,
+        actor_type="user",
+        after_state={"user_id": str(user.id), "expires_at": session.expires_at.isoformat()},
+        request_id=request_id,
+        ip_address=client_ip,
+        user_agent=user_agent,
+    )
+    db.flush()  # Ensure all generated identifiers are available to caller.
 
     return (
         LoginResponse(
@@ -514,7 +754,7 @@ async def _create_session(
 async def mfa_verify(
     request: MfaVerifyRequest,
     req: Request,
-    db=Depends(get_db),
+    db=Depends(get_core_db),
 ) -> MfaVerifyResponse:
     """
     Verify MFA code for a pre-auth transaction (P0-05: atomic OTP consumption).
@@ -530,6 +770,8 @@ async def mfa_verify(
     """
     client_ip = get_client_ip(req)
     now = utc_now()
+    # Canonical device fingerprint (hashed) for the event sent to Detection.
+    device_fingerprint = fingerprint_from_request(req)
 
     # ------------------------------------------------------------------
     # STEP 1: Lock the MFA transaction row with SELECT ... FOR UPDATE.
@@ -546,6 +788,12 @@ async def mfa_verify(
     if not mfa_txn:
         raise HTTPException(status_code=404, detail="Transaction not found")
 
+    if mfa_txn.mfa_type == "trusted_device":
+        raise HTTPException(
+            status_code=409,
+            detail="Trusted-device approvals must be completed by the approving device",
+        )
+
     # ------------------------------------------------------------------
     # STEP 2: Inspect state after acquiring the lock.
     # The row lock serializes concurrent requests so we can safely
@@ -561,7 +809,7 @@ async def mfa_verify(
         raise HTTPException(status_code=401, detail="MFA transaction expired")
 
     # Check expiry: if OTP has expired, mark expired and reject.
-    if mfa_txn.expires_at <= now:
+    if as_utc(mfa_txn.expires_at) <= now:
         mfa_txn.status = "expired"
         db.commit()
         raise HTTPException(status_code=401, detail="MFA code has expired")
@@ -596,18 +844,19 @@ async def mfa_verify(
             mfa_txn.status = "failed"
 
         # Record failed MFA attempt
-        la = LoginAttempt(
-            event_id=uuid4(),
+        la = _login_event(
             request_id=uuid4(),
             user_id=user.id,
+            username_attempted=user.username,
             timestamp=now,
             outcome="mfa_failed",
             ip_address=client_ip,
             user_agent=req.headers.get("User-Agent"),
             mfa_used=True,
+            device_fingerprint=device_fingerprint,
         )
-        db.add(la)
         db.commit()
+        await _send_login_event(la)
 
         raise HTTPException(status_code=401, detail="Invalid MFA code")
 
@@ -649,21 +898,23 @@ async def mfa_verify(
     # All of these commit together or none do.
     # ------------------------------------------------------------------
     result, _ = await _create_session(
-        user, client_ip, req.headers.get("User-Agent"), db
+        user, client_ip, req.headers.get("User-Agent"), db,
+        device_fingerprint=device_fingerprint,
     )
 
-    la = LoginAttempt(
-        event_id=uuid4(),
+    la = _login_event(
         request_id=uuid4(),
         user_id=user.id,
+        username_attempted=user.username,
         timestamp=now,
         outcome="mfa_success",
         ip_address=client_ip,
         user_agent=req.headers.get("User-Agent"),
         mfa_used=True,
+        device_fingerprint=device_fingerprint,
     )
-    db.add(la)
     db.commit()
+    await _send_login_event(la)
 
     return MfaVerifyResponse(
         access_token=result.access_token,
@@ -675,7 +926,7 @@ async def mfa_verify(
 @router.post("/refresh", response_model=RefreshResponse)
 async def refresh_token(
     request: RefreshRequest,
-    db=Depends(get_db),
+    db=Depends(get_core_db),
 ) -> RefreshResponse:
     """
     Refresh access token using refresh token.
@@ -694,7 +945,7 @@ async def refresh_token(
     if not session:
         raise HTTPException(status_code=401, detail="Invalid refresh token")
 
-    if session.expires_at < utc_now():
+    if as_utc(session.expires_at) <= utc_now():
         raise HTTPException(status_code=401, detail="Session expired")
 
     # Generate new access token
@@ -709,6 +960,16 @@ async def refresh_token(
     new_refresh_token = secrets.token_urlsafe(32)
     session.refresh_token_hash = hash_token(new_refresh_token)
 
+    _audit(
+        db,
+        action="refresh_session",
+        resource="session",
+        resource_id=session.id,
+        actor_id=session.user_id,
+        actor_type="user",
+        after_state={"expires_at": session.expires_at.isoformat()},
+    )
+
     db.commit()
 
     return RefreshResponse(
@@ -720,7 +981,7 @@ async def refresh_token(
 @router.post("/logout", response_model=LogoutResponse)
 async def logout(
     ctx: AuthContext = Depends(get_current_auth_context),
-    db=Depends(get_db),
+    db=Depends(get_core_db),
 ) -> LogoutResponse:
     """
     Logout current session.
@@ -731,15 +992,71 @@ async def logout(
     """
     if ctx.session:
         ctx.session.revoked_at = utc_now()
+        _audit(
+            db,
+            action="logout",
+            resource="session",
+            resource_id=ctx.session.id,
+            actor_id=ctx.user.id,
+            actor_type="user",
+            after_state={"revoked": True},
+        )
         db.commit()
 
     return LogoutResponse(status="ok")
 
 
+@router.post("/logout-all", response_model=LogoutResponse)
+async def logout_all(
+    ctx: AuthContext = Depends(get_current_auth_context),
+    db=Depends(get_core_db),
+) -> LogoutResponse:
+    """Revoke every active session belonging to the authenticated user."""
+    now = utc_now()
+    revoked = int(
+        db.query(Session)
+        .filter(Session.user_id == ctx.user.id, Session.revoked_at.is_(None))
+        .update({Session.revoked_at: now}, synchronize_session=False)
+        or 0
+    )
+    _audit(
+        db,
+        action="logout_all",
+        resource="user",
+        resource_id=ctx.user.id,
+        actor_id=ctx.user.id,
+        actor_type="user",
+        after_state={"sessions_revoked": revoked},
+    )
+    db.commit()
+    return LogoutResponse(status="ok")
+
+
+@router.get("/me", response_model=UserItem)
+async def get_my_account(
+    ctx: AuthContext = Depends(get_current_auth_context),
+    db=Depends(get_core_db),
+) -> UserItem:
+    """Return the authenticated user's account projection and current roles."""
+    return UserItem(
+        id=ctx.user.id,
+        username=ctx.user.username,
+        email=ctx.user.email,
+        full_name=ctx.user.full_name,
+        status=ctx.user.status,
+        admin_mfa_required=ctx.user.admin_mfa_required,
+        roles=sorted(ctx.roles),
+        last_login_at=ctx.user.last_login_at,
+        failed_login_count=ctx.user.failed_login_count,
+        locked_at=ctx.user.locked_at,
+        created_at=ctx.user.created_at,
+    )
+
+
 @router.get("/sessions", response_model=SessionList)
 async def list_sessions(
     ctx: AuthContext = Depends(get_current_auth_context),
-    db=Depends(get_db),
+    db=Depends(get_core_db),
 ) -> SessionList:
     """
     List current user's sessions.
@@ -778,7 +1095,7 @@ async def list_sessions(
 async def revoke_session(
     session_id: UUID,
     ctx: AuthContext = Depends(get_current_auth_context),
-    db=Depends(get_db),
+    db=Depends(get_core_db),
 ) -> None:
     """
     Revoke a specific session.
@@ -800,6 +1117,15 @@ async def revoke_session(
         raise HTTPException(status_code=403, detail="Cannot revoke session of another user")
 
     target_session.revoked_at = utc_now()
+    _audit(
+        db,
+        action="revoke_session",
+        resource="session",
+        resource_id=target_session.id,
+        actor_id=ctx.user.id,
+        actor_type="user",
+        after_state={"revoked": True},
+    )
     db.commit()
 
 

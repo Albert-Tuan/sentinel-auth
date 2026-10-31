@@ -31,6 +31,8 @@ from sqlalchemy import (
     Numeric,
     Text,
     UniqueConstraint,
+    literal_column,
+    text,
 )
 from sqlalchemy.dialects.postgresql import INET, UUID
 from sqlalchemy.ext.compiler import compiles
@@ -215,7 +217,10 @@ class MfaTransaction(Base):
     """MFA challenge transactions (pending login before session creation)."""
     __tablename__ = "mfa_transactions"
     __table_args__ = (
-        CheckConstraint("mfa_type IN ('one_time', 'persistent')", name="chk_mfa_transactions_type"),
+        CheckConstraint(
+            "mfa_type IN ('one_time', 'persistent', 'trusted_device')",
+            name="chk_mfa_transactions_type",
+        ),
         CheckConstraint(
             "status IN ('pending', 'completed', 'expired', 'failed')",
             name="chk_mfa_transactions_status",
@@ -231,6 +236,14 @@ class MfaTransaction(Base):
     mfa_type: Mapped[str] = Column(Text, nullable=False, default="one_time")
     status: Mapped[str] = Column(Text, nullable=False, default="pending")
     bound_ip: Mapped[Optional[str]] = Column(inet_type(), nullable=True)
+    # Trusted-device approval requests reuse the Core MFA transaction
+    # lifecycle.  Keeping the request state here avoids introducing a
+    # fourteenth Core table while still giving approval/consumption durable,
+    # row-locked semantics.
+    trusted_device_fingerprint: Mapped[Optional[str]] = Column(Text, nullable=True)
+    trusted_device_name: Mapped[Optional[str]] = Column(Text, nullable=True)
+    trusted_device_user_agent: Mapped[Optional[str]] = Column(Text, nullable=True)
+    consumed_at: Mapped[Optional[datetime]] = Column(DateTime(timezone=True), nullable=True)
     # The SQL adds this FK via ALTER TABLE (fk_mfa_transaction_notification);
     # declared here so the ORM can resolve the circular relationship.
     notification_id: Mapped[Optional[str]] = Column(
@@ -462,6 +475,20 @@ class Policy(Base):
         Index("idx_policies_version", "version"),
         Index("idx_policies_active", "is_active"),
         Index("idx_policies_created_by", "created_by"),
+        # Single active policy.  The canonical schema expresses this as a
+        # partial unique index over a constant expression:
+        #     CREATE UNIQUE INDEX idx_policies_single_active
+        #         ON policies ((1)) WHERE is_active = TRUE;
+        # The ORM mirrors it so the constraint also holds in the SQLite unit
+        # tests, where the SQL file is not applied.  PostgreSQL applies the
+        # index from the schema file; the two definitions are equivalent.
+        Index(
+            "idx_policies_single_active",
+            literal_column("(1)"),
+            unique=True,
+            sqlite_where=text("is_active = TRUE"),
+            postgresql_where=text("is_active = TRUE"),
+        ),
     )
 
     id: Mapped[str] = Column(uuid_type(), primary_key=True, default=uuid4)
@@ -517,6 +544,7 @@ class LoginAttempt(Base):
         Index("idx_login_attempts_ip", "ip_address"),
         Index("idx_login_attempts_policy", "policy_id"),
         Index("idx_login_attempts_status", "status"),
+        Index("idx_login_attempts_device_fingerprint", "device_fingerprint"),
     )
 
     id: Mapped[str] = Column(uuid_type(), primary_key=True, default=uuid4)
@@ -529,6 +557,11 @@ class LoginAttempt(Base):
     mfa_used: Mapped[bool] = Column(Boolean, nullable=False, default=False)
     ip_address: Mapped[Optional[str]] = Column(inet_type(), nullable=True)
     user_agent: Mapped[Optional[str]] = Column(Text, nullable=True)
+    # Optional device fingerprint (hashed representation) sent by core-app.
+    # Nullable and backward compatible: when it is absent the Detection
+    # Engine falls back to the User-Agent proxy to decide device novelty.
+    # There is deliberately NO cross-database foreign key here.
+    device_fingerprint: Mapped[Optional[str]] = Column(Text, nullable=True)
     timestamp: Mapped[datetime] = Column(DateTime(timezone=True), nullable=False, default=now_utc)
     # Work queue for the background detection worker
     status: Mapped[str] = Column(Text, nullable=False, default="pending")

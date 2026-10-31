@@ -33,29 +33,59 @@ from typing import Any
 
 IMG = "bao-cao/"
 
-#: Sơ đồ dùng trong báo cáo
+#: Sơ đồ dùng trong báo cáo (D1.2 redesign)
+#:  - Tất cả 21 figure đã được sửa lại để đạt 9pt tại A4.
+#:  - Một số figure được chia thành 2-3 sub-figure; xem HINH_A, HINH_B, HINH_C.
+#:  - Chapter files có thể tham chiếu thêm key phụ (usecase_a, class_b, erd_core_a, ...)
+#:  - File manifest đầy đủ: docs/bao-cao/qa/figure-manifest.md
 HINH = {
-    "usecase": IMG + "uml-use-case-tong-quat.png",
-    "state_alert": IMG + "uml-state-alert.png",
-    "state_mfa_session": IMG + "uml-state-mfa-session.png",
-    "class": IMG + "uml-class-domain.png",
-    "act_login": IMG + "uml-activity-login-mfa.png",
-    "act_detection": IMG + "uml-activity-detection.png",
-    "act_soc": IMG + "uml-activity-soc.png",
-    "seq_login": "WF-1_Login.png",
-    "seq_detection": "WF-2_Detection.png",
-    "seq_soc": "WF-3_SOC.png",
-    "seq_mfa": "WF-4_MFA.png",
-    "seq_session": "WF-5_Sessions.png",
-    "seq_ml": "WF-6_ML.png",
-    "arch": "diagrams/fig_architecture_overview.png",
-    "erd_core": IMG + "ERD_core_v3.3.png",
-    "erd_detection": IMG + "ERD_detection_v3.3.png",
-    "erd_ml": IMG + "ERD_ml_v3.3.png",
-    "st01": "diagrams/v3.3-detect/st01-login-happy-path.png",
-    "st03": "diagrams/v3.3-detect/st03-login-critical-alert.png",
-    "st04": "diagrams/v3.3-detect/st04-soc-handle-alert.png",
-    "st06": "diagrams/v3.3-detect/st06-ml-timeout-fallback.png",
+    # --- Use Case (3 split: A=User-Auth, B=SOC, C=Admin) ---
+    # Original key: pointing to the full User-Auth view (most relevant for ch3a)
+    "usecase":            IMG + "uml-use-case-user-auth-v3.png",
+    "usecase_a":          IMG + "uml-use-case-user-auth-v3.png",
+    "usecase_b":          IMG + "uml-use-case-soc.png",
+    "usecase_c":          IMG + "uml-use-case-admin.png",
+    # --- State Machine ---
+    "state_alert":        IMG + "uml-state-alert-v2.png",
+    "state_mfa_session":  IMG + "uml-state-mfa-tx-v2.png",
+    "state_session":      IMG + "uml-state-session-v2.png",
+    # --- Class Diagram (4 split: A=Auth, B=Detection, C=DTOs, D=ML+Timeline) ---
+    # Original key: pointing to A (Auth) for ch3a
+    "class":              IMG + "uml-class-domain-a-v2.png",
+    "class_a":            IMG + "uml-class-domain-a-v2.png",
+    "class_b":            IMG + "uml-class-domain-b-v2.png",
+    "class_c":            IMG + "uml-class-domain-c-v4.png",
+    "class_d":            IMG + "uml-class-domain-d.png",
+    # --- Activity ---
+    "act_login":          IMG + "uml-activity-login-mfa-v2.png",
+    "act_detection":      IMG + "uml-activity-detection-v5.png",
+    "act_soc":            IMG + "uml-activity-soc-v4.png",
+    # --- Sequence (proper UML sequence diagrams from docs/diagrams/wf*.uml) ---
+    "seq_login":          "diagrams/wf1_login.png",
+    "seq_detection":      "diagrams/wf2_detection.png",
+    "seq_soc":            "diagrams/wf3_soc.png",
+    "seq_mfa":            "diagrams/wf4_mfa_flow.png",
+    "seq_session":        "diagrams/wf5_session_management.png",
+    "seq_ml":             "diagrams/wf6_ml_inference.png",
+    # --- Architecture (compact D1.2 redesign) ---
+    "arch":               IMG + "uml-architecture-v2.png",
+    "arch_full":          "diagrams/fig_architecture_overview.png",
+    # --- ERD Core (3 split: A=User, B=MFA, C=Audit) ---
+    "erd_core":           IMG + "ERD_core_v3.3_a.png",   # representative (User/Session)
+    "erd_core_a":         IMG + "ERD_core_v3.3_a.png",
+    "erd_core_b":         IMG + "ERD_core_v3.3_b.png",
+    "erd_core_c":         IMG + "ERD_core_v3.3_c.png",
+    # --- ERD Detection (2 split: A=Policy+Risk, B=Log+Alert) ---
+    "erd_detection":      IMG + "ERD_detection_v3.3_a.png",
+    "erd_detection_a":    IMG + "ERD_detection_v3.3_a.png",
+    "erd_detection_b":    IMG + "ERD_detection_v3.3_b.png",
+    # --- ERD ML ---
+    "erd_ml":             IMG + "ERD_ml_v3.3_v2.png",
+    # --- Scenario Maps (workflow diagrams) ---
+    "st01":               "diagrams/v3.3-detect/st01-login-happy-path-v2.png",
+    "st03":               "diagrams/v3.3-detect/st03-login-critical-alert-v3.png",
+    "st04":               "diagrams/v3.3-detect/st04-soc-handle-alert-v3.png",
+    "st06":               "diagrams/v3.3-detect/st06-ml-timeout-fallback-v3.png",
 }
 
 # ---------------------------------------------------------------------------
@@ -89,7 +119,6 @@ TU_VIET_TAT: list[tuple[str, str]] = [
     ("HTTP", "Hypertext Transfer Protocol - giao thức truyền tải siêu văn bản"),
     ("IP", "Internet Protocol - giao thức mạng, dùng ở đây để chỉ địa chỉ nguồn"),
     ("JSONB", "JSON Binary - kiểu dữ liệu JSON của PostgreSQL"),
-    ("JWT", "JSON Web Token - định dạng token có chữ ký số"),
     ("MFA", "Multi-Factor Authentication - xác thực đa yếu tố"),
     ("ML", "Machine Learning - học máy"),
     ("OTP", "One-Time Password - mật khẩu dùng một lần"),

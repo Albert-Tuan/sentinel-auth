@@ -266,6 +266,13 @@ Current runtime:  single uvicorn process
 Logical boundaries (Core / Detection / ML) exist as code modules, not as
 independent processes.
 
+**The database boundary is nevertheless enforced at runtime.** Each bounded
+context owns its own database and its own session dependency
+(`get_core_db`, `get_detection_db`, `get_ml_db`), each with a **separate
+engine and connection pool**. A Detection query therefore cannot run
+against the Core schema even inside the single process — the ownership
+boundary from section 3.2 is real, not merely documentary.
+
 ### 5.2 Target Architecture (v3.3 Design)
 
 ```

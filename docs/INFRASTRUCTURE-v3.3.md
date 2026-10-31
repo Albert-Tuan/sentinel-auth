@@ -279,8 +279,24 @@ Project isolation is automatic.
 
 ## 9. Current Application Compatibility
 
-The **current FastAPI monolith** connects to ONE database via `DATABASE_URL`
-(`app/main.py`). It is designed for `sentinel_core`.
+The **current FastAPI monolith** runs as ONE process but owns all THREE
+logical databases. `app/db.py` resolves one URL per bounded context and
+exposes one session dependency per context:
+
+| Bounded context | Dependency | Tables owned | Database |
+|-----------------|-----------|--------------|----------|
+| Core / Auth / IAM / devices / MFA | `Depends(get_core_db)` | 13 | `sentinel_core` |
+| Detection / policies / SOC alerts | `Depends(get_detection_db)` | 7 | `sentinel_detection` |
+| ML registry / inference logs | `Depends(get_ml_db)` | 3 + 1 view | `sentinel_ml` |
+
+Each context gets its **own engine and connection pool**, so a Detection
+query can never accidentally run against the Core schema.
+
+`DATABASE_URL` is a **legacy fallback only**. It is used exclusively when
+the corresponding `CORE_DATABASE_URL` / `DETECTION_DATABASE_URL` /
+`ML_DATABASE_URL` is absent, and that fallback is loudly logged so a
+misconfigured deployment cannot silently route Detection or ML traffic into
+the Core database.
 
 Running the monolith against the infrastructure in this document:
 
@@ -289,15 +305,23 @@ Running the monolith against the infrastructure in this document:
 docker compose up -d
 
 # In another terminal, run the application
-export DATABASE_URL="postgresql://sentinel:sentinel123@localhost:5432/sentinel_core"
+export CORE_DATABASE_URL="postgresql://sentinel:sentinel123@localhost:5432/sentinel_core"
+export DETECTION_DATABASE_URL="postgresql://sentinel:sentinel123@localhost:5432/sentinel_detection"
+export ML_DATABASE_URL="postgresql://sentinel:sentinel123@localhost:5432/sentinel_ml"
 export INTERNAL_SECRET="a-test-secret-at-least-32-characters-long"
 export RUN_PRE_TOKEN_CHECK="0"
 uvicorn app.main:app --reload --port 8000
 ```
 
-The application will work against `sentinel_core`. It will NOT automatically
-use `sentinel_detection` or `sentinel_ml` — those are for the future
-three-service architecture.
+The application **never creates tables at runtime**. `Base.metadata.create_all`
+is not called during startup: bootstrapping the three databases is owned by
+`infra/postgres/init/00-init-databases.sh`, which applies the canonical
+`schema-*-v3.3.sql` files to their own database. Creating the tables at
+runtime would put all 23 tables into ONE database and destroy the topology.
+
+`app.db.init_db()` still exists for local experiments and unit tests only.
+It is deprecated for production bootstrap and creates **only** the tables of
+the requested bounded context.
 
 ---
 
@@ -312,7 +336,11 @@ will connect to its own database:
 | Detection | `sentinel_detection` | 8001 |
 | ML | `sentinel_ml` | 8002 |
 
-Each service will use its own `DATABASE_URL` environment variable.
+The database-ownership boundary is already in place: each context's session
+dependency already resolves its own URL, so the physical split requires no
+change to the query code — only the deployment topology and the removal of
+the in-process HTTP hops between the contexts.
+
 The infrastructure in this document already supports this by creating all
 three databases on first run.
 

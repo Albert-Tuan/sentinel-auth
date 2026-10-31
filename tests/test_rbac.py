@@ -434,7 +434,9 @@ class TestAuthorizationMatrix:
         )
         assert resp.status_code == 403
 
-    def test_actions_soc_analyst_allowed(self, client, db, soc_analyst_user, alert):
+    def test_actions_soc_analyst_allowed(
+        self, client, db, soc_analyst_user, alert, core_receiver
+    ):
         resp = self._do_post(
             client,
             f"/api/v1/alerts/{alert.id}/actions",

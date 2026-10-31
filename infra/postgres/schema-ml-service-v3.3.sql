@@ -42,18 +42,12 @@ CREATE TABLE IF NOT EXISTS model_versions (
     /*
     JSONB structure:
     {
-        "threshold": 0.5,
-        "contamination": 0.1,
+        "contamination": "auto",
         "n_estimators": 100,
         "max_samples": "auto",
         "training_date": "ISO8601",
-        "training_features": ["feature1", "feature2"],
-        "metrics": {
-            "precision": 0.85,
-            "recall": 0.78,
-            "f1_score": 0.81,
-            "auc_roc": 0.92
-        }
+        "training_features": ["hour_of_day", "fail_count_24h", "ip_change_rate_7d",
+                              "new_device", "average_login_interval_seconds", "deviation_score"]
     }
     */
     status          TEXT NOT NULL DEFAULT 'staged'
@@ -157,7 +151,7 @@ CREATE INDEX idx_feature_stats_feature ON feature_statistics(feature_name);
 CREATE INDEX idx_feature_stats_timestamp ON feature_statistics(timestamp);
 
 -- =============================================================================
--- SEED DATA: Default Model Version
+-- SEED DATA: Non-production registry placeholder
 -- =============================================================================
 
 INSERT INTO model_versions (
@@ -175,23 +169,18 @@ INSERT INTO model_versions (
         'Isolation Forest v1.0',
         'v1.0-isolation-forest',
         'IsolationForest',
-        'Baseline Isolation Forest model for anomaly detection',
+        'Registry placeholder; activate only after a measured artifact is deployed',
         '/models/isolation-forest-v1.0.joblib',
         '{
-            "threshold": 0.5,
-            "contamination": 0.1,
+            "contamination": "auto",
             "n_estimators": 100,
             "max_samples": "auto",
             "random_state": 42,
-            "metrics": {
-                "precision": 0.85,
-                "recall": 0.78,
-                "f1_score": 0.81
-            }
+            "metrics": null
         }'::jsonb,
-        'active',
-        TRUE,
-        NOW() - INTERVAL '30 days'
+        'staged',
+        FALSE,
+        NULL
     )
 ON CONFLICT (version) DO NOTHING;
 

@@ -106,7 +106,7 @@ def _http_client(session: OrmSession):
     def _get_db():
         return session
 
-    app.dependency_overrides = {auth_mod.get_db: _get_db}
+    app.dependency_overrides = {auth_mod.get_core_db: _get_db}
     try:
         client = TestClient(app)
         yield client
@@ -199,15 +199,22 @@ class TestLoginHappyPath:
         session.refresh(user)
         assert user.last_login_at is not None, "last_login_at should be updated after login"
 
-    def test_login_creates_success_login_attempt(self, engine):
-        """Successful login creates a LoginAttempt with outcome='success'."""
+    def test_login_delivers_success_event_without_local_detection_write(self, engine, monkeypatch):
+        """Core sends the event; Detection owns the login_attempts row."""
         session = _make_session(engine)
         user = _create_user(session, "dave", "secure")
+        delivered = []
 
-        initial_count = session.query(LoginAttempt).filter(
-            LoginAttempt.user_id == user.id,
-            LoginAttempt.outcome == "success",
-        ).count()
+        async def capture(event):
+            delivered.append(event)
+            return True
+
+        from app import auth as auth_mod
+        monkeypatch.setattr(auth_mod, "_send_login_event", capture)
+        async def no_risk(*args):
+            return None
+
+        monkeypatch.setattr(auth_mod, "_pre_token_risk", no_risk)
 
         with _http_client(session) as client:
             response = client.post(
@@ -215,24 +222,10 @@ class TestLoginHappyPath:
                 json={"username": "dave", "password": "secure"},
             )
         assert response.status_code == 200
-
-        # Exactly one new success record
-        new_count = session.query(LoginAttempt).filter(
-            LoginAttempt.user_id == user.id,
-            LoginAttempt.outcome == "success",
-        ).count()
-        assert new_count == initial_count + 1, (
-            f"Expected {initial_count + 1} success LoginAttempts, got {new_count}"
-        )
-
-        # Verify the record has required fields
-        la = session.query(LoginAttempt).filter(
-            LoginAttempt.user_id == user.id,
-            LoginAttempt.outcome == "success",
-        ).order_by(LoginAttempt.timestamp.desc()).first()
-        assert la is not None
-        assert la.timestamp is not None, "LoginAttempt.timestamp must be set"
-        assert la.user_id == user.id, "LoginAttempt.user_id must match"
+        assert len(delivered) == 1
+        assert delivered[0].user_id == user.id
+        assert delivered[0].outcome == "success"
+        assert session.query(LoginAttempt).count() == 0
 
     def test_login_token_works_on_sessions_endpoint(self, engine):
         """Returned access token is usable on GET /api/v1/auth/sessions.

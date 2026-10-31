@@ -26,6 +26,8 @@ import pytest
 import sqlalchemy as sa
 from sqlalchemy import create_engine, text
 
+from tests.postgres_env import assert_disposable_database, require_postgres_env
+
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -43,6 +45,11 @@ def _pg_url() -> str:
         f"postgresql+psycopg2://{POSTGRES_USER}:{POSTGRES_PASSWORD}"
         f"@{POSTGRES_HOST}:{POSTGRES_PORT}/{POSTGRES_DB}"
     )
+
+
+# Without a configured PostgreSQL the whole module is skipped with an
+# explicit reason, instead of erroring during fixture setup.
+require_postgres_env(__name__)
 
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -95,6 +102,9 @@ def _create_user_sql(conn, username: str, password: str) -> str:
 
 @pytest.fixture(scope="module")
 def engine():
+    # The bootstrap fixture recreates the public schema, so the target must
+    # not be a canonical production database.
+    assert_disposable_database(_pg_url(), "the PostgreSQL auth tests")
     eng = create_engine(_pg_url(), isolation_level="AUTOCOMMIT")
     yield eng
     eng.dispose()
@@ -140,6 +150,141 @@ def orm_session(engine: sa.Engine):
         session.close()
 
 
+#: The Core -> Detection URL used by the in-process receiver below.
+_DELIVERY_URL = "http://detection.test"
+
+
+@pytest.fixture()
+def detection_receiver(monkeypatch):
+    """Wire the monolith's Detection receiver in-process for Core deliveries.
+
+    ``login_attempts`` is owned by the Detection context, and Core delivers
+    every ``LoginEvent`` over the HTTP service boundary
+    (``POST /api/v1/internal/login-events``).  A test that asserts a
+    ``login_attempts`` row therefore needs a receiver that actually accepts
+    the event - otherwise the delivery is a ``ConnectError`` and the
+    assertion can only ever fail.
+
+    This fixture installs an ``httpx.AsyncClient`` whose transport dispatches
+    the request into the *same* FastAPI application, so the real Detection
+    route, the real ``X-Internal-Secret`` verification and the real
+    ``login_attempts`` insert all run.  The HTTP boundary is exercised
+    end-to-end; only the socket is replaced.
+
+    The recorder it yields captures every dispatched request so a test can
+    assert on the method, the path and the number of calls.  It is NOT a
+    mock: the request is really delivered and really handled.
+    """
+    import httpx
+
+    from app.main import app
+    from app import auth as auth_mod
+
+    # The Detection context owns `login_attempts`.  This PostgreSQL test
+    # uses ONE database holding all three schemas, so every bounded context
+    # is pointed at it.  The env vars must be set before the application
+    # lifespan warms the per-context engines.
+    for variable in (
+        "CORE_DATABASE_URL",
+        "DETECTION_DATABASE_URL",
+        "ML_DATABASE_URL",
+    ):
+        monkeypatch.setenv(variable, _pg_url())
+
+    calls: list = []
+
+    class _RecordingTransport(httpx.AsyncBaseTransport):
+        """ASGI transport that records every request it dispatches."""
+
+        def __init__(self, inner):
+            self._inner = inner
+
+        async def handle_async_request(self, request):
+            calls.append(
+                {
+                    "method": request.method,
+                    "path": request.url.path,
+                    "url": str(request.url),
+                    "headers": dict(request.headers),
+                }
+            )
+            return await self._inner.handle_async_request(request)
+
+    transport = _RecordingTransport(httpx.ASGITransport(app=app))
+    original_init = httpx.AsyncClient.__init__
+
+    def _asgi_init(self, *args, **kwargs):
+        """Give the client a routing mount for the Detection host.
+
+        ``httpx`` resolves the transport per request URL, so mounting the
+        ASGI transport on the Detection host intercepts exactly the
+        Core -> Detection deliveries and leaves every other request alone.
+        """
+        kwargs.setdefault(
+            "mounts",
+            {_DELIVERY_URL: transport},
+        )
+        return original_init(self, *args, **kwargs)
+
+    monkeypatch.setattr(httpx.AsyncClient, "__init__", _asgi_init)
+    monkeypatch.setattr(auth_mod, "DETECTION_URL", _DELIVERY_URL)
+
+    # The receiver runs inside the same application, so its Detection session
+    # dependency must resolve against the same PostgreSQL database.  The
+    # per-context env vars above already point every context at it; this
+    # override additionally makes the Detection route reuse the caller's
+    # session factory so the insert is visible to the test's connection.
+    from app import detection as detection_mod
+
+    original_overrides = dict(app.dependency_overrides)
+    detection_override = getattr(detection_mod, "get_detection_db", None)
+    if detection_override is not None:
+        def _detection_db_override():
+            from app.db import get_context_session, DETECTION
+            session = get_context_session(DETECTION)
+            try:
+                yield session
+            finally:
+                session.close()
+
+        app.dependency_overrides[detection_override] = _detection_db_override
+
+    class _Recorder:
+        """Records the Detection-bound requests that were actually made."""
+
+        @property
+        def calls(self) -> list:
+            return calls
+
+        @property
+        def count(self) -> int:
+            return len(calls)
+
+        def assert_only_login_events(self, expected_count: int = 1) -> None:
+            """Assert the deliveries were exactly N POSTs to the event endpoint.
+
+            This pins the contract of the Core -> Detection delivery:
+            the method, the path and the number of calls.
+            """
+            assert len(calls) == expected_count, (
+                f"expected {expected_count} Delivery call(s), got {len(calls)}: "
+                f"{[(c['method'], c['path']) for c in calls]}"
+            )
+            for call in calls:
+                assert call["method"] == "POST", (
+                    f"expected POST, got {call['method']} for {call['path']}"
+                )
+                assert call["path"] == "/api/v1/internal/login-events", (
+                    f"expected the login-events endpoint, got {call['path']}"
+                )
+
+    try:
+        yield _Recorder()
+    finally:
+        app.dependency_overrides.clear()
+        app.dependency_overrides.update(original_overrides)
+
+
 # ---------------------------------------------------------------------------
 # REAL end-to-end FastAPI test against PostgreSQL
 # ---------------------------------------------------------------------------
@@ -147,7 +292,9 @@ def orm_session(engine: sa.Engine):
 class TestPostgresLoginE2E:
     """End-to-end FastAPI login against real PostgreSQL — no mocking."""
 
-    def test_post_login_returns_tokens_and_creates_db_records(self, pg_conn, orm_session):
+    def test_post_login_returns_tokens_and_creates_db_records(
+        self, pg_conn, orm_session, detection_receiver
+    ):
         """POST /api/v1/auth/login hits real login() and _create_session().
 
         Verifies on PostgreSQL:
@@ -184,6 +331,11 @@ class TestPostgresLoginE2E:
         # Preserve originals
         orig_pre_token = _auth_mod.RUN_PRE_TOKEN_CHECK
 
+        # This test exercises ONLY the LoginEvent delivery path.  The
+        # pre-token risk check is a separate Core -> Detection call, so it
+        # is disabled explicitly here and asserted below.
+        _auth_mod.RUN_PRE_TOKEN_CHECK = "0"
+
         def _get_db_override():
             yield orm_session
 
@@ -191,13 +343,15 @@ class TestPostgresLoginE2E:
             return "127.0.0.1"
 
         try:
-            # Disable pre-token risk check
-            _auth_mod.RUN_PRE_TOKEN_CHECK = "0"
+            # Disable pre-token risk check: it is a DIFFERENT Core ->
+            # Detection call, and this test exercises only the LoginEvent
+            # delivery.  The assertion below pins that it stayed off.
+            assert _auth_mod.RUN_PRE_TOKEN_CHECK == "0"
             # Mock client IP to a valid IP so INET comparisons work
             orig_get_client_ip = _auth_mod.get_client_ip
             _auth_mod.get_client_ip = _mock_get_client_ip
 
-            app.dependency_overrides[_auth_mod.get_db] = _get_db_override
+            app.dependency_overrides[_auth_mod.get_core_db] = _get_db_override
 
             with TestClient(app) as client:
                 login_resp = client.post(
@@ -220,6 +374,12 @@ class TestPostgresLoginE2E:
             _auth_mod.RUN_PRE_TOKEN_CHECK = orig_pre_token
             _auth_mod.get_client_ip = orig_get_client_ip
             app.dependency_overrides.clear()
+
+        # --- Delivery contract ---
+        # This test exercises ONLY the LoginEvent delivery, so the pre-token
+        # risk check must be disabled (it is a different Core -> Detection
+        # call) and exactly one event must have been delivered.
+        detection_receiver.assert_only_login_events(expected_count=1)
 
         # --- PostgreSQL assertions ---
         pg_conn.commit()
@@ -284,7 +444,7 @@ class TestPostgresLoginE2E:
                 return "127.0.0.1"
 
             _auth_mod.get_client_ip = _mock_get_client_ip2
-            app.dependency_overrides[_auth_mod.get_db] = _get_db_override2
+            app.dependency_overrides[_auth_mod.get_core_db] = _get_db_override2
 
             with TestClient(app) as client:
                 sessions_resp = client.get(
@@ -504,7 +664,7 @@ class TestPostgresMfaLogin:
         try:
             _auth_mod.get_client_ip = lambda req: "127.0.0.1"
             _auth_mod.RUN_PRE_TOKEN_CHECK = "0"
-            app.dependency_overrides[_auth_mod.get_db] = _get_db_override
+            app.dependency_overrides[_auth_mod.get_core_db] = _get_db_override
 
             with TestClient(app) as client:
                 resp = client.post(
@@ -601,7 +761,7 @@ class TestPostgresMfaLogin:
             _auth_mod.get_client_ip = lambda req: "10.0.0.50"
             _auth_mod.generate_otp = lambda: "123456"
 
-            app.dependency_overrides[_auth_mod.get_db] = _get_db_override
+            app.dependency_overrides[_auth_mod.get_core_db] = _get_db_override
 
             with TestClient(app) as client:
                 # Step 1: login → get mfa challenge
@@ -663,7 +823,7 @@ class TestPostgresMfaLogin:
 
         try:
             _auth_mod.get_client_ip = lambda req: "10.0.0.50"
-            app.dependency_overrides[_auth_mod.get_db] = _get_db_override2
+            app.dependency_overrides[_auth_mod.get_core_db] = _get_db_override2
 
             with TestClient(app) as client:
                 sessions_resp = client.get(
@@ -706,7 +866,7 @@ class TestPostgresMfaLogin:
             _auth_mod.get_client_ip = lambda req: "10.0.0.99"
             _auth_mod.generate_otp = lambda: "123456"
 
-            app.dependency_overrides[_auth_mod.get_db] = _get_db_override
+            app.dependency_overrides[_auth_mod.get_core_db] = _get_db_override
 
             with TestClient(app) as client:
                 login_resp = client.post(
@@ -780,7 +940,7 @@ class TestPostgresMfaLogin:
             _auth_mod.get_client_ip = lambda req: "8.8.8.8"
             _auth_mod.generate_otp = lambda: "654321"
 
-            app.dependency_overrides[_auth_mod.get_db] = _get_db_override
+            app.dependency_overrides[_auth_mod.get_core_db] = _get_db_override
 
             with TestClient(app) as client:
                 login_resp = client.post(
@@ -829,7 +989,7 @@ class TestPostgresMfaLogin:
             _auth_mod.get_client_ip = lambda req: "1.1.1.1"
             _auth_mod.generate_otp = lambda: "111111"
 
-            app.dependency_overrides[_auth_mod.get_db] = _get_db_override
+            app.dependency_overrides[_auth_mod.get_core_db] = _get_db_override
 
             with TestClient(app) as client:
                 login_resp = client.post(
@@ -885,7 +1045,7 @@ class TestPostgresMfaLogin:
             _auth_mod.get_client_ip = lambda req: "2001:0db8:0000:0000:0000:0000:0000:0001"
             _auth_mod.generate_otp = lambda: "222222"
 
-            app.dependency_overrides[_auth_mod.get_db] = _get_db_override
+            app.dependency_overrides[_auth_mod.get_core_db] = _get_db_override
 
             with TestClient(app) as client:
                 login_resp = client.post(
@@ -937,7 +1097,7 @@ class TestPostgresMfaLogin:
             _auth_mod.get_client_ip = lambda req: "2001:db8::1"
             _auth_mod.generate_otp = lambda: "333333"
 
-            app.dependency_overrides[_auth_mod.get_db] = _get_db_override
+            app.dependency_overrides[_auth_mod.get_core_db] = _get_db_override
 
             with TestClient(app) as client:
                 login_resp = client.post(
@@ -1049,7 +1209,7 @@ class TestTimezoneSafeMfa:
             _auth_mod.RUN_PRE_TOKEN_CHECK = "0"
             _auth_mod.get_client_ip = lambda req: "10.0.0.50"
             _auth_mod.generate_otp = lambda: "123456"
-            app.dependency_overrides[_auth_mod.get_db] = _get_db_override
+            app.dependency_overrides[_auth_mod.get_core_db] = _get_db_override
 
             with TestClient(app) as client:
                 login_resp = client.post(
@@ -1127,7 +1287,7 @@ class TestTimezoneSafeMfa:
             _auth_mod.RUN_PRE_TOKEN_CHECK = "0"
             _auth_mod.get_client_ip = lambda req: "10.0.0.50"
             _auth_mod.generate_otp = lambda: "999888"
-            app.dependency_overrides[_auth_mod.get_db] = _get_db_override
+            app.dependency_overrides[_auth_mod.get_core_db] = _get_db_override
 
             before = utc_now()
             with TestClient(app) as client:

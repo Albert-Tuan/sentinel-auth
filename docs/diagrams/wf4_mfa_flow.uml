@@ -124,34 +124,31 @@ alt User clicks "Trust this device"
     deactivate CA
 end
 
-== Next Login with Trusted Device ==
+== New Device Approval ==
 
-U -> CA : **POST /api/v1/auth/login**\n(username, password,\ndevice_fingerprint)
-activate CA
+U -> CA : **POST /api/v1/devices/pending**\n(username, password, device_name)
+CA -> CA : Verify password + pre-token risk
+CA -> CDB : INSERT mfa_transaction\n(type=trusted_device, status=pending,\nIP + fingerprint, expires_at+5min)
+CA --> U : **202 PENDING**\n{request_id}
 
-CA -> CDB : SELECT user WHERE username
-activate CDB
-CDB --> CA : user record
-deactivate CDB
+note over U
+  A currently signed-in device must approve the request.
+  The approving session must come from its familiar IP.
+end note
 
-CA -> CA : Verify password (Argon2id)
-CA -> CDB : SELECT user_trusted_devices\nWHERE user_id AND\ndevice_fingerprint AND\nexpires_at > NOW()
-activate CDB
-CDB --> CA : trusted device found
-deactivate CDB
+U -> CA : **POST /api/v1/devices/pending/{request_id}/approve**
+CA -> CA : Validate owner session + familiar IP
+CA -> CDB : UPSERT user_trusted_devices
+CA -> CDB : UPDATE mfa_transaction(status=completed)
 
-alt Trusted device VALID
-    CA -> CDB : INSERT mfa_transaction\n(type=trusted_device,\nstatus=auto_completed)
-    CA -> CDB : INSERT login_attempt\n(outcome=mfa_success)
-    CA -> CDB : INSERT session
-    
-    CA --> U : **200 OK**\n{access_token, refresh_token}\n**← BỎ QUA OTP**
-    deactivate CA
+U -> CA : **POST /api/v1/devices/pending/{request_id}/complete**
+CA -> CA : Require original IP + fingerprint\nRe-run pre-token risk check
+CA -> CDB : INSERT session
+CA --> U : **200 OK**\n{access_token, refresh_token}
 
-else Trusted device EXPIRED
-    CA -> CDB : INSERT mfa_transaction\n(status=pending, type=one_time)
-    CA --> U : **200 MFA_REQUIRED**\n{mfa_type: "email_otp"}
-    deactivate CA
-end
+note over CA
+  admin_mfa_required and Detection high/critical always require Email OTP.
+  Trusted-device approval never bypasses either requirement.
+end note
 
 @enduml

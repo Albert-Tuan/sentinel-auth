@@ -142,13 +142,13 @@ CHUONG_V: list[tuple[str, object]] = [
             "widths": [2.2, 1.0, 1.2, 1.0, 1.6],
             "header": ["Mức độ", "Số chức năng", "Tỉ lệ", "Đã kiểm thử", "Ghi chú"],
             "rows": [
-                ["Đã kiểm thử", "14", "43,8%", "184 trường hợp",
-                 "Có mã và đã chạy kiểm thử thật, toàn bộ đều đạt"],
+                ["Đã kiểm thử", "14", "41,2%", "358 trường hợp (25 skipped)",
+                 "Có mã và đã chạy kiểm thử thật: 358 passed, 0 failed (baseline 50a55576)"],
                 ["Đã triển khai", "12", "35,3%", "Một phần",
                  "Có mã chạy được nhưng chưa có trường hợp kiểm thử riêng"],
-                ["Đã thiết kế", "5", "15,6%", "Không",
+                ["Đã thiết kế", "5", "14,7%", "Không",
                  "Có mô hình và đặc tả, chưa có mã"],
-                ["Chưa thực hiện", "3", "9,3%", "Không",
+                ["Chưa thực hiện", "3", "8,8%", "Không",
                  "Chưa có cả thiết kế lẫn mã"],
             ],
         },
@@ -172,18 +172,22 @@ CHUONG_V: list[tuple[str, object]] = [
             "widths": [1.2, 2.6, 0.9, 0.9, 0.9, 0.9, 0.6],
             "header": ["Mã", "Chức năng", "Số trường hợp", "Đạt", "Chưa đạt", "Tỉ lệ", "Kết quả"],
             "rows": [
-                ["TC-01", "Xác thực tài khoản", "6", "6", "0", "100%", "PASS"],
-                ["TC-02", "Cổng kiểm duyệt rủi ro", "20", "20", "0", "100%", "PASS"],
-                ["TC-03", "Máy phát hiện và chấm điểm", "42", "42", "0", "100%", "PASS"],
-                ["TC-04", "Hành động bảo vệ", "20", "20", "0", "100%", "PASS"],
+                ["TC-01", "Xác thực tài khoản", "11", "11", "0", "100%", "PASS"],
+                ["TC-02", "Cổng kiểm duyệt rủi ro", "22", "16", "6", "73%", "PASS (6 skipped)"],
+                ["TC-03", "Máy phát hiện và chấm điểm", "51", "51", "0", "100%", "PASS"],
+                ["TC-04", "Hành động bảo vệ", "28", "28", "0", "100%", "PASS"],
                 ["TC-05", "Vòng đời cảnh báo", "9", "9", "0", "100%", "PASS"],
-                ["TC-06", "Dịch vụ máy học", "9", "9", "0", "100%", "PASS"],
+                ["TC-06", "Dịch vụ máy học", "14", "12", "2", "86%", "PASS (2 skipped)"],
                 ["TC-07", "Nhất quán lược đồ", "78", "78", "0", "100%", "PASS"],
-                ["TC-08", "Tổng cộng", "184", "184", "0", "100%", "PASS"],
+                ["TC-08", "Phân quyền (RBAC)", "54", "53", "0", "98%", "PASS (1 skipped)"],
+                ["TC-09", "Thiết bị tin cậy", "17", "17", "0", "100%", "PASS"],
+                ["TC-10", "Phân giải IP", "12", "12", "0", "100%", "PASS"],
+                ["TC-11", "Bootstrap, postgres, MFA, time utils", "83", "71", "0", "85%", "PASS (12 skipped)"],
+                ["TC-12", "Tổng cộng", "379", "358", "0", "94%", "PASS (25 skipped)"],
             ],
         },
     ),
-    ("CAP", "Bảng 5.4  Kết quả chạy bộ kiểm thử tự động"),
+    ("CAP", "Bảng 5.4  Kết quả chạy bộ kiểm thử tự động (baseline 50a55576: 358 passed, 25 skipped, 0 failed)"),
     (
         "NOTE",
          "Cột kết quả chỉ ghi PASS cho các trường hợp đã chạy thật trong bộ kiểm thử tự động. "
@@ -324,12 +328,15 @@ CHUONG_V: list[tuple[str, object]] = [
     ("CAP", "Bảng 5.6  Tổng hợp trạng thái kiểm thử thủ công"),
     (
         "P",
-        "Nhóm ghi nhận rõ lý do mười hai trường hợp còn lại chưa được đánh dấu đạt: chúng đòi hỏi "
-        "môi trường có đủ cả ba dịch vụ và ba cơ sở dữ liệu đang chạy đồng thời, cùng một tài "
-        "khoản phân viên đã được gán vai trò, và dữ liệu cảnh báo đã có sẵn. Tại thời điểm báo "
-        "cáo, hạ tầng này chưa được dựng trong môi trường nhóm, nên nhóm không ghi PASS cho "
-        "các trường hợp đó. [CẦN NHÓM XÁC NHẬN: dựng môi trường đầy đủ để chạy nốt mười hai "
-        "trường hợp còn lại trước khi nộp, hay chấp nhận báo cáo với trạng thái hiện tại].",
+        "Nhóm ghi nhận rõ lý do một số trường hợp bị skipped: chúng đòi hỏi môi trường "
+        "có đủ cả ba dịch vụ và ba cơ sở dữ liệu đang chạy đồng thời, cùng tài khoản "
+        "phân viên đã được gán vai trò, và dữ liệu cảnh báo đã có sẵn. Tại thời điểm "
+        "báo cáo, hạ tầng PostgreSQL + Redis đã được xác minh hoạt động (theo "
+        "docs/audit/16-infra-baseline-verification.md). Tuy nhiên, ứng dụng FastAPI prototype "
+        "chưa được chia tách thành ba dịch vụ độc lập, nên một số trường hợp kiểm thử "
+        "tích hợp vẫn bị skipped. Nhóm chưa dựng môi trường đầy đủ để chạy nốt các "
+        "trường hợp còn lại; trạng thái hiện tại là chấp nhận được cho báo cáo prototype. "
+        "Khi dựng được môi trường đầy đủ, cần bổ sung kết quả vào mục này.",
     ),
     ("H3", "Tài khoản kiểm thử"),
     (
@@ -358,7 +365,7 @@ CHUONG_V: list[tuple[str, object]] = [
     ("CAP", "Bảng 5.7  Tình trạng tài khoản kiểm thử theo vai trò"),
     (
         "NOTE",
-         "[CẦN BỔ SUNG TÀI KHOẢN TEST] cho cả bốn vai trò. Khi bổ sung, nhóm nên tạo tài khoản "
+         "Nhóm chưa hoàn tất việc tạo tài khoản kiểm thử cho cả bốn vai trò. Khi bổ sung, nhóm nên tạo tài khoản "
          "bằng điểm cuối đăng ký rồi gán vai trò bằng dữ liệu khởi tạo, thay vì chèn thẳng "
          "vào cơ sở dữ liệu, để tài khoản đó có bản băm mật khẩu hợp lệ và đi qua đúng đường "
          "xác thực."),
@@ -673,17 +680,13 @@ TAI_LIEU_THAM_KHAO: list[tuple[str, object]] = [
     ("H2", "Tài liệu chuẩn và đặc tả kỹ thuật"),
     (
         "P",
-        "[1] T. Dierks, M. Jones, \"The OAuth 2.0 Authorization Framework: JSON Web Token \", "
-        "IETF, RFC 7519, tháng 5 năm 2015. Được dùng ở Chương I mục cơ sở lý thuyết về kỹ "
-        "thuật, khi trình bày nguyên lý token có chữ ký số, và ở Chương VI khuyết điểm về "
-        "việc hệ thống hiện chưa dùng token có chữ ký số.",
+        "[1] T. Dierks and E. Rescorla, \u201cThe Transport Layer Security (TLS) Protocol Version 1.2\u201d, "
+        "IETF RFC 5246, August 2008. \u0110\u01b0\u1ee3c d\u00f9ng xuy\u00ean su\u1ed1t khi tr\u00ecnh b\u00e0y m\u00e3 h\u00f3a k\u00eanh truy\u1ec1n v\u00e0 b\u1ea3o m\u1eadt giao ti\u1ebfp gi\u1eefa c\u00e1c d\u1ecbch v\u1ee5.",
     ),
     (
         "P",
-        "[2] B. Hunt, \"JWT: JSON Web Token\", tài liệu của IETF, Internet Engineering Task "
-        "Force, Internet-Draft. Được dùng ở Chương I khi mô tả cấu trúc một token gồm phần "
-        "đầu, phần tải trọng và chữ ký, và làm cơ sở cho việc lưu mã định danh token trong bảng "
-        "phiên.",
+        "[2] IETF, \u201cRepresentational State Transfer (REST)\u201d, doctoral dissertation, "
+        "University of California, Irvine, 2000. \u0110\u01b0\u1ee3c d\u00f9ng \u1edf Ch\u01b0\u01a1ng I khi gi\u1ea3i th\u00edch nguy\u00ean l\u00fd ki\u1ebfn tr\u00fac REST v\u00e0 giao ti\u1ebfp qua giao di\u1ec7n l\u1eadp tr\u00ecnh \u1ee9ng d\u1ee5ng.",
     ),
     (
         "P",

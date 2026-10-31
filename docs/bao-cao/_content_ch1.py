@@ -208,7 +208,9 @@ CHUONG_I: list[tuple[str, object]] = [
         "về hiệu năng, vì vậy các mục tiêu định lượng cho quy mô lớn chưa được "
         "cam kết.",
     ),
-    ("NOTE", "[CẦN NHÓM XÁC NHẬN QUY MÔ ĐỊNH LƯỢNG]"),
+    ("NOTE", "Nhóm chưa có số liệu thực tế về quy mô định lượng (số người dùng đồng thời, số lần đăng nhập/giờ kỳ vọng). "
+            "Các tiêu chí định lượng trong báo cáo phản ánh quy mô thiết kế dự kiến theo định hướng đề tài, chưa được đo từ hệ thống thật. "
+            "Khi triển khai và đo tải thực tế, cần cập nhật lại mục này."),
     (
         "P",
         "Nhóm chưa có số liệu thực tế về số tài khoản, số yêu cầu đăng nhập mỗi "
@@ -269,9 +271,12 @@ CHUONG_I: list[tuple[str, object]] = [
                 ],
                 [
                     "Cơ chế hàng đợi phát sự kiện",
-                    "Bảng outbox_events đã được thiết kế và khai báo trong lược đồ, "
-                    "nhưng chưa có chương trình theo dõi ghi và chuyển sự kiện. Chi "
-                    "tiết trạng thái nợ kỹ thuật được ghi ở Chương VI.",
+                    "Bảng outbox_events đã được thiết kế trong lược đồ để hỗ trợ "
+                    "chuyển sự kiện bất đồng bộ qua Redis Streams. Tuy nhiên, "
+                    "chương trình publisher đọc outbox và gửi sang Redis chưa được "
+                    "triển khai. Redis đã được xác minh hoạt động (PONG, AOF "
+                    "enabled, appendfsync everysec). Chi tiết trạng thái nợ kỹ "
+                    "thuật được ghi ở Chương VI.",
                 ],
                 [
                     "Báo cáo thống kê xuất ra tệp",
@@ -302,7 +307,7 @@ CHUONG_I: list[tuple[str, object]] = [
      "Lưu ý về tính trung thực: những hạng mục ở bảng trên được đánh dấu là ngoài "
      "phạm vi dựa trên việc đối chiếu trực tiếp với mã nguồn và tệp cấu hình của "
      "dự án. Những hạng mục đã thiết kế nhưng chưa có bằng chứng chạy thật được "
-     "phân biệch rõ tại Chương IV và Chương V."),
+        "phân biệt rõ tại Chương IV và Chương V."),
 
     # ---------------------------------------------------------------- I.3
     ("H3", "Nền tảng kỹ thuật"),
@@ -351,7 +356,7 @@ CHUONG_I: list[tuple[str, object]] = [
                 [
                     "Kiểm tra dữ liệu đầu vào",
                     "Pydantic phiên bản 2",
-                    "Xác thựnh và định nghĩa lược đồ dữ liệu cho mọi điểm cuối.",
+                      "Xác thực và định nghĩa lược đồ dữ liệu cho mọi điểm cuối.",
                 ],
                 [
                     "Giao tiếp HTTP giữa các dịch vụ",
@@ -414,29 +419,34 @@ CHUONG_I: list[tuple[str, object]] = [
     ("H4", "Cơ chế truyền sự kiện"),
     (
         "P",
-        "Phiên bản thiết kế ban đầu dự kiến mô hình hộp thư ra (outbox) với chương "
-        "trình theo dõi gom sự kiện. Thiết kế hiện tại đã thay phần này bằng hai "
-        "kênh trực tiếp hơn: một kênh đồng bộ trong yêu cầu đăng nhập để kiểm duyệt "
-        "trước khi cấp token, và một kênh ghi trực tiếp bản ghi lần đăng nhập kèm "
-        "cờ trạng thái chờ xử lý. Bảng outbox_events vẫn còn trong lược đồ cơ sở dữ "
-        "liệu nhưng chưa được mã nguồn sử dụng.",
+        "Thiết kế v3.3 quy định `outbox_events` trong `sentinel_core` làm "
+        "bảng trung gian cho mô hình transactional outbox: mỗi giao dịch "
+        "nghiệp vụ ghi cả bản ghi outbox cùng commit, rồi một chương "
+        "trình publisher đọc outbox và gửi sự kiện qua Redis Streams đến "
+        "Detection Engine. Bảng đã được tạo đúng. Redis đã được xác minh "
+        "hoạt động (PONG, AOF enabled, appendfsync everysec). Tuy nhiên, "
+        "chương trình publisher đọc outbox và gửi sang Redis chưa được "
+        "triển khai — hiện tại Core App ghi sự kiện trực tiếp qua HTTP "
+        "nội bộ.",
     ),
     ("H4", "Xác thực và quản lý phiên"),
     (
         "P",
-        "Phiên bản thiết kế mô tả cơ chế phát hành JSON Web Token (JWT). Mã nguồn hiện "
-        "tại phát hành chuỗi ngẫu nhiên 32 byte, lưu bản băm SHA-256 trong bảng phiên "
-        "kèm định danh token và thời hạn một giờ. Trường token_jti đã được khai báo "
-        "trong lược độ để sẵn sàng cho cơ chế chuẩn hoá, nhưng thư viện JWT chưa có "
-        "trong danh sách phụ thuộc. Báo cáo này mô tả đúng trạng thái mã nguồn, đồng "
-        "thời ghi nhận sự khác biệt này là nợ kỹ thuật cần khắc phục.",
+        "Hệ thống sử dụng cơ chế token mờ (opaque token): chuỗi ngẫu nhiên "
+        "32 byte được tạo bằng `secrets.token_urlsafe(32)`, bản băm SHA-256 "
+        "được lưu trong bảng phiên cùng thời hạn một giờ. Mỗi lần refresh "
+        "đều tạo chuỗi ngẫu nhiên mới cho cả access lẫn refresh token mà không "
+        "ký số, không lưu trữ secret, và không gia hạn thời hạn phiên. "
+        "Mô hình này được gọi đúng là opaque token, không phải JWT. "
+        "Trường `token_jti` là trường nội bộ để xoay vòng phiên.",
     ),
     ("H4", "Công nghệ triển khai"),
     (
         "P",
-        "Dự án có tệp định nghĩa ảnh Docker chạy ứng dụng trên nền Python 3.11 rút "
-        "gọn, kèm kiểm tra sức khoẻ dịch vụ theo chu kỳ. Chưa có tệp định nghĩa toàn "
-        "bộ cụm dịch vụ trong dự án.",
+        "Dự án có tệp docker-compose.yml định nghĩa cơ sở hạ tầng (PostgreSQL, Redis) "
+        "phục vụ phát triển cục bộ. Tệp này chưa bao gồm việc triển khai ba dịch vụ "
+        "ứng dụng độc lập; việc đóng gói ba dịch vụ vào cụm sẽ được bổ sung khi "
+        "kiến trúc ba dịch vụ được hoàn thiện.",
     ),
     (
         "P",
@@ -458,11 +468,13 @@ CHUONG_I: list[tuple[str, object]] = [
         "điểm và gộp điểm được trình bày ở Chương II và Chương III.",
     ),
     ("NOTE",
-     "[CẦN XÁC NHẬN CÔNG NGHỆ] — Hai hạng mục cần nhóm chốt trước khi nghiệm thu: "
-     "(1) có triển khai dịch vụ gửi thư điện tử và tin nhắn ngắn cho mã xác thực hay "
-     "không, vì mã nguồn hiện còn ghi chú yêu cầu tích hợp; (2) có chủ định dùng "
-     "cơ chế hộp thư ra cho luồng sự kiện bất đồng bộ trong phiên bản tiếp theo hay "
-     "không, vì bảng tương ứng đã có trong lược đồ nhưng chưa có chương trình sử dụng."),
+     "Hai hạng mục cần nhóm chốt trước khi nghiệm thu: "
+     "(1) MFA hiện chỉ hỗ trợ Email OTP. SMS / TOTP / Push notification là "
+     "FUTURE ENHANCEMENT — nếu có yêu cầu tích hợp SMS, cần bổ sung nhà cung "
+     "cấp dịch vụ SMS và triển khai kênh trong code. (2) Bảng outbox_events "
+     "đã được tạo và Redis đã xác minh hoạt động (PONG, AOF, appendfsync). "
+     "Tuy nhiên, chương trình publisher đọc outbox và gửi qua Redis Streams "
+     "chưa được triển khai — hiện Core App gửi sự kiện qua HTTP nội bộ."),
 
     # ================================================================ I.2
     ("H2", "Cơ sở lý thuyết"),

@@ -8,7 +8,14 @@ from typing import Any, Dict, List, Optional
 from uuid import UUID
 from enum import Enum
 
-from pydantic import BaseModel, EmailStr, Field, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    EmailStr,
+    Field,
+    field_validator,
+    model_validator,
+)
 
 
 # =============================================================================
@@ -464,7 +471,15 @@ class LoginEventRequest(BaseModel):
 
     Sent by core-app's outbox poller, originating from the core-db
     outbox_events table.
+
+    The model is STRICT (``extra="forbid"``): a misspelled field such as
+    ``device_fingerprint_typo`` must be rejected loudly instead of being
+    silently dropped.  Silently ignoring it would degrade the
+    fingerprint-first device-novelty logic back to the User-Agent proxy
+    without any visible error.
     """
+
+    model_config = ConfigDict(extra="forbid")
 
     event_id: UUID = Field(..., description="Idempotency key from core-app")
     username_attempted: str = Field(..., min_length=1, max_length=50)
@@ -480,6 +495,16 @@ class LoginEventRequest(BaseModel):
     mfa_used: bool = False
     timestamp: datetime
     request_id: Optional[UUID] = None
+    # Optional device fingerprint (SHA-256 hex digest of the canonical
+    # header-derived fingerprint material).  Nullable and backward
+    # compatible: an event sent by an older Core has no fingerprint and the
+    # Detection Engine falls back to the User-Agent proxy for device
+    # novelty.  Never carries raw header values or browser secrets.
+    device_fingerprint: Optional[str] = Field(
+        default=None,
+        max_length=128,
+        description="Optional SHA-256 device fingerprint; enables fingerprint-first new_device",
+    )
     # Optional pre-computed features; if omitted the engine builds them
     features: Optional[Dict[str, Any]] = None
 
@@ -577,6 +602,10 @@ class ActionRequest(BaseModel):
     alert_id: Optional[UUID] = None
     severity: Optional[RiskLevel] = None
     idempotency_key: Optional[str] = None
+    #: When the detection engine observed the risky event.  Recorded in the
+    #: Core audit trail so the enforcement time and the detection time can
+    #: be compared.
+    detected_at: Optional[datetime] = None
 
 
 class ActionResponse(BaseModel):

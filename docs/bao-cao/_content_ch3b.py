@@ -291,10 +291,14 @@ CHUONG_III_B: list[tuple[str, object]] = [
     ("H5", "Bảng outbox_events - hộp thư ra giao dịch"),
     (
         "P",
-        "Bảng hộp thư ra là mấu chốt của cơ chế xử lý bất đồng bộ an toàn. Mọi sự kiện phát "
-        "sau khi giao dịch nghiệp vụ đã cam kết được ghi ở đây, nên không thể xảy ra tình huống "
-        "đã tạo phiên nhưng mất sự kiện. Cột trạng thái và số lần thử lại cho phép vòng lặp "
-        "lấy sự kiện biết sẽ thử bao nhiêu lần và vì sao lần cuối thất bại.",
+        "Bảng `outbox_events` là mấu chốt của mô hình transactional outbox trong thiết kế "
+        "v3.3: mỗi giao dịch nghiệp vụ ghi cả bản ghi outbox cùng commit, đảm bảo "
+        "không xảy ra tình huống đã tạo phiên nhưng mất sự kiện. Cột trạng thái và "
+        "số lần thử lại cho phép publisher biết đã thử bao nhiêu lần và vì sao lần "
+        "cuối thất bại. Bảng đã được tạo đúng lược đồ. Redis đã được xác minh hoạt "
+        "động (PONG, AOF enabled, appendfsync everysec). Tuy nhiên, chương trình "
+        "publisher đọc outbox và gửi qua Redis Streams chưa được triển khai — hiện "
+        "Core App gửi sự kiện qua HTTP nội bộ.",
     ),
     (
         "TABLE",
@@ -832,8 +836,9 @@ CHUONG_III_B: list[tuple[str, object]] = [
          "người dùng. Vì vậy phần này trình bày ở dạng đặc tả thiết kế, không kèm ảnh chụp "
          "màn hình. Mục này nằm ở Chương III vì đó là thiết kế, còn phần ảnh thực thi được "
          "nêu trung thực ở Chương IV và đánh dấu là chưa có. "
-         "[CẦN NHÓM XÁC NHẬN: có đưa ảnh giao diện thực tế vào báo cáo hay không, và nếu có "
-         "thì ảnh chụp từ môi trường nào]."),
+         "Nhóm chưa có ảnh chụp giao diện thực tế từ môi trường triển khai hoàn chỉnh. "
+         "Khi bổ sung, ảnh chụp nên được lấy từ môi trường dev hoặc staging, "
+         "với dữ liệu thử nghiệm và che khuất thông tin nhạy cảm."),
 
     # ================================================================ III.8
     ("H2", "Thiết kế xử lý"),

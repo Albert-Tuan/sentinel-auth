@@ -20,18 +20,23 @@ from uuid import uuid4
 import pytest
 
 from app.models import RateLimit, Role, Session, User, UserRole
+from tests.postgres_env import (
+    assert_disposable_database,
+    missing_postgres_env_vars,
+)
 
 
 def _pg_available() -> bool:
-    import os
-    return all(
-        os.getenv(k) for k in ("POSTGRES_HOST", "POSTGRES_DB", "POSTGRES_USER", "POSTGRES_PASSWORD")
-    )
+    return not missing_postgres_env_vars()
 
 
 pytestmark = pytest.mark.skipif(
     not _pg_available(),
-    reason="PostgreSQL not available (set POSTGRES_* env vars)",
+    reason=(
+        "NOT RUN - PostgreSQL is not configured, so the PostgreSQL RBAC "
+        "tests were skipped. Missing environment variable(s): "
+        + ", ".join(missing_postgres_env_vars())
+    ),
 )
 
 
@@ -43,11 +48,15 @@ def pg_db():
     from sqlalchemy.orm import sessionmaker
 
     host = os.getenv("POSTGRES_HOST")
+    port = os.getenv("POSTGRES_PORT", "5432")
     dbname = os.getenv("POSTGRES_DB")
     user = os.getenv("POSTGRES_USER")
     password = os.getenv("POSTGRES_PASSWORD")
 
-    url = f"postgresql://{user}:{password}@{host}:5432/{dbname}"
+    url = f"postgresql://{user}:{password}@{host}:{port}/{dbname}"
+    # The suite truncates tables between tests, so the target must not be a
+    # canonical production database.
+    assert_disposable_database(url, "the PostgreSQL RBAC tests")
     engine = create_engine(url)
     maker = sessionmaker(bind=engine, autoflush=False, autocommit=False)
     session = maker()
@@ -75,18 +84,29 @@ def pg_client(pg_db):
     from app import devices as devices_mod
     from app import internal_actions as internal_actions_mod
     from app import authz as authz_mod
+    from app import ml as ml_mod
+    from app import iam as iam_mod
 
     def _override_get_db():
         return pg_db
 
-    app.dependency_overrides[auth_mod.get_db] = _override_get_db
-    app.dependency_overrides[alerts_mod.get_db] = _override_get_db
-    app.dependency_overrides[auth_mod.get_db] = _override_get_db
-    app.dependency_overrides[detection_mod.get_db] = _override_get_db
-    app.dependency_overrides[devices_mod.get_db] = _override_get_db
-    app.dependency_overrides[internal_actions_mod.get_db] = _override_get_db
-    app.dependency_overrides[alerts_mod.get_db] = _override_get_db
-    app.dependency_overrides[authz_mod.get_db] = _override_get_db
+    # The monolith declares one session dependency per bounded context.
+    # This PostgreSQL-backed test runs against a single database, so every
+    # context dependency is replaced by the same session.
+    for module in (
+        auth_mod,
+        iam_mod,
+        detection_mod,
+        devices_mod,
+        internal_actions_mod,
+        ml_mod,
+        alerts_mod,
+        authz_mod,
+    ):
+        for attribute in ("get_core_db", "get_detection_db", "get_ml_db"):
+            dependency = getattr(module, attribute, None)
+            if dependency is not None:
+                app.dependency_overrides[dependency] = _override_get_db
 
     # Patch get_client_ip to return a valid IPv4 address for PostgreSQL INET columns
     with patch.object(auth_mod, 'get_client_ip', return_value='127.0.0.1'):

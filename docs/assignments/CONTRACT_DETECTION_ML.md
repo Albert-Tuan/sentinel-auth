@@ -49,12 +49,12 @@ POST /api/v1/internal/ml/score
 
 | Field | Type | Range | Description |
 |-------|------|--------|-------------|
-| `hour_of_day` | integer | 0–23 | Hour of day in local time |
-| `fail_count_24h` | integer | ≥ 0 | Failed login attempts in last 24 hours |
-| `ip_change_rate_7d` | float | 0–1 | Rate of new IPs in last 7 days |
-| `new_device` | boolean | true/false | Device fingerprint not seen before |
-| `average_login_interval_seconds` | integer | ≥ 0 | Average seconds between logins |
-| `deviation_score` | float | 0–1 | Behavioral deviation from baseline |
+| `hour_of_day` | integer | 0–23 | UTC hour of the current event (`PROJECT_DEFINED_CONTRACT_CLARIFICATION`) |
+| `fail_count_24h` | integer | ≥ 0 | Failed attempts for the same user in prior `[t-24h, t)` |
+| `ip_change_rate_7d` | float | 0–1 | `1 - current_ip_count / prior_login_count` over prior `[t-7d, t)`; zero without history (`PROJECT_DEFINED_RBA_ADAPTATION`) |
+| `new_device` | boolean | true/false | Device novelty, resolved **fingerprint-first**; see below (`PROJECT_DEFINED_FINGERPRINT_FIRST`) |
+| `average_login_interval_seconds` | integer | ≥ 0 | Mean of up to 9 gaps from 10 prior timestamps; zero with insufficient history (`KEEP_PROJECT_DEFINED`) |
+| `deviation_score` | float | 0–1 | Relative current-gap deviation from that historical mean, clamped to `[0,1]`; zero with insufficient history (`KEEP_PROJECT_DEFINED`) |
 
 ### Validation Rules
 
@@ -63,6 +63,38 @@ POST /api/v1/internal/ml/score
 - ML MUST validate ranges
 - Unknown fields: **reject** with `400 Bad Request`
 - Missing fields: **reject** with `400 Bad Request`
+
+### `new_device` — fingerprint-first resolution
+
+`new_device` is a single boolean, but the **decision procedure** behind it
+is part of the contract, because it is what Detection computes.
+
+Detection resolves device novelty against the user's prior history in the
+**30-day window `[t-30d, t)`** (the current event is excluded from its own
+history):
+
+| `device_fingerprint` on the event | User-Agent on the event | Resolution | `new_device` |
+|-----------------------------------|-------------------------|------------|--------------|
+| present | any | compare the fingerprint against the 30-day fingerprint history | `true` if unseen, else `false` |
+| absent | present | compare the User-Agent against the 30-day User-Agent history | `true` if unseen, else `false` |
+| absent | absent | no device signal is available | `false` |
+
+Consequences that both owners MUST preserve:
+
+- A **known fingerprint wins over an unknown User-Agent** (the fingerprint
+  is the authoritative device identity).
+- A **known User-Agent does NOT rescue an unseen fingerprint**. Two devices
+  that share a User-Agent are still told apart by their fingerprint.
+- The User-Agent is a **fallback proxy** only, used when the event carries
+  no fingerprint.
+- The 30-day window is **inclusive at the lower boundary**: a fingerprint
+  seen exactly 30 days ago is still known.
+
+**The provenance of the decision is NOT part of the feature vector.**
+Detection records it in `detection_logs.device_signal_source` as one of
+`fingerprint`, `user_agent_proxy`, `unavailable`. That value is logging
+metadata for SOC analytics only and MUST NOT be added to the 6-feature
+vector, sent to ML, or stored in `risk_assessments.ml_features_used`.
 
 ---
 
@@ -92,7 +124,7 @@ POST /api/v1/internal/ml/score
 | `normalized_anomaly_score` | float | **[0, 1]** | Normalized anomaly score |
 | `is_anomaly` | boolean | true/false | Whether score indicates anomaly |
 | `model_version` | string | — | Version of model used |
-| `reason_codes` | array[string] | — | Codes indicating why anomaly detected |
+| `reason_codes` | array[string] | — | Conservative evidence codes derived from canonical input features after inference |
 | `model_status` | string | `ready` \| `degraded` \| `error` | Current model health |
 
 ### `model_status` Semantics
@@ -146,6 +178,42 @@ deviation_score
 | `average_login_interval_seconds` | 0 | (unlimited) |
 | `deviation_score` | 0.0 | 1.0 |
 
+### Feature Order (canonical)
+
+The **order** of the 6 features is part of the contract, not an
+implementation detail. A serialized model artifact is bound to a specific
+column order, so a silent reordering would score the wrong columns.
+
+The canonical order is:
+
+```
+1. hour_of_day
+2. fail_count_24h
+3. ip_change_rate_7d
+4. new_device
+5. average_login_interval_seconds
+6. deviation_score
+```
+
+Rules:
+
+- The order above is authoritative and MUST NOT change without lead
+  approval plus both owners' approval (see section K).
+- Detection MUST emit the feature vector with the keys in exactly this
+  order.
+- ML MUST reject a model artifact whose recorded `features` list does not
+  match this order **at load time**, before any inference runs. A rejected
+  artifact MUST surface as an explicit error, never as a silently
+  degraded score.
+
+### Non-Feature Fields
+
+`device_signal_source` is **not** a feature. It is Detection-side logging
+metadata and MUST NOT appear in the request's `features` object, in
+`risk_assessments.ml_features_used`, or in the ML artifact's feature list.
+The feature object carries exactly the 6 keys listed above and nothing
+else.
+
 ---
 
 ## D. Reason Codes
@@ -164,7 +232,8 @@ deviation_score
 
 ### Reason Code Rules
 
-- ML generates `reason_codes` from Isolation Forest anomaly factors
+- ML derives conservative evidence codes from documented canonical-feature thresholds after inference
+- `reason_codes` are neither IsolationForest feature attribution nor causal explanations of the model
 - `reason_codes` is an array (can be empty, can have multiple)
 - Detection consumes `reason_codes` for alert evidence
 - **Both owners must approve** any change to reason code semantics
@@ -324,6 +393,7 @@ Both Tuấn Anh and Khang are responsible for writing contract tests.
 | request_id echoed | request_id matches request |
 | model_version returned | Version string in response |
 | reason_codes array | Returned even if empty |
+| Artifact feature order | An artifact whose feature order differs from the canonical order is rejected at load time |
 | Respects 5s window | Inference completes within 5 seconds |
 
 ### Joint Tests
@@ -332,6 +402,11 @@ Both Tuấn Anh and Khang are responsible for writing contract tests.
 |------|-------------|
 | End-to-end scoring | Detection sends features → ML returns score → Detection fuses |
 | Feature contract | All 6 canonical features accepted; unknown rejected |
+| Feature order contract | Detection emits the 6 features in the canonical order; ML's feature list matches it |
+| Artifact order validation | An artifact whose feature order differs from the canonical order is rejected at load time |
+| `new_device` fingerprint-first | Known fingerprint + unknown User-Agent → `false`; unseen fingerprint + known User-Agent → `true` |
+| `new_device` User-Agent fallback | Event without fingerprint → the User-Agent proxy decides |
+| `device_signal_source` isolation | The provenance field never appears in the feature vector sent to ML |
 | Timeout contract | Detection times out at 5s if ML does not respond |
 
 ---
@@ -383,6 +458,13 @@ Both owners must approve before implementation:
 ## M. Versioning
 
 ```
-Contract Version: 1.0
-Last Updated: 2026-10-10
+Contract Version: 1.1
+Last Updated: 2026-10-26
 ```
+
+**Version 1.1 changes (2026-10-26):** documented the fingerprint-first
+resolution of `new_device` and its 30-day window semantics, added the
+canonical feature **order** as an explicit part of the contract together
+with the load-time artifact order validation, and recorded that
+`device_signal_source` is logging metadata that must never enter the
+feature vector.

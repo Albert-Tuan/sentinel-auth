@@ -57,8 +57,8 @@ TEMPLATE = Path(
 )
 DOCS = ROOT / "docs"
 DEFAULT_OUT = Path(
-    "/home/thaus/GoogleDrive/Bài Tập/Information System/"
-    "BaoCaoPT_TKHTTT_Nhom2_Revised.docx"
+    "/run/media/thaus/Lab/1_Project/sentinel-auth/sentinel-auth/docs/"
+    "bao-cao/output/BaoCaoPT_TKHTTT_Nhom2_R2.docx"
 )
 
 #: Bề rộng vùng in dùng được = A4 21cm - lề trái 2,54 - lề phải 2,54

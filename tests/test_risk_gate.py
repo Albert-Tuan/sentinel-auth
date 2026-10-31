@@ -16,6 +16,7 @@ import pytest
 
 from app import auth as auth_mod
 from app import detection as det_mod
+from app import internal_client
 from app.internal_auth import InternalAuthConfigurationError
 from app.models import LoginAttempt, User
 
@@ -230,6 +231,12 @@ async def test_gate_disabled_by_env(monkeypatch):
 # =============================================================================
 
 def _mock_det_post(monkeypatch, handler):
+    """Intercept the outbound Core action call.
+
+    The HTTP call lives in ``app.internal_client`` (the shared Detection ->
+    Core action boundary), so that is the module whose ``httpx`` reference
+    has to be patched.
+    """
     real_client = httpx.AsyncClient
 
     class _Stub:
@@ -246,7 +253,7 @@ def _mock_det_post(monkeypatch, handler):
         async def post(self, url, **kwargs):
             return handler(url, kwargs)
 
-    monkeypatch.setattr(det_mod.httpx, "AsyncClient", _Stub)
+    monkeypatch.setattr(internal_client.httpx, "AsyncClient", _Stub)
 
 
 def _attempt(db, user_id, status="processed", decision="block"):

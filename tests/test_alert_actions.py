@@ -138,7 +138,7 @@ def _act(client, alert_id: str, action: str, user, db,
 # Bug 1 - REVOKE_SESSIONS must be scoped to the alert subject
 # =============================================================================
 
-def test_revoke_sessions_only_touches_the_alert_subject(client, db, user):
+def test_revoke_sessions_only_touches_the_alert_subject(client, db, user, core_receiver):
     alert, alert_id = _make_alert(db, user.id)
     victim_session, token = _make_session(db, user.id, "alice")
     bystander_session, _ = _make_session(db, _other_user(db).id, "bob")
@@ -153,7 +153,7 @@ def test_revoke_sessions_only_touches_the_alert_subject(client, db, user):
     assert db.query(Session).get(bystander_session.id).revoked_at is None
 
 
-def test_lock_user_also_only_touches_the_alert_subject(client, db, user):
+def test_lock_user_also_only_touches_the_alert_subject(client, db, user, core_receiver):
     alert, alert_id = _make_alert(db, user.id)
     victim_session, token = _make_session(db, user.id, "alice")
     bystander_session, _ = _make_session(db, _other_user(db).id, "bob")
@@ -171,7 +171,7 @@ def test_lock_user_also_only_touches_the_alert_subject(client, db, user):
 # Bug 2 - FORCE_LOGOUT must be accepted
 # =============================================================================
 
-def test_force_logout_is_supported(client, db, user):
+def test_force_logout_is_supported(client, db, user, core_receiver):
     alert, alert_id = _make_alert(db, user.id)
     victim_session, token = _make_session(db, user.id, "alice")
     bystander_session, _ = _make_session(db, _other_user(db).id, "bob")
@@ -193,7 +193,7 @@ def test_force_logout_is_supported(client, db, user):
 # Bug 3 - REQUIRE_MFA must stay one-time
 # =============================================================================
 
-def test_require_mfa_does_not_set_persistent_admin_flag(client, db, user):
+def test_require_mfa_does_not_set_persistent_admin_flag(client, db, user, core_receiver):
     alert, alert_id = _make_alert(db, user.id)
     _, token = _make_session(db, user.id, "alice")
 
@@ -208,7 +208,7 @@ def test_require_mfa_does_not_set_persistent_admin_flag(client, db, user):
     assert fresh.admin_mfa_required is False
 
 
-def test_require_mfa_reports_already_applied(client, db, user):
+def test_require_mfa_reports_already_applied(client, db, user, core_receiver):
     alert, alert_id = _make_alert(db, user.id)
     user.detection_mfa_once = True
     db.commit()
@@ -223,7 +223,7 @@ def test_require_mfa_reports_already_applied(client, db, user):
 # REQUIRE_MFA must also cut live sessions (it used to be toothless)
 # =============================================================================
 
-def test_require_mfa_revokes_live_sessions(client, db, user):
+def test_require_mfa_revokes_live_sessions(client, db, user, core_receiver):
     """The one-time MFA flag only gates the *next* login, so the sessions
     handed out before detection ran have to be revoked too."""
     alert, alert_id = _make_alert(db, user.id)
@@ -239,7 +239,7 @@ def test_require_mfa_revokes_live_sessions(client, db, user):
     assert db.query(Session).get(bystander_session.id).revoked_at is None
 
 
-def test_require_mfa_idempotent_when_repeated(client, db, user):
+def test_require_mfa_idempotent_when_repeated(client, db, user, core_receiver):
     alert, alert_id = _make_alert(db, user.id)
     _, token = _make_session(db, user.id, "alice")
 
@@ -256,7 +256,7 @@ def test_require_mfa_idempotent_when_repeated(client, db, user):
 # Shared behaviour
 # =============================================================================
 
-def test_every_action_writes_a_timeline_entry(client, db, user):
+def test_every_action_writes_a_timeline_entry(client, db, user, core_receiver):
     from app.models import AlertTimeline
 
     alert, alert_id = _make_alert(db, user.id)
@@ -275,3 +275,52 @@ def test_unknown_action_is_rejected(client, db, user):
     _, token = _make_session(db, user.id, "alice")
     r = _act(client, alert_id, "NOT_A_REAL_ACTION", user, db)
     assert r.status_code == 422  # rejected by the enum before the handler runs
+
+
+# =============================================================================
+# The Core action boundary is the canonical one
+# =============================================================================
+
+def test_action_goes_through_the_canonical_core_boundary(
+    client, db, user, core_receiver
+):
+    """The SOC action must be delivered to ``POST /api/v1/internal/actions``.
+
+    Detection must not mutate Core rows directly; it asks Core over the
+    documented service boundary.  This pins the method, the path and the
+    number of calls.
+    """
+    alert, alert_id = _make_alert(db, user.id)
+    _, token = _make_session(db, user.id, "alice")
+
+    r = _act(client, alert_id, "REVOKE_SESSIONS", user, db)
+    assert r.status_code == 200, r.text
+
+    core_receiver.assert_only_actions(expected_count=1)
+    call = core_receiver.last()
+    assert call["method"] == "POST"
+    assert call["path"] == "/api/v1/internal/actions"
+    # The internal boundary is authenticated with the shared secret.
+    assert "x-internal-secret" in {k.lower() for k in call["headers"]}
+
+
+def test_action_payload_uses_the_documented_contract(
+    client, db, user, core_receiver
+):
+    """The payload carries the fields the Core action contract defines."""
+    alert, alert_id = _make_alert(db, user.id)
+    _, token = _make_session(db, user.id, "alice")
+
+    r = _act(client, alert_id, "LOCK_USER", user, db, reason="brute force")
+    assert r.status_code == 200, r.text
+
+    body = core_receiver.last()["json"]
+    assert body["action"] == "LOCK_USER"
+    assert body["target_user_id"] == str(user.id)
+    assert body["reason"] == "brute force"
+    assert body["alert_id"] == str(alert_id)
+    # The idempotency key ties the action to the alert, so a retry of the
+    # same SOC action is a no-op on the Core side.
+    assert body["idempotency_key"] == f"alert:{alert_id}:LOCK_USER"
+    # The Detection-owned observation time travels with the action.
+    assert body["detected_at"]
