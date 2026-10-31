@@ -158,7 +158,7 @@ These are the ONLY features consumed from Detection. Do NOT accept or generate o
 | 1 | `model_versions` | Model registry (id, name, version, algorithm: IsolationForest, model_path, config JSONB, status: staged/active/archived/failed, is_production, trained_by, training_date) |
 | 2 | `inference_logs` | Optional inference logging (request_id, features JSONB, raw_score, normalized_score [0,1], is_anomaly, reason_codes JSONB, model_status: ready/degraded/error, processing_time_ms) |
 | 3 | `feature_statistics` | Feature distribution monitoring (feature_name, count, mean, std, min, max, p25, p50, p75, p95, anomaly_rate) |
-| — | `local_ml_stats` | **Real view** aggregating inference_logs (day, total_inferences, anomalies_detected, successful_inferences, avg_processing_ms, avg_anomaly_score) |
+| — | `local_ml_stats` | **Real view** aggregating inference_logs (day, total_inferences, anomalies_detected, successful_inferences, degraded_inferences, error_inferences, avg_processing_ms, avg_anomaly_score) |
 
 ### NOT a Real View
 
@@ -186,7 +186,10 @@ The actual manager dashboard implementation will use HTTP API calls to Detection
 
 ### Manager Analytics API (Public — Manager)
 
-**IMPLEMENTATION_PENDING** — design and implement with lead approval:
+**DESIGN_DONE** — design completed and verified against the code in M9; awaiting lead sign-off on
+2 open items (§8) before M10 implementation.
+Design document: `docs/M9-MANAGER-ANALYTICS-DESIGN.md` (normative).
+Companion reference: `docs/M9-MANAGER-ANALYTICS-REFERENCE.md` (SQL sketches + vocabulary).
 
 | Method | Path | Description |
 |--------|------|-------------|
@@ -195,6 +198,9 @@ The actual manager dashboard implementation will use HTTP API calls to Detection
 | GET | `/api/v1/manager/alerts` | Alert statistics |
 | GET | `/api/v1/manager/soc-kpi` | SOC effectiveness KPIs |
 | GET | `/api/v1/manager/ml-stats` | ML model analytics |
+
+M10 requires **two new internal read endpoints** (owned by the Core and Detection contexts)
+plus the Manager facade — see §4 and §7 of the design document.
 
 ---
 
@@ -356,7 +362,8 @@ Acceptance: Detection can call ML endpoint; response matches contract
 
 ```
 Inputs:  Core, Detection, ML data sources
-Outputs: Manager analytics design document
+Outputs: docs/M9-MANAGER-ANALYTICS-DESIGN.md  (DESIGN_DONE — verified against the code; awaiting lead sign-off on 2 open items)
+         docs/M9-MANAGER-ANALYTICS-REFERENCE.md (SQL sketches + vocabulary)
          Data sources from all 3 services
 Actions: Design with lead approval
          Do NOT duplicate source-of-truth tables in sentinel_ml
@@ -364,6 +371,19 @@ Actions: Design with lead approval
 Tests:   TBD (design first)
 Acceptance: design approved by lead
 ```
+
+**M9 design notes that affect M10 implementation** (from the final code-verification pass):
+
+- The `local_ml_stats` view truncates with `DATE_TRUNC('day', created_at)`, which uses the **database
+  session timezone** — and `app/db.py` does not pin it. The Manager ML read must group explicitly
+  with `date_trunc('day', created_at AT TIME ZONE 'UTC')`, or set `SET TIME ZONE 'UTC'` on the ML
+  session. See design §6.4 and reference §R1.11.
+- `ml.model_status` is the **runtime** status (`ready` / `error` only), derived from the outcome of
+  `get_ml_runtime(db)`. The value `degraded` belongs only to `inference_logs.model_status`. Do not
+  conflate the two. See reference §R2.5.
+- Core audits **successful** logins only (`action="login_success"`); failed logins live in
+  Detection's `login_attempts`. Manager failure counts always come from Detection. See
+  reference §R2.4.
 
 ### M10 — Manager Reports / Aggregation
 
