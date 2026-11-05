@@ -1237,7 +1237,7 @@ Khang's M10 work therefore **blocks** on the two internal endpoints existing. If
 
 ---
 
-## 8. Open items for lead approval
+## 8. Items for lead approval
 
 Status legend:
 
@@ -1245,6 +1245,9 @@ Status legend:
   reflects it. Nothing further is needed.
 * **NEEDS_LEAD_DECISION** — still open. The design documents a concrete proposal; the lead must
   confirm it before M10 starts. **These are not closed by this document.**
+
+> **M10 status:** all nine items below are **RESOLVED**. Each decision is reflected in the
+> implementation and pinned by a test; there is no open lead decision left for M10.
 
 ---
 
@@ -1378,17 +1381,30 @@ not filter it, and neither does the `status` / `risk_level` query filters of the
 
 ### Item 9 — `audit_activity.recent` omits `before_state`, `after_state`, `ip_address`, `user_agent`
 
-**Status: NEEDS_LEAD_DECISION**
+**Status: RESOLVED** — the lead approved the metadata-only feed, and M10 implemented it.
 
-**Proposal:** approve as written. The Manager oversight feed needs to know *what happened and
-when*; the state payloads and network identifiers are materially more sensitive and remain
-available on `GET /api/v1/admin/audit-logs`, which stays `SECURITY_ADMIN`-only. Keeping them out
-stops the Manager endpoint from becoming a second, less-guarded copy of the admin page.
+**Approved decision:** the feed is **metadata-only**. It exposes `id`, `action`, `actor`, `resource`,
+`resource_id` and `created_at` — *what happened and when* — and nothing more. The Manager oversight
+feed needs no more than that; the state payloads and network identifiers are materially more
+sensitive and remain available on `GET /api/v1/admin/audit-logs`, which stays `SECURITY_ADMIN`-only.
+Keeping them out stops the Manager endpoint from becoming a second, less-guarded copy of the admin
+page.
 
-**If the lead prefers the full rows**, the alternative is to include `before_state` / `after_state`
-and accept that the Manager endpoint then exposes protection-action payloads that the admin page
-exposes. `ip_address` / `user_agent` would still be excluded — they are personal data with no
-oversight value. **This item is not closed by this document.**
+**Rejected alternative:** including `before_state` / `after_state`. That would expose
+protection-action payloads to `SECURITY_MANAGER`, duplicating what only `SECURITY_ADMIN` may read
+today. `ip_address` / `user_agent` were excluded in either case — they are personal data with no
+oversight value.
+
+**Implementation (M10):** the Core provider (`app/core_analytics.py`) **selects no such column**
+in the feed query — the narrowing happens in SQL, not in a post-filter, so a sensitive field can
+never reach the facade even by accident. The facade's `audit_activity` block carries the same six
+keys. Three tests pin it:
+
+| Test | Assertion |
+|---|---|
+| `tests/test_core_analytics.py::TestContractShape::test_a_recent_row_carries_exactly_the_permitted_fields` | the row carries exactly the six permitted keys |
+| `tests/test_core_analytics.py::TestContractShape::test_the_recent_feed_never_exposes_state_or_network_identifiers` | none of the four forbidden keys appears |
+| `tests/test_manager_live_integration.py::TestLiveDashboard::test_the_audit_activity_feed_matches_the_core_database` | the live feed against real PostgreSQL rows carries none of them |
 
 ---
 
@@ -1404,9 +1420,10 @@ oversight value. **This item is not closed by this document.**
 | 6 | Sequencing | **RESOLVED** |
 | 7 | `by_rule` / `by_ml_reason` replace `by_detection_reason` | **RESOLVED** |
 | 8 | `critical_incidents` is not window-scoped | **RESOLVED** |
-| 9 | `audit_activity.recent` omits state payloads and network identifiers | NEEDS_LEAD_DECISION |
+| 9 | `audit_activity.recent` omits state payloads and network identifiers | **RESOLVED** (metadata-only feed, approved and implemented) |
 
-**One item remains open** (9). It does not block the others and does not block the M10 delivery.
+**No open decisions remain.** All nine items are resolved, and each resolution is reflected in the
+implementation and pinned by a test.
 
 ### Verification record — code cross-check (M9 final pass)
 
@@ -1453,8 +1470,12 @@ Two further **factual corrections** were made: the `ml.daily` example used the *
 names instead of the *public* field names, and the design cited two check-constraint names that do
 not exist.
 
-**Status:** M9 (this document) is complete and ready for final lead review. No M10 code has been
-written on this branch, and nothing has been committed or pushed.
+**Status:** M9 (this document) is complete. M10 has since been implemented on
+`feature/manager-analytics-m10`: the facade (`app/manager.py`), the outbound client
+(`app/manager_client.py`), both providers (`app/core_analytics.py`, `app/detection_analytics.py`),
+the explicit mounts in `app/main.py`, the contract suite (`tests/test_manager_analytics.py`) and the
+live three-database suite (`tests/test_manager_live_integration.py`). All nine items of §8 are
+resolved and each resolution is pinned by a test.
 
 ---
 
