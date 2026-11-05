@@ -12,14 +12,16 @@ Design document (normative): ``docs/M9-MANAGER-ANALYTICS-DESIGN.md``;
 the test plan is design section 7.1.
 
 The two upstream providers - ``app/detection_analytics.py`` (Tuấn Anh) and
-``app/core_analytics.py`` (Sony) - are **not** part of this delivery.  Until
-they land, the facade is exercised against **contract fixtures**: the stub
-below returns the exact payloads defined by design sections 4.1 and 4.2, so
-the facade's reshaping, KPI math, bucketing and degradation logic are all
-verified against the normative contract.  The live-provider integration is
-**BLOCKED** on those two files - see ``TestLiveProviderIntegration`` at the
-bottom, which asserts the dependency explicitly rather than pretending it
-passes.
+``app/core_analytics.py`` (Sony) - have landed.  This module still exercises
+the facade against **contract fixtures**: the stub below returns the exact
+payloads defined by design sections 4.1 and 4.2, so the facade's reshaping,
+KPI math, bucketing and degradation logic are all verified against the
+normative contract.
+
+The **live** proof - the real providers reached over a real HTTP boundary
+against three real PostgreSQL databases - lives in
+``tests/test_manager_live_integration.py``.  Both suites are needed: the
+contract fixtures pin the reshaping, the live suite pins the providers.
 """
 from __future__ import annotations
 
@@ -1863,9 +1865,12 @@ class TestRouterMounting:
 
     The three routers have three different owners.  ``app/manager.py`` is
     Khang's and always exists; ``app/core_analytics.py`` (Sony) and
-    ``app/detection_analytics.py`` (Tuấn Anh) land independently.  The lead
-    approved mounting all three once the modules exist, so the entrypoint
-    mounts the two provider routers defensively.
+    ``app/detection_analytics.py`` (Tuấn Anh) landed independently.
+
+    M10 mounts all three **explicitly**.  The old guarded mount
+    (``_include_optional_router``) silently skipped a provider that had not
+    landed, which hid a broken deployment behind a green startup; now a
+    missing provider module is an ``ImportError`` that fails the startup.
     """
 
     MANAGER_PATHS = (
@@ -1876,75 +1881,77 @@ class TestRouterMounting:
         "/api/v1/manager/ml-stats",
     )
 
+    PROVIDER_PATHS = (
+        "/api/v1/internal/analytics/core",
+        "/api/v1/internal/analytics/detection",
+    )
+
     def test_the_manager_router_is_mounted(self, app):
         paths = {route.path for route in app.routes}
         for path in self.MANAGER_PATHS:
             assert path in paths, f"{path} is not mounted"
 
-    def test_the_guarded_mount_skips_a_missing_module(self, app):
-        """A provider module that has not landed must not break startup."""
-        from app.main import _include_optional_router
+    def test_the_provider_routers_are_mounted(self, app):
+        """Both provider routers are mounted - no conditional mount."""
+        paths = {route.path for route in app.routes}
+        for path in self.PROVIDER_PATHS:
+            assert path in paths, f"{path} is not mounted"
 
-        assert _include_optional_router("app.does_not_exist_at_all") is False
+    def test_the_guarded_optional_mount_is_gone(self, app):
+        """The guarded helper must no longer exist in the entrypoint."""
+        import app.main as main_module
 
-    def test_the_guarded_mount_activates_when_the_module_lands(self, app, monkeypatch):
-        """When a provider module appears, its router is mounted."""
+        assert not hasattr(main_module, "_include_optional_router"), (
+            "app/main.py still contains the guarded optional mount; a missing "
+            "provider module would be silently skipped instead of failing "
+            "the startup"
+        )
+
+    def test_a_missing_provider_module_fails_the_startup(self, app, monkeypatch):
+        """A provider that is not there must raise ``ImportError``."""
+        import importlib.util
         import sys
-        import types
 
-        from app.main import _include_optional_router
+        main_path = os.path.join(APP_DIR, "main.py")
+        spec = importlib.util.spec_from_file_location(
+            "app_main_missing_provider_probe", main_path
+        )
+        assert spec is not None and spec.loader is not None
+        module = importlib.util.module_from_spec(spec)
 
-        module = types.ModuleType("app.fake_provider_module")
-        from fastapi import APIRouter
-        module.router = APIRouter(prefix="/api/v1/internal", tags=["fake"])
-        monkeypatch.setitem(sys.modules, "app.fake_provider_module", module)
-
-        assert _include_optional_router("app.fake_provider_module") is True
-
-    def test_the_guard_does_not_silently_swallow_a_broken_module(self, app, monkeypatch):
-        """A module that exists but declares no router is reported, not mounted."""
-        import sys
-        import types
-
-        from app.main import _include_optional_router
-
-        module = types.ModuleType("app.fake_provider_without_router")
-        monkeypatch.setitem(sys.modules, "app.fake_provider_without_router", module)
-
-        assert _include_optional_router("app.fake_provider_without_router") is False
+        # ``None`` in ``sys.modules`` makes the import fail exactly like a
+        # module that is not there.
+        monkeypatch.setitem(sys.modules, "app.core_analytics", None)
+        with pytest.raises(ImportError):
+            spec.loader.exec_module(module)
 
 
 # =============================================================================
-# Live-provider integration - BLOCKED
+# Live-provider integration
 # =============================================================================
 
 class TestLiveProviderIntegration:
     """The two upstream providers are owned by Sony and Tuấn Anh.
 
-    These tests are **BLOCKED** until ``app/core_analytics.py`` and
-    ``app/detection_analytics.py`` land.  They are skipped rather than
-    faked, so a green run never overstates what has been verified.
+    Both modules have landed, so the import probes run.  The **live**
+    integration proof - the real providers over a real HTTP boundary against
+    three real PostgreSQL databases - lives in
+    ``tests/test_manager_live_integration.py``; this module stays on the
+    contract stubs.
     """
 
-    @pytest.mark.skipif(
-        not os.path.exists(os.path.join(APP_DIR, "core_analytics.py")),
-        reason="BLOCKED: app/core_analytics.py is owned by Sony and has not landed",
-    )
     def test_core_provider_is_available(self):
         import app.core_analytics  # noqa: F401  (import probe)
 
-    @pytest.mark.skipif(
-        not os.path.exists(os.path.join(APP_DIR, "detection_analytics.py")),
-        reason="BLOCKED: app/detection_analytics.py is owned by Tuấn Anh and has not landed",
-    )
     def test_detection_provider_is_available(self):
         import app.detection_analytics  # noqa: F401  (import probe)
 
-    def test_the_blocking_dependencies_are_recorded(self):
-        """The delivery must state what it is waiting for."""
+    def test_no_provider_dependency_is_outstanding(self):
+        """Both provider modules must be present - nothing is left to wait for."""
         missing = [
             name for name in ("core_analytics.py", "detection_analytics.py")
             if not os.path.exists(os.path.join(APP_DIR, name))
         ]
-        # If both providers have landed, there is nothing left to wait for.
-        assert isinstance(missing, list)
+        assert missing == [], (
+            f"the provider module(s) {missing} are still missing"
+        )

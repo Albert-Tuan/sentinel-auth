@@ -1178,6 +1178,41 @@ Rules for these models:
 * **ML timezone rule (§6.4)**: the ML daily boundaries must be UTC floors. A test must assert that the daily series computed with `AT TIME ZONE 'UTC'` matches the `local_ml_stats` view's output **when the session timezone is UTC**, and that `/trends` and `/ml-stats` agree on the daily totals. A non-UTC session timezone must not shift a day boundary.
 * **ML status vocabulary (§3.3, §3.7)**: `ml.model_status` is only ever `ready` or `error`; `degraded` belongs exclusively to `inference_logs.model_status`. A test asserts the runtime status never takes the value `degraded`.
 
+### 7.1.1 The live suite (M10 integration)
+
+The plan above is exercised against **contract fixtures** in
+`tests/test_manager_analytics.py`.  The M10 integration adds a second suite,
+`tests/test_manager_live_integration.py`, that exercises the same contract
+against the **real** providers:
+
+* the application runs against **three real PostgreSQL databases** —
+  `sentinel_core_test`, `sentinel_detection_test`, `sentinel_ml_test` — each
+  rebuilt from the canonical `infra/postgres/schema-*-v3.3.sql` files;
+* the facade reaches Core and Detection over **real HTTP**: an
+  `httpx.ASGITransport` replaces the socket only, so the real routers, the
+  real `X-Internal-Secret` verification and the real SQL against the real
+  databases all run;
+* the ML source is read **directly** from `sentinel_ml`, exactly as
+  production does;
+* the RBAC check uses **real opaque bearer tokens** — the SHA-256 hash of the
+  token lives in `sessions.access_token_hash`, and the role is resolved from
+  `user_roles × roles` in real time.
+
+The live suite adds the assertions that a contract stub cannot make:
+
+| Assertion | What it proves |
+|---|---|
+| The provider is reached over HTTP with the internal secret | The facade really crosses the service boundary instead of calling a function |
+| The three databases hold disjoint table sets | The bounded-context boundary holds in the data, not just in the imports |
+| `series[*].logins` equals the `sessions` rows created in that bucket | The Core provider counts session creations, not audit events |
+| The window is half-open `[from, to)` for every population | The UTC boundary rule holds in SQL, not only in the reshaping |
+| `details->>'enforced'` counts the same as a JSON boolean | The PostgreSQL/SQLite parity rule of §7.0.1 |
+| A non-UTC session timezone does not move a day bucket | The `AT TIME ZONE 'UTC'` floor of §6.4 |
+| A missing provider module fails the startup | The explicit mount of item 1 |
+
+The module **skips with an explicit reason** when the three disposable
+database URLs are absent.  It never fabricates a pass.
+
 ### 7.2 Ownership boundary for M10
 
 The three new modules have different owners, and the split is deliberate:
@@ -1215,7 +1250,7 @@ Status legend:
 
 ### Item 1 — Router mounting in `app/main.py` (lead-only file) — needed for the 3 new routers
 
-**Status: NEEDS_LEAD_DECISION**
+**Status: RESOLVED** — the lead approved the mount, and M10 implemented it explicitly.
 
 **Proposal:** approve. `app/main.py` is a shared entrypoint and the assignment
 (`docs/assignments/KHANG_ML_MANAGER_ANALYTICS.md` §15) lists modifying it as a STOP-and-ask
@@ -1229,6 +1264,16 @@ app.include_router(core_analytics_router)       # app/core_analytics.py
 
 **What it blocks:** nothing in the design. It blocks only the M10 integration test, because the
 routes are unreachable until they are mounted.
+
+**Implementation note (M10):** the mount is **explicit**, not guarded. An earlier iteration used a
+guarded helper (`_include_optional_router`) that silently skipped a provider module that had not
+landed yet. That is exactly the failure mode this design warns about elsewhere — a Manager facade
+that cannot reach a provider must report a **visible** degradation, not a missing dependency that
+looks healthy. M10 therefore imports both provider routers at the top of `app/main.py` and mounts
+them with `app.include_router(...)`: a provider module that is missing, or that fails to import,
+raises at startup and the deployment does not come up. Two tests pin this behaviour
+(`tests/test_manager_analytics.py::TestRouterMounting` and
+`tests/test_manager_live_integration.py::TestExplicitRouterMounting`).
 
 ---
 
@@ -1351,7 +1396,7 @@ oversight value. **This item is not closed by this document.**
 
 | # | Item | Status |
 |---|---|---|
-| 1 | Router mounting in `app/main.py` | NEEDS_LEAD_DECISION |
+| 1 | Router mounting in `app/main.py` | **RESOLVED** (approved; M10 mounts explicitly — a missing provider fails the startup) |
 | 2 | Ownership of the two internal endpoints | **RESOLVED** (Sony / Tuấn Anh / Khang) |
 | 3 | RBAC strictness — only `SECURITY_MANAGER` | **RESOLVED** |
 | 4 | Monolith `DETECTION_URL` / `CORE_APP_URL` | **RESOLVED** (configurable, no new env var) |
@@ -1361,8 +1406,7 @@ oversight value. **This item is not closed by this document.**
 | 8 | `critical_incidents` is not window-scoped | **RESOLVED** |
 | 9 | `audit_activity.recent` omits state payloads and network identifiers | NEEDS_LEAD_DECISION |
 
-**Two items remain open** (1 and 9). Neither blocks the other seven, and neither blocks Khang from
-starting the facade.
+**One item remains open** (9). It does not block the others and does not block the M10 delivery.
 
 ### Verification record — code cross-check (M9 final pass)
 
