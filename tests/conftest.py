@@ -78,6 +78,11 @@ CONTEXT_DEPENDENCIES = (
     ("core", "get_core_db"),
     ("detection", "get_detection_db"),
     ("ml", "get_ml_db"),
+    # The Manager facade reads the ML context through a tolerant wrapper
+    # so that an unresolvable ML database degrades the ML source instead
+    # of failing the request.  It must be overridden too, otherwise the
+    # Manager routes would open a real session.
+    ("ml", "get_optional_ml_db"),
 )
 
 
@@ -230,6 +235,7 @@ def _all_route_modules():
     from app import devices as devices_mod
     from app import iam as iam_mod
     from app import internal_actions as internal_actions_mod
+    from app import manager as manager_mod
     from app import ml as ml_mod
 
     return (
@@ -241,6 +247,7 @@ def _all_route_modules():
         ml_mod,
         alerts_mod,
         authz_mod,
+        manager_mod,
     )
 
 

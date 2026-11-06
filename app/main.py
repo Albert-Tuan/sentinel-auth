@@ -14,6 +14,9 @@ from app.ml import router as ml_router
 from app.alerts import router as alerts_router
 from app.devices import router as devices_router
 from app.login_history import router as login_history_router
+from app.manager import router as manager_router
+from app.core_analytics import router as core_analytics_router
+from app.detection_analytics import router as detection_analytics_router
 
 logger = logging.getLogger(__name__)
 
@@ -71,6 +74,16 @@ app.include_router(ml_router)
 app.include_router(alerts_router)
 app.include_router(devices_router)
 app.include_router(login_history_router)
+app.include_router(manager_router)
+
+# The two internal analytics providers are owned by the Core and Detection
+# contexts (design document section 7).  They are mounted **explicitly**:
+# a missing provider module must fail the application startup rather than
+# silently disappear from the route table, because a Manager facade that
+# cannot reach a provider reports a false "degraded" state instead of a
+# missing dependency.
+app.include_router(core_analytics_router)
+app.include_router(detection_analytics_router)
 
 
 @app.get("/health")

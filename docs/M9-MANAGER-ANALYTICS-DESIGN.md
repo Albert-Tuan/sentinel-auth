@@ -1178,6 +1178,41 @@ Rules for these models:
 * **ML timezone rule (§6.4)**: the ML daily boundaries must be UTC floors. A test must assert that the daily series computed with `AT TIME ZONE 'UTC'` matches the `local_ml_stats` view's output **when the session timezone is UTC**, and that `/trends` and `/ml-stats` agree on the daily totals. A non-UTC session timezone must not shift a day boundary.
 * **ML status vocabulary (§3.3, §3.7)**: `ml.model_status` is only ever `ready` or `error`; `degraded` belongs exclusively to `inference_logs.model_status`. A test asserts the runtime status never takes the value `degraded`.
 
+### 7.1.1 The live suite (M10 integration)
+
+The plan above is exercised against **contract fixtures** in
+`tests/test_manager_analytics.py`.  The M10 integration adds a second suite,
+`tests/test_manager_live_integration.py`, that exercises the same contract
+against the **real** providers:
+
+* the application runs against **three real PostgreSQL databases** —
+  `sentinel_core_test`, `sentinel_detection_test`, `sentinel_ml_test` — each
+  rebuilt from the canonical `infra/postgres/schema-*-v3.3.sql` files;
+* the facade reaches Core and Detection over **real HTTP**: an
+  `httpx.ASGITransport` replaces the socket only, so the real routers, the
+  real `X-Internal-Secret` verification and the real SQL against the real
+  databases all run;
+* the ML source is read **directly** from `sentinel_ml`, exactly as
+  production does;
+* the RBAC check uses **real opaque bearer tokens** — the SHA-256 hash of the
+  token lives in `sessions.access_token_hash`, and the role is resolved from
+  `user_roles × roles` in real time.
+
+The live suite adds the assertions that a contract stub cannot make:
+
+| Assertion | What it proves |
+|---|---|
+| The provider is reached over HTTP with the internal secret | The facade really crosses the service boundary instead of calling a function |
+| The three databases hold disjoint table sets | The bounded-context boundary holds in the data, not just in the imports |
+| `series[*].logins` equals the `sessions` rows created in that bucket | The Core provider counts session creations, not audit events |
+| The window is half-open `[from, to)` for every population | The UTC boundary rule holds in SQL, not only in the reshaping |
+| `details->>'enforced'` counts the same as a JSON boolean | The PostgreSQL/SQLite parity rule of §7.0.1 |
+| A non-UTC session timezone does not move a day bucket | The `AT TIME ZONE 'UTC'` floor of §6.4 |
+| A missing provider module fails the startup | The explicit mount of item 1 |
+
+The module **skips with an explicit reason** when the three disposable
+database URLs are absent.  It never fabricates a pass.
+
 ### 7.2 Ownership boundary for M10
 
 The three new modules have different owners, and the split is deliberate:
@@ -1202,7 +1237,7 @@ Khang's M10 work therefore **blocks** on the two internal endpoints existing. If
 
 ---
 
-## 8. Open items for lead approval
+## 8. Items for lead approval
 
 Status legend:
 
@@ -1211,11 +1246,14 @@ Status legend:
 * **NEEDS_LEAD_DECISION** — still open. The design documents a concrete proposal; the lead must
   confirm it before M10 starts. **These are not closed by this document.**
 
+> **M10 status:** all nine items below are **RESOLVED**. Each decision is reflected in the
+> implementation and pinned by a test; there is no open lead decision left for M10.
+
 ---
 
 ### Item 1 — Router mounting in `app/main.py` (lead-only file) — needed for the 3 new routers
 
-**Status: NEEDS_LEAD_DECISION**
+**Status: RESOLVED** — the lead approved the mount, and M10 implemented it explicitly.
 
 **Proposal:** approve. `app/main.py` is a shared entrypoint and the assignment
 (`docs/assignments/KHANG_ML_MANAGER_ANALYTICS.md` §15) lists modifying it as a STOP-and-ask
@@ -1229,6 +1267,16 @@ app.include_router(core_analytics_router)       # app/core_analytics.py
 
 **What it blocks:** nothing in the design. It blocks only the M10 integration test, because the
 routes are unreachable until they are mounted.
+
+**Implementation note (M10):** the mount is **explicit**, not guarded. An earlier iteration used a
+guarded helper (`_include_optional_router`) that silently skipped a provider module that had not
+landed yet. That is exactly the failure mode this design warns about elsewhere — a Manager facade
+that cannot reach a provider must report a **visible** degradation, not a missing dependency that
+looks healthy. M10 therefore imports both provider routers at the top of `app/main.py` and mounts
+them with `app.include_router(...)`: a provider module that is missing, or that fails to import,
+raises at startup and the deployment does not come up. Two tests pin this behaviour
+(`tests/test_manager_analytics.py::TestRouterMounting` and
+`tests/test_manager_live_integration.py::TestExplicitRouterMounting`).
 
 ---
 
@@ -1333,17 +1381,30 @@ not filter it, and neither does the `status` / `risk_level` query filters of the
 
 ### Item 9 — `audit_activity.recent` omits `before_state`, `after_state`, `ip_address`, `user_agent`
 
-**Status: NEEDS_LEAD_DECISION**
+**Status: RESOLVED** — the lead approved the metadata-only feed, and M10 implemented it.
 
-**Proposal:** approve as written. The Manager oversight feed needs to know *what happened and
-when*; the state payloads and network identifiers are materially more sensitive and remain
-available on `GET /api/v1/admin/audit-logs`, which stays `SECURITY_ADMIN`-only. Keeping them out
-stops the Manager endpoint from becoming a second, less-guarded copy of the admin page.
+**Approved decision:** the feed is **metadata-only**. It exposes `id`, `action`, `actor`, `resource`,
+`resource_id` and `created_at` — *what happened and when* — and nothing more. The Manager oversight
+feed needs no more than that; the state payloads and network identifiers are materially more
+sensitive and remain available on `GET /api/v1/admin/audit-logs`, which stays `SECURITY_ADMIN`-only.
+Keeping them out stops the Manager endpoint from becoming a second, less-guarded copy of the admin
+page.
 
-**If the lead prefers the full rows**, the alternative is to include `before_state` / `after_state`
-and accept that the Manager endpoint then exposes protection-action payloads that the admin page
-exposes. `ip_address` / `user_agent` would still be excluded — they are personal data with no
-oversight value. **This item is not closed by this document.**
+**Rejected alternative:** including `before_state` / `after_state`. That would expose
+protection-action payloads to `SECURITY_MANAGER`, duplicating what only `SECURITY_ADMIN` may read
+today. `ip_address` / `user_agent` were excluded in either case — they are personal data with no
+oversight value.
+
+**Implementation (M10):** the Core provider (`app/core_analytics.py`) **selects no such column**
+in the feed query — the narrowing happens in SQL, not in a post-filter, so a sensitive field can
+never reach the facade even by accident. The facade's `audit_activity` block carries the same six
+keys. Three tests pin it:
+
+| Test | Assertion |
+|---|---|
+| `tests/test_core_analytics.py::TestContractShape::test_a_recent_row_carries_exactly_the_permitted_fields` | the row carries exactly the six permitted keys |
+| `tests/test_core_analytics.py::TestContractShape::test_the_recent_feed_never_exposes_state_or_network_identifiers` | none of the four forbidden keys appears |
+| `tests/test_manager_live_integration.py::TestLiveDashboard::test_the_audit_activity_feed_matches_the_core_database` | the live feed against real PostgreSQL rows carries none of them |
 
 ---
 
@@ -1351,7 +1412,7 @@ oversight value. **This item is not closed by this document.**
 
 | # | Item | Status |
 |---|---|---|
-| 1 | Router mounting in `app/main.py` | NEEDS_LEAD_DECISION |
+| 1 | Router mounting in `app/main.py` | **RESOLVED** (approved; M10 mounts explicitly — a missing provider fails the startup) |
 | 2 | Ownership of the two internal endpoints | **RESOLVED** (Sony / Tuấn Anh / Khang) |
 | 3 | RBAC strictness — only `SECURITY_MANAGER` | **RESOLVED** |
 | 4 | Monolith `DETECTION_URL` / `CORE_APP_URL` | **RESOLVED** (configurable, no new env var) |
@@ -1359,10 +1420,10 @@ oversight value. **This item is not closed by this document.**
 | 6 | Sequencing | **RESOLVED** |
 | 7 | `by_rule` / `by_ml_reason` replace `by_detection_reason` | **RESOLVED** |
 | 8 | `critical_incidents` is not window-scoped | **RESOLVED** |
-| 9 | `audit_activity.recent` omits state payloads and network identifiers | NEEDS_LEAD_DECISION |
+| 9 | `audit_activity.recent` omits state payloads and network identifiers | **RESOLVED** (metadata-only feed, approved and implemented) |
 
-**Two items remain open** (1 and 9). Neither blocks the other seven, and neither blocks Khang from
-starting the facade.
+**No open decisions remain.** All nine items are resolved, and each resolution is reflected in the
+implementation and pinned by a test.
 
 ### Verification record — code cross-check (M9 final pass)
 
@@ -1409,8 +1470,12 @@ Two further **factual corrections** were made: the `ml.daily` example used the *
 names instead of the *public* field names, and the design cited two check-constraint names that do
 not exist.
 
-**Status:** M9 (this document) is complete and ready for final lead review. No M10 code has been
-written on this branch, and nothing has been committed or pushed.
+**Status:** M9 (this document) is complete. M10 has since been implemented on
+`feature/manager-analytics-m10`: the facade (`app/manager.py`), the outbound client
+(`app/manager_client.py`), both providers (`app/core_analytics.py`, `app/detection_analytics.py`),
+the explicit mounts in `app/main.py`, the contract suite (`tests/test_manager_analytics.py`) and the
+live three-database suite (`tests/test_manager_live_integration.py`). All nine items of §8 are
+resolved and each resolution is pinned by a test.
 
 ---
 
