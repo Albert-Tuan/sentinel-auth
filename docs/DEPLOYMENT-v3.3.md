@@ -1,9 +1,11 @@
 # Sentinel Auth v3.3 — Reproducible Deployment
 
-> **Status:** APPROVED (M11.2)
-> **Version:** 1.0
+> **Status:** APPROVED (M11.2), updated for M11.3 (Security Hardening)
+> **Version:** 1.1
 > **Date:** 2026-11-06
 > **Baseline:** `origin/dev` @ `6c606bf` (after M11.1 PR #13)
+> **M11.3 changes:** the CORS allow-list and the dependency-aware `/ready`
+> probe. See Section 8 and `.env.example`.
 
 This document describes the **reproducible local/demo deployment** of
 Sentinel Auth v3.3: how to bring the whole system up from a clean clone
@@ -330,26 +332,54 @@ The three states are distinct:
 | Endpoint | Meaning | Depends on a dependency? |
 |----------|---------|--------------------------|
 | `GET /health` | **Liveness** — the process is running | No |
-| `GET /ready` | **Readiness** — the deployment can serve traffic | **No — it is a static response** |
+| `GET /ready` | **Readiness** — the deployment can serve traffic | Yes — the three databases (read-only) |
 | The Manager facade's `sources` map | **Dependency state** — which upstream answered | Yes, per source |
 
-> **`/ready` is currently a static response.** It answers
-> `{"status": "ready"}` without consulting a database, a cache or an
-> upstream. It tells you the process is up and the ASGI app is serving —
-> **not** that PostgreSQL is reachable.
+> **`/ready` is dependency-aware (changed in M11.3, Security Hardening).**
+> It probes the minimum dependencies the monolith needs — the Core,
+> Detection and ML databases — with a bounded, read-only `SELECT 1` per
+> context. It writes no rows and runs no inference.
 >
-> The dependency-aware verification is the **deployment check suite**, not
-> `/ready`:
+> | Situation | Answer |
+> |-----------|--------|
+> | All three databases reachable | `200` `{"status": "ready", "checks": {...}}` |
+> | A database is unreachable | `503` `{"status": "not_ready", "checks": {...}}` |
+> | The ML **artifact** file is missing (the database answered) | `200`, `status: "ready"`, `checks.ml_artifact.status: "degraded"` |
 >
-> | Check | What it establishes |
-> |-------|--------------------|
-> | 1 | All three databases answer and hold the canonical schema |
-> | 5 | Detection and ML answer over the in-process HTTP hop |
-> | 6 | The Manager facade reads from all three sources |
-> | 7 | A dead dependency degrades instead of failing |
+> A missing ML *artifact* is deliberately **not** a readiness failure: the
+> Detection Engine falls back to a rule-only score, so the service can
+> still serve traffic. A missing *database* is, because the requests that
+> need that context cannot be answered.
 >
-> `bash scripts/deploy_local.sh verify` is therefore the readiness check
-> that actually proves the dependencies are usable.
+> A successful probe is cached for 2 seconds so a tight health-check
+> interval does not hammer PostgreSQL. A **failing** probe is never
+> cached, so a recovery is reported immediately.
+>
+> The probe is **bounded**: every engine carries a driver-level
+> `connect_timeout` (2 s) and the probe statement runs under a server-side
+> `statement_timeout` derived from the remaining budget. A database host
+> that drops the packets — rather than refusing them — used to hang the
+> probe for more than 60 seconds; it now answers within the budget with
+> `status: "not_ready"`.
+>
+> The probe runs in a **worker thread**, so the database wait never holds
+> the event loop: while the probe waits, the service keeps serving its
+> other requests.
+>
+> `/health` stays strictly a liveness probe: it consults no dependency at
+> all, so a database outage never makes an orchestrator restart a healthy
+> process.
+
+The deployment check suite complements the probe with the checks that
+cannot live inside a liveness/readiness pair:
+
+| Check | What it establishes |
+|-------|--------------------|
+| 1 | All three databases answer and hold the canonical schema |
+| 3 | `/health` and `/ready` carry the agreed semantics, the probe writes nothing, and the dependency-aware check reaches the Core database directly |
+| 5 | Detection and ML answer over the in-process HTTP hop |
+| 6 | The Manager facade reads from all three sources |
+| 7 | A dead dependency degrades instead of failing |
 
 A dead upstream is a **degraded source**, not a dead process. The Manager
 facade answers **200** with `degraded: true` and names the unreachable
@@ -387,7 +417,7 @@ The checks, in order:
 |---|-------|
 | 1 | The three databases exist, hold the canonical schema, and own no table from another context |
 | 2 | The application answers; the OpenAPI schema is served |
-| 3 | `/health` and `/ready` carry the agreed semantics — and `/ready` is documented as a **static** response, with the dependency-aware checks proving reachability separately |
+| 3 | `/health` and `/ready` carry the agreed semantics — `/health` is a liveness probe, `/ready` probes the three databases read-only, distinguishes a missing ML artifact from an unreachable database, and writes nothing |
 | 4 | Core authentication works: register, login, `/auth/me`, and a wrong password is refused |
 | 5 | Detection and ML communicate: the ML health endpoint names the artifact state, the internal secret is enforced, a login event is accepted and persisted, and the ML database is proven reachable **independently of the missing artifact** |
 | 6 | The Manager facade reads from Core, Detection and ML; all five Manager endpoints answer |

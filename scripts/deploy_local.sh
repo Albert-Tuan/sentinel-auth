@@ -162,6 +162,28 @@ validate_config() {
         fail "FORWARDED_ALLOW_IPS='*' is forbidden: any remote client could forge X-Forwarded-For and bypass IP-based controls."
     fi
 
+    # --- the CORS allow-list ----------------------------------------------
+    # A wildcard origin combined with credentialed requests lets any website
+    # read authenticated responses, so it is refused here as well as in the
+    # application.  Every entry must be a full origin.
+    if [ -n "${CORS_ALLOWED_ORIGINS:-}" ]; then
+        local entry
+        for entry in $(printf '%s' "${CORS_ALLOWED_ORIGINS}" | tr ',' ' '); do
+            entry="$(printf '%s' "${entry}" | tr -d '[:space:]')"
+            [ -n "${entry}" ] || continue
+            if [ "${entry}" = "*" ]; then
+                fail "CORS_ALLOWED_ORIGINS must not contain '*': a wildcard origin lets any website read authenticated responses. List the exact origins instead."
+            fi
+            case "${entry}" in
+                http://*|https://*) ;;
+                *) fail "CORS_ALLOWED_ORIGINS entry '${entry}' is not a full origin. Use scheme://host[:port]." ;;
+            esac
+            case "${entry}" in
+                */*/*) fail "CORS_ALLOWED_ORIGINS entry '${entry}' must be an origin without a path." ;;
+            esac
+        done
+    fi
+
     # --- the ML artifact --------------------------------------------------
     # The ML registry ships a *staged* placeholder whose file does not
     # exist.  The application must not promote it to production; the
@@ -307,6 +329,7 @@ start_app() {
         DETECTION_URL="${DETECTION_URL}" \
         REDIS_URL="${REDIS_URL:-redis://localhost:6379/0}" \
         FORWARDED_ALLOW_IPS="${FORWARDED_ALLOW_IPS:-127.0.0.1}" \
+        ${CORS_ALLOWED_ORIGINS:+CORS_ALLOWED_ORIGINS="${CORS_ALLOWED_ORIGINS}"} \
         RUN_PRE_TOKEN_CHECK="${RUN_PRE_TOKEN_CHECK:-0}" \
         RUN_LOGIN_EVENT_DELIVERY="${RUN_LOGIN_EVENT_DELIVERY:-1}" \
         ${ML_MODEL_PATH:+ML_MODEL_PATH="${ML_MODEL_PATH}"} \

@@ -347,10 +347,21 @@ SECRET_HEADER = {"X-Internal-Secret": TEST_INTERNAL_SECRET}
 def _set_internal_secret():
     """Ensure ``INTERNAL_SECRET`` is set for every test session.
 
-    Uses session scope so the environment variable is set once before any test
-    runs and cleaned up after the session ends.  Individual test functions do
-    not need to manage the variable.
+    The value is *forced* rather than defaulted.  ``os.environ.setdefault``
+    would keep an ``INTERNAL_SECRET`` that the developer already had in the
+    shell (for example the one loaded from the local ``.env``), which means the
+    test suite would send a real deployment secret to the application and then
+    assert against a different value.  Every internal-boundary test would
+    fail with 401, and the developer's own secret would end up inside test
+    requests and log output.
+
+    The previous value is restored on teardown so the surrounding process
+    keeps the environment it started with.
     """
-    os.environ.setdefault("INTERNAL_SECRET", TEST_INTERNAL_SECRET)
+    previous = os.environ.get("INTERNAL_SECRET")
+    os.environ["INTERNAL_SECRET"] = TEST_INTERNAL_SECRET
     yield
-    os.environ.pop("INTERNAL_SECRET", None)
+    if previous is None:
+        os.environ.pop("INTERNAL_SECRET", None)
+    else:
+        os.environ["INTERNAL_SECRET"] = previous
