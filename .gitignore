@@ -18,6 +18,9 @@ htmlcov/
 coverage.xml
 .tox/
 
+# CI artefacts (the JUnit report and the suite lock the verifier writes)
+.ci/
+
 # Tooling caches
 .mypy_cache/
 .ruff_cache/
