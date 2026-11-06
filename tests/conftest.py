@@ -70,6 +70,27 @@ def app():
     return fastapi_app
 
 
+def iter_routes(routes):
+    """Yield every ``APIRoute`` in a route table, however it is nested.
+
+    FastAPI changed the shape of ``app.routes`` in 0.162: an included
+    ``APIRouter`` is now represented by a ``_IncludedRouter`` wrapper that
+    has **no** ``path`` attribute, instead of being flattened into the
+    top-level list.  Code that inspects the route table therefore has to
+    descend into the included routers explicitly.
+
+    This helper walks both shapes, so a route table inspection behaves
+    identically on every supported FastAPI version.
+    """
+    from fastapi.routing import APIRoute
+
+    for route in routes:
+        if isinstance(route, APIRoute):
+            yield route
+        elif hasattr(route, "original_router"):
+            yield from iter_routes(route.original_router.routes)
+
+
 #: The bounded-context DB dependencies that the routers declare.  Every
 #: module is listed with the context it owns, so the SQLite test session
 #: replaces the real PostgreSQL sessions regardless of which URL the

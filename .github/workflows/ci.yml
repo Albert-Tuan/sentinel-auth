@@ -1,0 +1,318 @@
+# Sentinel Auth v3.3 — Continuous Integration
+#
+# The pipeline provisions three disposable PostgreSQL databases, loads each
+# one from its canonical schema, and runs the whole pytest suite plus the
+# M10 real-HTTP smoke script against them.
+#
+# Triggers:
+#   - pull requests targeting `dev` or `main`
+#   - pushes to `dev`
+#
+# Every secret used here is generated *inside* the runner from a throwaway
+# value.  No production credential is stored in GitHub, and no credential is
+# printed to the log.
+
+name: CI
+
+on:
+  pull_request:
+    branches:
+      - dev
+      - main
+  push:
+    branches:
+      - dev
+  # Allow a manual run from the Actions tab.
+  workflow_dispatch:
+
+# A new push to the same branch cancels the previous run.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: Test & Smoke (py${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    strategy:
+      # Fail fast, but still show which Python version broke.
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12"]
+
+    env:
+      # --- Timezone isolation -------------------------------------------
+      # The runner's default timezone is never relied upon.  The PostgreSQL
+      # server is pinned to UTC by the bootstrap script (``ALTER SYSTEM SET
+      # timezone``), which is the authoritative pin, and the Python process
+      # is pinned to UTC here so the two agree.
+      #
+      # ``PGTZ`` is deliberately NOT set: libpq would send it as a startup
+      # parameter, and it takes precedence over the ``options="-c timezone=…"``
+      # override that the timezone-isolation tests use to force a foreign
+      # zone.  Setting it would silently neuter those tests.
+      TZ: UTC
+      PYTHONHASHSEED: "0"
+
+      # --- Disposable PostgreSQL ----------------------------------------
+      # These are throwaway values for a container that lives and dies with
+      # the job.  They are not secrets and are not reused anywhere.
+      POSTGRES_HOST: 127.0.0.1
+      POSTGRES_PORT: "5432"
+      POSTGRES_USER: sentinel
+      POSTGRES_PASSWORD: sentinel_ci_disposable
+
+      # The three disposable databases.
+      CORE_DB: sentinel_core_test
+      DETECTION_DB: sentinel_detection_test
+      ML_DB: sentinel_ml_test
+
+      # The legacy single-database layout used by the older PostgreSQL
+      # modules.  It points at a *fourth* disposable database so those
+      # modules - which apply all three schemas into one database - cannot
+      # contaminate the three-database topology the live suite proves.
+      POSTGRES_DB: sentinel_legacy_test
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: sentinel
+          POSTGRES_PASSWORD: sentinel_ci_disposable
+          POSTGRES_DB: postgres
+          # The server timezone is pinned by the bootstrap script's
+          # ``ALTER SYSTEM SET timezone``, which also verifies the result.
+          TZ: UTC
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U sentinel"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+
+    steps:
+      # -------------------------------------------------------------------
+      # 1. Check out the code
+      # -------------------------------------------------------------------
+      - name: Check out the repository
+        uses: actions/checkout@v4
+
+      # -------------------------------------------------------------------
+      # 2. Set up Python with a dependency cache
+      # -------------------------------------------------------------------
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      # -------------------------------------------------------------------
+      # 3. Generate the test-only internal secret
+      #
+      # The value is generated inside the runner, masked so that even an
+      # accidental echo cannot leak it, and stored in the job's environment
+      # only for the steps that need it.  It is never committed and never
+      # stored in GitHub.
+      #
+      # It is deliberately NOT exported to the pytest step: the suite's own
+      # ``tests/conftest.py`` installs its own session-scoped secret, and an
+      # ambient value would override it and break the tests that assert the
+      # internal-auth boundary.  The smoke script is the only step that
+      # needs a runner-generated secret, because it starts a real server.
+      # -------------------------------------------------------------------
+      - name: Generate the test-only internal secret
+        run: |
+          set -euo pipefail
+          secret="$(python -c 'import secrets; print(secrets.token_urlsafe(32))')"
+          if [ "${#secret}" -lt 32 ]; then
+            echo "the generated internal secret is shorter than 32 characters" >&2
+            exit 1
+          fi
+          echo "::add-mask::${secret}"
+          {
+            echo "CI_INTERNAL_SECRET=${secret}"
+          } >> "${GITHUB_ENV}"
+          echo "the test-only internal secret was generated and masked"
+
+      # -------------------------------------------------------------------
+      # 4. Install the dependencies from the repository's own files
+      # -------------------------------------------------------------------
+      - name: Install the Python dependencies
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+          # A dependency conflict in the resolved tree is a broken
+          # environment, not a test failure - fail loudly and early.
+          #
+          # ``pip check`` inspects the WHOLE interpreter, and the hosted
+          # runner ships pre-installed packages whose own dependencies may be
+          # broken.  Only a conflict that involves one of OUR declared
+          # distributions is a CI failure; the rest is printed for context
+          # and ignored.
+          python -m pip check > /tmp/pip-check.txt 2>&1 || true
+          if grep -E '^(fastapi|uvicorn|httpx|pydantic|sqlalchemy|psycopg|psycopg2|psycopg2-binary|argon2-cffi|pytest|pytest-asyncio|joblib|numpy|scikit-learn) ' /tmp/pip-check.txt; then
+            echo "a declared dependency of this repository is broken" >&2
+            exit 1
+          fi
+          echo "the declared dependency tree is consistent"
+
+      # -------------------------------------------------------------------
+      # 5. Verify the disposable PostgreSQL is reachable
+      # -------------------------------------------------------------------
+      - name: Verify the PostgreSQL service is reachable
+        run: |
+          set -euo pipefail
+          # The hosted image ships the PostgreSQL client, but the script must
+          # not depend on that: install it if it is missing.
+          if ! command -v psql >/dev/null 2>&1; then
+            echo "the PostgreSQL client is missing - installing it"
+            sudo apt-get update -qq
+            sudo apt-get install -y -qq postgresql-client
+          fi
+          for attempt in $(seq 1 30); do
+            if pg_isready -h "${POSTGRES_HOST}" -p "${POSTGRES_PORT}" -U "${POSTGRES_USER}"; then
+              echo "PostgreSQL is ready"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "PostgreSQL did not become ready" >&2
+          exit 1
+
+      # -------------------------------------------------------------------
+      # 6. Provision the three disposable databases from the canonical
+      #    schema files
+      # -------------------------------------------------------------------
+      - name: Provision the three disposable databases
+        run: |
+          set -euo pipefail
+          bash scripts/ci_bootstrap_postgres.sh
+
+      # -------------------------------------------------------------------
+      # 7. Export the connection URLs the suite reads
+      #
+      # The URLs are assembled from the disposable container's own
+      # coordinates.  The password is the throwaway value declared above.
+      #
+      # Only the ``*_TEST_URL`` variables are exported globally.  The
+      # application's own ``*_DATABASE_URL`` variables are set per step:
+      # the unit tests override every session dependency, and exporting a
+      # real database URL globally would let a test reach the disposable
+      # PostgreSQL instead of its own SQLite session.
+      # -------------------------------------------------------------------
+      - name: Export the disposable connection URLs
+        run: |
+          set -euo pipefail
+          {
+            echo "CORE_DETECTION_TEST_URL=postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@${POSTGRES_HOST}:${POSTGRES_PORT}/${CORE_DB}"
+            echo "CORE_ANALYTICS_TEST_URL=postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@${POSTGRES_HOST}:${POSTGRES_PORT}/${CORE_DB}"
+            echo "DETECTION_TEST_URL=postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@${POSTGRES_HOST}:${POSTGRES_PORT}/${DETECTION_DB}"
+            echo "ML_TEST_URL=postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@${POSTGRES_HOST}:${POSTGRES_PORT}/${ML_DB}"
+          } >> "${GITHUB_ENV}"
+          # Print the targets, never the credentials.
+          echo "the disposable connection URLs were exported (credentials withheld)"
+
+      # -------------------------------------------------------------------
+      # 8. Run the full test suite under the acceptance policy
+      # -------------------------------------------------------------------
+      - name: Run the full pytest suite (zero failures, zero skips)
+        run: |
+          set -euo pipefail
+          python scripts/ci_verify_tests.py
+
+      # -------------------------------------------------------------------
+      # 9. Run the M10 real-HTTP smoke script
+      #
+      # The script starts a real uvicorn socket, seeds the three databases
+      # and exercises the Manager facade over HTTP.  It runs against the
+      # same disposable infrastructure as the test suite.
+      #
+      # This is the only step that receives the runner-generated internal
+      # secret: the script starts a real server, so the server and the
+      # client must agree on one throwaway value.
+      # -------------------------------------------------------------------
+      - name: Run the M10 real-HTTP smoke script
+        env:
+          INTERNAL_SECRET: ${{ env.CI_INTERNAL_SECRET }}
+        run: |
+          set -euo pipefail
+          python scripts/m10_http_smoke.py
+
+      # -------------------------------------------------------------------
+      # 10. Publish the JUnit report
+      # -------------------------------------------------------------------
+      - name: Publish the test report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pytest-report-py${{ matrix.python-version }}
+          path: .ci/pytest-report.xml
+          if-no-files-found: ignore
+          retention-days: 14
+
+      # -------------------------------------------------------------------
+      # 11. Failure diagnostics
+      #
+      # The diagnostics describe the environment (versions, database
+      # inventory) without printing a single credential.
+      # -------------------------------------------------------------------
+      - name: Collect failure diagnostics
+        if: failure()
+        run: |
+          set -uo pipefail
+          {
+            echo "### Sentinel Auth CI diagnostics"
+            echo
+            echo "#### Python"
+            python --version
+            python -m pip list --format=freeze 2>/dev/null | sort
+            echo
+            echo "#### PostgreSQL"
+            echo "server version:"
+            psql -h "${POSTGRES_HOST}" -p "${POSTGRES_PORT}" -U "${POSTGRES_USER}" \
+              -d postgres -Atc "SELECT version();" 2>&1 || true
+            echo "server timezone:"
+            psql -h "${POSTGRES_HOST}" -p "${POSTGRES_PORT}" -U "${POSTGRES_USER}" \
+              -d postgres -Atc "SELECT setting FROM pg_settings WHERE name = 'TimeZone';" 2>&1 || true
+            echo "databases:"
+            psql -h "${POSTGRES_HOST}" -p "${POSTGRES_PORT}" -U "${POSTGRES_USER}" \
+              -d postgres -Atc "SELECT datname FROM pg_database WHERE datistemplate = false ORDER BY 1;" 2>&1 || true
+            echo
+            echo "#### pytest summary"
+            if [ -f .ci/pytest-report.xml ]; then
+              grep -oE '<testsuite [^>]*' .ci/pytest-report.xml | head -5 || true
+            else
+              echo "no JUnit report was produced"
+            fi
+          } >> "${GITHUB_STEP_SUMMARY}" 2>&1 || true
+          echo "the diagnostics were written to the job summary"
+
+      # -------------------------------------------------------------------
+      # 12. Clean teardown
+      #
+      # The service container is destroyed with the job.  This step drops
+      # the disposable databases explicitly so a reused runner never keeps
+      # a stale schema, and it never touches anything outside the three
+      # ``*_test`` databases.
+      # -------------------------------------------------------------------
+      - name: Tear down the disposable databases
+        if: always()
+        run: |
+          set -uo pipefail
+          for db_name in "${CORE_DB}" "${DETECTION_DB}" "${ML_DB}" "${POSTGRES_DB}"; do
+            case "${db_name}" in
+              *_test) ;;
+              *) echo "skipping ${db_name}: not a disposable test database"; continue ;;
+            esac
+            psql -h "${POSTGRES_HOST}" -p "${POSTGRES_PORT}" -U "${POSTGRES_USER}" \
+              -d postgres -c "DROP DATABASE IF EXISTS \"${db_name}\";" 2>&1 || true
+          done
+          echo "the disposable databases were dropped"

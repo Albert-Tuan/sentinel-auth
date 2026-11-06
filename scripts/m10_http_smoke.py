@@ -31,7 +31,14 @@ UTC = timezone.utc
 CORE_URL = os.environ["CORE_DETECTION_TEST_URL"]
 DETECTION_URL = os.environ["DETECTION_TEST_URL"]
 ML_URL = os.environ["ML_TEST_URL"]
-INTERNAL_SECRET = "m10-smoke-internal-secret-0123456789abcdef"
+
+#: The internal shared secret.  The CI generates a throwaway value at run
+#: time and passes it in through the environment, so no secret is stored in
+#: the repository.  The constant below is the fallback for a local run; it is
+#: a test-only value that authenticates nothing outside this process.
+INTERNAL_SECRET = os.environ.get("INTERNAL_SECRET") or (
+    "m10-smoke-internal-secret-0123456789abcdef"
+)
 
 WINDOW_FROM = datetime(2026, 10, 1, 0, 0, 0, tzinfo=UTC)
 WINDOW_TO = datetime(2026, 10, 2, 0, 0, 0, tzinfo=UTC)

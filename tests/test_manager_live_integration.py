@@ -82,6 +82,7 @@ from sklearn.ensemble import IsolationForest
 from sklearn.preprocessing import MinMaxScaler
 from sqlalchemy import create_engine, text
 from sqlalchemy.engine import Engine
+from tests.conftest import iter_routes
 
 UTC = timezone.utc
 
@@ -1195,7 +1196,7 @@ class TestExplicitRouterMounting:
     def test_the_provider_routers_are_mounted_in_the_route_table(self):
         from app.main import app as fastapi_app
 
-        paths = {route.path for route in fastapi_app.routes}
+        paths = {route.path for route in iter_routes(fastapi_app.routes)}
         assert "/api/v1/internal/analytics/core" in paths
         assert "/api/v1/internal/analytics/detection" in paths
         for path in MANAGER_ENDPOINTS:
