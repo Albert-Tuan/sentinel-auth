@@ -345,11 +345,23 @@ The three states are distinct:
 > | All three databases reachable | `200` `{"status": "ready", "checks": {...}}` |
 > | A database is unreachable | `503` `{"status": "not_ready", "checks": {...}}` |
 > | The ML **artifact** file is missing (the database answered) | `200`, `status: "ready"`, `checks.ml_artifact.status: "degraded"` |
+> | The ML **registry** could not be queried (timeout, locked table) | `503`, `status: "not_ready"`, `checks.ml_artifact.status: "unavailable"` |
 >
 > A missing ML *artifact* is deliberately **not** a readiness failure: the
 > Detection Engine falls back to a rule-only score, so the service can
 > still serve traffic. A missing *database* is, because the requests that
 > need that context cannot be answered.
+>
+> An **unverifiable** artifact state is also a readiness failure. The
+> registry query reads the `model_versions` table, so a transaction
+> holding a lock on it blocks the query while `SELECT 1` keeps
+> answering. When the registry could not be queried, the artifact state is
+> unknown — and readiness is **fail-closed**: the probe answers `503`
+> rather than assuming the artifact is merely missing.
+>
+> The registry query shares the probe's deadline: it is skipped entirely
+> when the deadline has already been spent, and it runs under a
+> server-side `statement_timeout` derived from the remaining budget.
 >
 > A successful probe is cached for 2 seconds so a tight health-check
 > interval does not hammer PostgreSQL. A **failing** probe is never

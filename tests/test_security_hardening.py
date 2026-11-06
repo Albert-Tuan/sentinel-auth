@@ -212,7 +212,7 @@ class TestReadinessProbe:
         monkeypatch.setattr(readiness, "_check_context",
                             lambda context, deadline: {"status": "ok"})
         monkeypatch.setattr(readiness, "_check_ml_artifact",
-                            lambda: {"status": "ready"})
+                            lambda deadline: {"status": "ready"})
         readiness.reset_readiness_cache()
 
         payload = readiness.readiness_payload()
@@ -250,7 +250,7 @@ class TestReadinessProbe:
         monkeypatch.setattr(readiness, "_check_context",
                             lambda context, deadline: {"status": "ok"})
         monkeypatch.setattr(readiness, "_check_ml_artifact",
-                            lambda: {"status": "degraded", "detail": "no artifact"})
+                            lambda deadline: {"status": "degraded", "detail": "no artifact"})
         readiness.reset_readiness_cache()
 
         payload = readiness.readiness_payload()
@@ -279,6 +279,59 @@ class TestReadinessProbe:
         assert payload["checks"]["ml_artifact"]["status"] == "unknown"
         readiness.reset_readiness_cache()
 
+    def test_an_unverifiable_artifact_state_is_fail_closed(self, monkeypatch):
+        """A registry that could not be queried must NOT be reported as ready.
+
+        Reporting an unknown artifact state as "merely missing" would turn
+        a broken dependency into a healthy answer.  Readiness is
+        fail-closed: the service is only ready when the artifact state was
+        actually verified.
+        """
+        from app import db, readiness
+
+        monkeypatch.setattr(readiness, "_check_context",
+                            lambda context, deadline: {"status": "ok"})
+        monkeypatch.setattr(readiness, "_check_ml_artifact",
+                            lambda deadline: {"status": "unavailable",
+                                              "detail": "OperationalError"})
+        readiness.reset_readiness_cache()
+
+        payload = readiness.readiness_payload()
+        assert payload["status"] == "not_ready", payload
+        assert payload["checks"]["ml_artifact"]["status"] == "unavailable"
+        assert "degraded" not in payload
+        readiness.reset_readiness_cache()
+
+    def test_the_registry_query_is_skipped_when_the_deadline_is_spent(self, monkeypatch):
+        """An expired deadline must skip the registry query entirely."""
+        from app import readiness
+
+        deadline = readiness._Deadline(budget=-1.0)
+        assert deadline.expired()
+
+        called = []
+
+        def _fail(context):
+            called.append(context)
+            raise AssertionError("the registry must not be queried")
+
+        monkeypatch.setattr(readiness.db, "get_context_session", _fail)
+        result = readiness._check_ml_artifact(deadline)
+
+        assert called == [], "the registry was queried despite an expired deadline"
+        assert result["status"] == "unavailable"
+        assert "deadline" in result["detail"]
+
+    def test_the_registry_query_is_bounded_by_the_remaining_budget(self, monkeypatch):
+        """The registry query runs under the remaining budget."""
+        import inspect
+
+        from app import readiness
+
+        source = inspect.getsource(readiness._check_ml_artifact)
+        assert "statement_timeout" in source
+        assert "deadline.remaining()" in source
+
     def test_a_failing_probe_is_never_cached(self, monkeypatch):
         """A recovery must be reported immediately, not after the TTL."""
         from app import readiness
@@ -289,8 +342,9 @@ class TestReadinessProbe:
             if state["fail"]:
                 return {"status": "unavailable"}
             return {"status": "ok"}
-
         monkeypatch.setattr(readiness, "_check_context", _fake_check)
+        monkeypatch.setattr(readiness, "_check_ml_artifact",
+                            lambda deadline: {"status": "ready"})
         readiness.reset_readiness_cache()
 
         assert readiness.readiness_payload()["status"] == "not_ready"

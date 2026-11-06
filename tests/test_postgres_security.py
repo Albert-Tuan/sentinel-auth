@@ -20,15 +20,18 @@ from __future__ import annotations
 
 import os
 import threading
+import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 
 import pytest
 import sqlalchemy as sa
+from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, text
 from sqlalchemy.orm import sessionmaker
 
+from app.main import app
 from tests.postgres_env import assert_disposable_database, require_postgres_env
 
 POSTGRES_HOST = os.environ.get("POSTGRES_HOST", "localhost")
@@ -641,3 +644,191 @@ class TestReadinessAgainstRealDatabases:
             )
         finally:
             session.close()
+
+
+# ---------------------------------------------------------------------------
+# D. The registry query is bounded by the probe deadline
+# ---------------------------------------------------------------------------
+
+class TestRegistryQueryIsBounded:
+    """The ML registry query must not outlive the probe's deadline.
+
+    The registry query reads the ``model_versions`` table.  A transaction
+    holding an ``ACCESS EXCLUSIVE`` lock on that table blocks the reader
+    indefinitely - the server queues it behind the writer - while
+    ``SELECT 1`` keeps answering normally.  The database check therefore
+    reports ``ok`` while the artifact check would block forever, and
+    ``/ready`` would never answer.
+    """
+
+    @pytest.fixture()
+    def locker(self, engine):
+        """Hold an ``ACCESS EXCLUSIVE`` lock on ``model_versions``."""
+        session = engine.connect()
+        transaction = session.begin()
+        session.execute(text(
+            "LOCK TABLE model_versions IN ACCESS EXCLUSIVE MODE"
+        ))
+        try:
+            yield session
+        finally:
+            transaction.rollback()
+            session.close()
+
+    def test_a_plain_select_still_answers_while_the_table_is_locked(
+        self, engine, locker,
+    ):
+        """The lock blocks the table read, not the server itself.
+
+        This is the precondition of the whole scenario: the database check
+        would report ``ok``, so only the registry query can be the thing
+        that hangs.
+        """
+        session = engine.connect()
+        try:
+            assert session.execute(text("SELECT 1")).scalar() == 1
+        finally:
+            session.close()
+
+    def test_the_probe_answers_within_its_budget_while_the_registry_is_locked(
+        self, engine, locker, monkeypatch,
+    ):
+        """``/ready`` must answer, and must answer inside the budget."""
+        from app import db, readiness
+
+        monkeypatch.setattr(db, "resolve_database_url", lambda context: ENGINE_URL)
+        readiness.reset_readiness_cache()
+
+        started = time.monotonic()
+        payload = readiness.readiness_payload()
+        elapsed = time.monotonic() - started
+
+        budget = readiness.PROBE_TIMEOUT_SECONDS
+        assert elapsed <= budget + 1.0, (
+            f"the probe took {elapsed:.1f}s, which is past its {budget}s budget"
+        )
+
+        # The database answered, so the failure is NOT a database failure.
+        assert payload["checks"][db.ML]["status"] == "ok", payload
+
+        # The registry could not be queried, so the artifact state is
+        # UNKNOWN - and it must not be reported as "merely missing".
+        artifact = payload["checks"]["ml_artifact"]
+        assert artifact["status"] == "unavailable", payload
+        assert artifact["status"] != "degraded", (
+            "a blocked registry was reported as a merely missing artifact"
+        )
+
+        # Fail-closed: an unverifiable dependency means not ready.
+        assert payload["status"] == "not_ready", payload
+        readiness.reset_readiness_cache()
+
+    def test_the_endpoint_answers_within_the_budget_while_the_registry_is_locked(
+        self, engine, locker, monkeypatch,
+    ):
+        """The HTTP endpoint answers promptly and stays fail-closed."""
+        from app import db, readiness
+
+        monkeypatch.setattr(db, "resolve_database_url", lambda context: ENGINE_URL)
+        readiness.reset_readiness_cache()
+
+        with TestClient(app) as client:
+            started = time.monotonic()
+            response = client.get("/ready")
+            elapsed = time.monotonic() - started
+
+            budget = readiness.PROBE_TIMEOUT_SECONDS
+            assert elapsed <= budget + 2.0, (
+                f"/ready took {elapsed:.1f}s, which is past its {budget}s budget"
+            )
+            assert response.status_code == 503, response.text
+
+            # The liveness probe is unaffected.
+            health = client.get("/health")
+            assert health.status_code == 200
+            assert health.json() == {"status": "ok"}
+        readiness.reset_readiness_cache()
+
+    def test_the_endpoint_does_not_block_the_event_loop_while_locked(
+        self, engine, locker, monkeypatch,
+    ):
+        """The event loop keeps serving traffic while the registry is locked."""
+        import asyncio
+
+        from app import db, readiness
+
+        monkeypatch.setattr(db, "resolve_database_url", lambda context: ENGINE_URL)
+        readiness.reset_readiness_cache()
+
+        async def measure():
+            ticks = []
+
+            async def ticker():
+                loop = asyncio.get_event_loop()
+                last = loop.time()
+                while True:
+                    await asyncio.sleep(0.05)
+                    now = loop.time()
+                    ticks.append(now - last)
+                    last = now
+
+            task = asyncio.create_task(ticker())
+            await asyncio.sleep(0.15)
+            await readiness.readiness_payload_async()
+            await asyncio.sleep(0.15)
+            task.cancel()
+            return max(ticks)
+
+        gap = asyncio.run(measure())
+        assert gap < 0.5, (
+            f"the event loop was stalled for {gap:.2f}s while the probe ran"
+        )
+        readiness.reset_readiness_cache()
+
+    def test_the_probe_recovers_after_the_lock_is_released(
+        self, engine, monkeypatch,
+    ):
+        """Once the lock is gone, the probe answers normally again."""
+        from app import db, readiness
+
+        monkeypatch.setattr(db, "resolve_database_url", lambda context: ENGINE_URL)
+        readiness.reset_readiness_cache()
+
+        session = engine.connect()
+        transaction = session.begin()
+        session.execute(text("LOCK TABLE model_versions IN ACCESS EXCLUSIVE MODE"))
+        try:
+            blocked = readiness.readiness_payload()
+            assert blocked["status"] == "not_ready", blocked
+        finally:
+            transaction.rollback()
+            session.close()
+
+        readiness.reset_readiness_cache()
+        recovered = readiness.readiness_payload()
+        assert recovered["status"] == "ready", recovered
+        # The artifact is missing in the demo state, which is degraded -
+        # but it is VERIFIED, so the service is ready.
+        assert recovered["checks"]["ml_artifact"]["status"] in ("ready", "degraded")
+        readiness.reset_readiness_cache()
+
+    def test_the_probe_leaks_no_transaction_or_connection_while_locked(
+        self, engine, locker, monkeypatch,
+    ):
+        """A blocked registry must not leave a session or a transaction open."""
+        from app import db, readiness
+
+        monkeypatch.setattr(db, "resolve_database_url", lambda context: ENGINE_URL)
+        readiness.reset_readiness_cache()
+
+        for _ in range(3):
+            readiness.readiness_payload()
+
+        session = db.get_context_session(db.CORE)
+        try:
+            assert not session.in_transaction(), (
+                "the probe left a transaction open on the pooled session"
+            )
+        finally:
+            session.close()
+        readiness.reset_readiness_cache()

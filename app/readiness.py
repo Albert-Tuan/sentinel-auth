@@ -33,6 +33,13 @@ These are two *different* failures and the probe keeps them apart:
 * a **missing database** is a hard failure.  The service cannot serve the
   requests that need that context, so the probe answers ``503``.
 
+A third case completes the picture: an **unverifiable** artifact state.
+The registry query reads the ``model_versions`` table, so a transaction
+holding a lock on it blocks the query indefinitely while ``SELECT 1`` keeps
+answering.  When the registry could not be queried, the artifact state is
+unknown - and readiness is **fail-closed**: the probe answers ``503``
+rather than assuming the artifact is merely missing.
+
 That distinction is what lets an orchestrator keep a working instance in
 service while the model artifact is still being provisioned.
 """
@@ -142,21 +149,58 @@ def _check_context(context: str, deadline: _Deadline) -> Dict[str, str]:
     return result
 
 
-def _check_ml_artifact() -> Dict[str, str]:
+def _check_ml_artifact(deadline: _Deadline) -> Dict[str, str]:
     """Report the ML artifact state WITHOUT loading the model.
 
     The probe only asks the model *registry* whether an artifact is
     configured and whether the file exists.  It never deserialises the
     artifact, never runs an inference and never writes an inference log.
 
-    A missing artifact is ``degraded``, not ``unavailable``: the Detection
-    Engine falls back to a rule-only score, so the service still serves.
+    The registry query is subject to the SAME deadline as the database
+    checks, and it is bounded twice over:
+
+    * the probe does not start the query at all when the deadline has
+      already been spent by the database checks;
+    * the query itself runs under a server-side ``statement_timeout``
+      derived from the remaining budget.
+
+    Both are necessary.  The registry query reads the ``model_versions``
+    table, so a transaction holding an ``ACCESS EXCLUSIVE`` lock on it
+    blocks the query indefinitely - the server simply queues the reader
+    behind the writer.  ``SELECT 1`` keeps working in that situation, so
+    the database check reports ``ok`` while the artifact check would hang
+    forever.  Without the bound, ``/ready`` would never answer.
+
+    The three outcomes are kept apart:
+
+    * the artifact is **not configured** or its **file is missing** →
+      ``degraded``.  The Detection Engine falls back to a rule-only score,
+      so the service still serves traffic.
+    * the registry could **not be queried** (timeout, unreachable
+      database, a locked table) → ``unavailable``.  The artifact state
+      could not be verified, and readiness is **fail-closed**: the probe
+      must not claim the service is ready when it could not check a
+      dependency it needs.
+    * the deadline was already spent → ``unavailable`` as well, for the
+      same reason.
     """
+    if deadline.expired():
+        return {
+            "status": "unavailable",
+            "detail": "probe deadline exceeded before the registry query",
+        }
+
     session: Optional[OrmSession] = None
     try:
         from app.ml import resolve_model_source
 
         session = db.get_context_session(db.ML)
+
+        # The registry query reads a real table, so it needs the same
+        # server-side bound as the database checks.
+        budget_ms = max(1, int(deadline.remaining() * 1000))
+        session.execute(text(f"SET LOCAL statement_timeout = {budget_ms}"))
+
         path, _ = resolve_model_source(session)
         if path.exists():
             return {"status": "ready"}
@@ -165,13 +209,23 @@ def _check_ml_artifact() -> Dict[str, str]:
             "detail": "the configured ML artifact file does not exist",
         }
     except FileNotFoundError:
+        # No artifact is configured at all.  This is a normal, expected
+        # state - the service falls back to a rule-only score.
         return {
             "status": "degraded",
             "detail": "no active ML artifact is configured",
         }
-    except Exception as exc:  # noqa: BLE001 - a missing artifact is not fatal
+    except Exception as exc:  # noqa: BLE001 - the outcome IS the result
+        # The registry could not be queried, so the artifact state is
+        # UNKNOWN.  Reporting this as "the artifact is merely missing"
+        # would be a lie that turns a broken dependency into a healthy
+        # answer.
+        logger.warning(
+            "readiness probe: the ML registry could not be queried (%s)",
+            exc.__class__.__name__,
+        )
         return {
-            "status": "degraded",
+            "status": "unavailable",
             "detail": exc.__class__.__name__,
         }
     finally:
@@ -193,28 +247,40 @@ def _probe() -> Dict:
 
     # The artifact state is only meaningful when the ML database answered.
     if checks.get(db.ML, {}).get("status") == "ok":
-        checks["ml_artifact"] = _check_ml_artifact()
+        checks["ml_artifact"] = _check_ml_artifact(deadline)
     else:
         checks["ml_artifact"] = {
             "status": "unknown",
             "detail": "the ML database is unavailable",
         }
 
-    # The service is ready when every required context answered.  The ML
-    # artifact does not participate in that decision - a missing artifact
-    # degrades the service, it does not take it out of service.
+    # The service is ready when every required context answered AND the
+    # ML artifact state could be verified.
+    #
+    # The ML artifact participates in the decision in two ways:
+    #
+    # * a missing artifact (``degraded``) does NOT take the service out of
+    #   service - the Detection Engine falls back to a rule-only score;
+    # * an UNVERIFIED artifact state (``unavailable``) DOES take it out of
+    #   service.  Readiness is fail-closed: when the registry could not be
+    #   queried, the probe must not report the service as ready on the
+    #   assumption that the artifact is merely missing.
     required_ok = all(
         checks[context]["status"] == "ok" for context in REQUIRED_CONTEXTS
     )
+    artifact = checks.get("ml_artifact", {})
+    artifact_verified = artifact.get("status") in ("ready", "degraded")
     degraded = any(
         entry["status"] == "degraded" for entry in checks.values()
     )
 
+    ready = required_ok and artifact_verified
+
     payload: Dict = {
-        "status": "ready" if required_ok else "not_ready",
+        "status": "ready" if ready else "not_ready",
         "checks": checks,
     }
-    if required_ok and degraded:
+    if ready and degraded:
         payload["status"] = "ready"
         payload["degraded"] = True
     return payload
