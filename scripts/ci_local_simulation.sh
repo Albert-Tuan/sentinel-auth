@@ -25,6 +25,11 @@ export POSTGRES_HOST=127.0.0.1
 export POSTGRES_PORT="${PORT}"
 export POSTGRES_USER=sentinel
 export POSTGRES_PASSWORD="${PASSWORD}"
+# libpq reads the password from ``PGPASSWORD``; without it the ``psql``
+# calls in the diagnostics and teardown steps fail with "no password
+# supplied" and, because they tolerate failures, the teardown would report
+# success while dropping nothing.
+export PGPASSWORD="${PASSWORD}"
 export CORE_DB=sentinel_core_test
 export DETECTION_DB=sentinel_detection_test
 export ML_DB=sentinel_ml_test
@@ -109,14 +114,31 @@ log "Step 11/9: collect the failure diagnostics (dry run)"
 } | head -40
 
 log "Step 12/9: tear down the disposable databases"
+failed=0
 for db_name in "${CORE_DB}" "${DETECTION_DB}" "${ML_DB}" "${POSTGRES_DB}"; do
     case "${db_name}" in
         *_test) ;;
         *) echo "skipping ${db_name}: not a disposable test database"; continue ;;
     esac
-    psql -h "${POSTGRES_HOST}" -p "${POSTGRES_PORT}" -U "${POSTGRES_USER}" \
-        -d postgres -c "DROP DATABASE IF EXISTS \"${db_name}\";" 2>&1 || true
+    if ! psql -h "${POSTGRES_HOST}" -p "${POSTGRES_PORT}" -U "${POSTGRES_USER}" \
+        -d postgres -c "DROP DATABASE IF EXISTS \"${db_name}\";" 2>&1; then
+        echo "ERROR: could not drop ${db_name}" >&2
+        failed=1
+        continue
+    fi
+    remaining="$(psql -h "${POSTGRES_HOST}" -p "${POSTGRES_PORT}" -U "${POSTGRES_USER}" \
+        -d postgres -Atc "SELECT count(*) FROM pg_database WHERE datname = '${db_name}';" 2>&1)"
+    if [ "${remaining}" != "0" ]; then
+        echo "ERROR: ${db_name} still exists after the drop (count=${remaining})" >&2
+        failed=1
+    else
+        echo "dropped ${db_name}"
+    fi
 done
+if [ "${failed}" -ne 0 ]; then
+    echo "the teardown did not drop every disposable database" >&2
+    exit 1
+fi
 echo "the disposable databases were dropped"
 
 log "CI SIMULATION COMPLETE"

@@ -66,6 +66,12 @@ jobs:
       POSTGRES_PORT: "5432"
       POSTGRES_USER: sentinel
       POSTGRES_PASSWORD: sentinel_ci_disposable
+      # libpq reads the password from ``PGPASSWORD``, not from
+      # ``POSTGRES_PASSWORD``.  Without this the ``psql`` calls in the
+      # diagnostics and teardown steps fail with "no password supplied" -
+      # and, because those steps tolerate failures, the teardown would
+      # report success while dropping nothing.
+      PGPASSWORD: sentinel_ci_disposable
 
       # The three disposable databases.
       CORE_DB: sentinel_core_test
@@ -302,17 +308,39 @@ jobs:
       # the disposable databases explicitly so a reused runner never keeps
       # a stale schema, and it never touches anything outside the three
       # ``*_test`` databases.
+      #
+      # The drops are verified, not assumed: the step drops each database
+      # and then checks that it is really gone.  A silent failure here
+      # would let a stale schema survive on a reused runner while the log
+      # claimed a clean teardown.
       # -------------------------------------------------------------------
       - name: Tear down the disposable databases
         if: always()
         run: |
           set -uo pipefail
+          failed=0
           for db_name in "${CORE_DB}" "${DETECTION_DB}" "${ML_DB}" "${POSTGRES_DB}"; do
             case "${db_name}" in
               *_test) ;;
               *) echo "skipping ${db_name}: not a disposable test database"; continue ;;
             esac
-            psql -h "${POSTGRES_HOST}" -p "${POSTGRES_PORT}" -U "${POSTGRES_USER}" \
-              -d postgres -c "DROP DATABASE IF EXISTS \"${db_name}\";" 2>&1 || true
+            if ! psql -h "${POSTGRES_HOST}" -p "${POSTGRES_PORT}" -U "${POSTGRES_USER}" \
+              -d postgres -c "DROP DATABASE IF EXISTS \"${db_name}\";" 2>&1; then
+              echo "ERROR: could not drop ${db_name}" >&2
+              failed=1
+              continue
+            fi
+            remaining="$(psql -h "${POSTGRES_HOST}" -p "${POSTGRES_PORT}" -U "${POSTGRES_USER}" \
+              -d postgres -Atc "SELECT count(*) FROM pg_database WHERE datname = '${db_name}';" 2>&1)"
+            if [ "${remaining}" != "0" ]; then
+              echo "ERROR: ${db_name} still exists after the drop (count=${remaining})" >&2
+              failed=1
+            else
+              echo "dropped ${db_name}"
+            fi
           done
+          if [ "${failed}" -ne 0 ]; then
+            echo "the teardown did not drop every disposable database" >&2
+            exit 1
+          fi
           echo "the disposable databases were dropped"
