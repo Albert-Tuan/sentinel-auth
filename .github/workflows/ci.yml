@@ -94,6 +94,18 @@ jobs:
           # The server timezone is pinned by the bootstrap script's
           # ``ALTER SYSTEM SET timezone``, which also verifies the result.
           TZ: UTC
+          # Authentication parity with the local/demo deployment
+          # (``docker-compose.yml``): the loopback "trust" lines that
+          # ``initdb`` writes by default are removed, so every connection
+          # must present a password.
+          #
+          # ``initdb`` only reads these arguments when it initialises a
+          # FRESH data directory.  The service container starts with an
+          # empty one on every run, so the setting always takes effect
+          # here - but the same caveat applies to any long-lived volume:
+          # changing this later does NOT re-initialise an existing
+          # cluster.
+          POSTGRES_INITDB_ARGS: "--auth-host=scram-sha-256 --auth-local=scram-sha-256"
         ports:
           - 5432:5432
         options: >-
@@ -194,7 +206,121 @@ jobs:
           exit 1
 
       # -------------------------------------------------------------------
-      # 6. Provision the three disposable databases from the canonical
+      # 6. Verify the PostgreSQL authentication is SCRAM, not trust
+      #
+      # The service container pins ``POSTGRES_INITDB_ARGS`` so the
+      # loopback "trust" lines that ``initdb`` writes by default are
+      # removed.  This step PROVES the resulting configuration:
+      #
+      #   * the correct password is accepted;
+      #   * a TCP connection WITHOUT a password is rejected;
+      #   * a TCP connection with a WRONG password is rejected;
+      #   * the effective ``pg_hba`` rules contain no "trust" entry for a
+      #     host connection;
+      #   * the stored password is a SCRAM verifier.
+      #
+      # A "trust" server would accept every one of the rejected attempts,
+      # so this step fails loudly instead of letting the CI run against a
+      # password-less database.
+      #
+      # Every ``psql`` call passes ``PGPASSWORD`` explicitly.  The job
+      # environment also defines it, but an explicit value keeps the step
+      # independent of an ambient variable that could carry a stale
+      # password.
+      # -------------------------------------------------------------------
+      - name: Verify the PostgreSQL authentication is SCRAM, not trust
+        run: |
+          set -euo pipefail
+          failed=0
+
+          # --- 1. the correct password is accepted ------------------------
+          if PGPASSWORD="${POSTGRES_PASSWORD}" psql -w \
+            -h "${POSTGRES_HOST}" -p "${POSTGRES_PORT}" -U "${POSTGRES_USER}" \
+            -d postgres -Atc "SELECT 'connected with the correct password';"; then
+            echo "OK: the correct password was accepted"
+          else
+            echo "ERROR: the correct password was rejected" >&2
+            failed=1
+          fi
+
+          # --- 2. a TCP connection without a password is rejected --------
+          # ``-w`` makes psql never prompt, so the attempt fails fast
+          # instead of hanging on an interactive prompt.
+          if PGPASSWORD="" psql -w \
+            -h "${POSTGRES_HOST}" -p "${POSTGRES_PORT}" -U "${POSTGRES_USER}" \
+            -d postgres -Atc "SELECT 1;" > /tmp/no-password.out 2>&1; then
+            echo "ERROR: a TCP connection without a password was ACCEPTED - the server is not enforcing SCRAM" >&2
+            cat /tmp/no-password.out >&2
+            failed=1
+          else
+            echo "OK: the TCP connection without a password was rejected"
+            # The message names the authentication method, so a log reader
+            # can tell a password rejection from a network failure.
+            if grep -q "no password supplied" /tmp/no-password.out \
+              || grep -qi "password authentication failed" /tmp/no-password.out; then
+              echo "OK: the rejection was an authentication failure"
+            else
+              echo "ERROR: the rejection was not an authentication failure" >&2
+              cat /tmp/no-password.out >&2
+              failed=1
+            fi
+          fi
+
+          # --- 3. a TCP connection with a WRONG password is rejected ------
+          # This is the check a "trust" server can never pass: trust
+          # accepts the connection before the password is ever examined.
+          if PGPASSWORD="definitely-not-the-right-password" psql -w \
+            -h "${POSTGRES_HOST}" -p "${POSTGRES_PORT}" -U "${POSTGRES_USER}" \
+            -d postgres -Atc "SELECT 1;" > /tmp/wrong-password.out 2>&1; then
+            echo "ERROR: a TCP connection with a wrong password was ACCEPTED - the server is not enforcing SCRAM" >&2
+            cat /tmp/wrong-password.out >&2
+            failed=1
+          else
+            echo "OK: the TCP connection with a wrong password was rejected"
+            if grep -qi "password authentication failed" /tmp/wrong-password.out; then
+              echo "OK: the rejection named the authentication failure"
+            else
+              echo "ERROR: the rejection was not an authentication failure" >&2
+              cat /tmp/wrong-password.out >&2
+              failed=1
+            fi
+          fi
+
+          # --- 4. the effective pg_hba rules contain no host "trust" ------
+          trust_rules="$(PGPASSWORD="${POSTGRES_PASSWORD}" psql -w \
+            -h "${POSTGRES_HOST}" -p "${POSTGRES_PORT}" -U "${POSTGRES_USER}" \
+            -d postgres -Atc \
+            "SELECT count(*) FROM pg_hba_file_rules
+              WHERE type = 'host' AND auth_method = 'trust';" 2>&1 || echo "unknown")"
+          if [ "${trust_rules}" = "0" ]; then
+            echo "OK: no host connection trusts an unauthenticated client"
+          else
+            echo "ERROR: pg_hba_file_rules reports ${trust_rules} host 'trust' entr(y/ies)" >&2
+            failed=1
+          fi
+
+          # --- 5. the stored password is a SCRAM verifier ------------------
+          scram_stored="$(PGPASSWORD="${POSTGRES_PASSWORD}" psql -w \
+            -h "${POSTGRES_HOST}" -p "${POSTGRES_PORT}" -U "${POSTGRES_USER}" \
+            -d postgres -Atc \
+            "SELECT count(*) FROM pg_authid
+              WHERE rolname = '${POSTGRES_USER}'
+                AND rolpassword LIKE 'SCRAM-SHA-256\$%';" 2>&1 || echo "0")"
+          if [ "${scram_stored}" = "1" ]; then
+            echo "OK: the role's password is stored as a SCRAM-SHA-256 verifier"
+          else
+            echo "ERROR: the role's password is not stored as a SCRAM verifier" >&2
+            failed=1
+          fi
+
+          if [ "${failed}" -ne 0 ]; then
+            echo "the PostgreSQL authentication is not SCRAM-enforced" >&2
+            exit 1
+          fi
+          echo "the PostgreSQL authentication is SCRAM-enforced"
+
+      # -------------------------------------------------------------------
+      # 7. Provision the three disposable databases from the canonical
       #    schema files
       # -------------------------------------------------------------------
       - name: Provision the three disposable databases
@@ -203,7 +329,7 @@ jobs:
           bash scripts/ci_bootstrap_postgres.sh
 
       # -------------------------------------------------------------------
-      # 7. Export the connection URLs the suite reads
+      # 8. Export the connection URLs the suite reads
       #
       # The URLs are assembled from the disposable container's own
       # coordinates.  The password is the throwaway value declared above.
@@ -227,7 +353,7 @@ jobs:
           echo "the disposable connection URLs were exported (credentials withheld)"
 
       # -------------------------------------------------------------------
-      # 8. Run the full test suite under the acceptance policy
+      # 9. Run the full test suite under the acceptance policy
       # -------------------------------------------------------------------
       - name: Run the full pytest suite (zero failures, zero skips)
         run: |
@@ -235,7 +361,7 @@ jobs:
           python scripts/ci_verify_tests.py
 
       # -------------------------------------------------------------------
-      # 9. Run the M10 real-HTTP smoke script
+      # 10. Run the M10 real-HTTP smoke script
       #
       # The script starts a real uvicorn socket, seeds the three databases
       # and exercises the Manager facade over HTTP.  It runs against the
@@ -253,7 +379,7 @@ jobs:
           python scripts/m10_http_smoke.py
 
       # -------------------------------------------------------------------
-      # 10. Publish the JUnit report
+      # 11. Publish the JUnit report
       # -------------------------------------------------------------------
       - name: Publish the test report
         if: always()
@@ -265,7 +391,7 @@ jobs:
           retention-days: 14
 
       # -------------------------------------------------------------------
-      # 11. Failure diagnostics
+      # 12. Failure diagnostics
       #
       # The diagnostics describe the environment (versions, database
       # inventory) without printing a single credential.
@@ -302,7 +428,7 @@ jobs:
           echo "the diagnostics were written to the job summary"
 
       # -------------------------------------------------------------------
-      # 12. Clean teardown
+      # 13. Clean teardown
       #
       # The service container is destroyed with the job.  This step drops
       # the disposable databases explicitly so a reused runner never keeps

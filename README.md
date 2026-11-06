@@ -139,6 +139,59 @@ Workflow: `.github/workflows/ci.yml`.
 - **Chẩn đoán khi lỗi**: job summary ghi phiên bản Python/PostgreSQL, danh sách database và timezone server — **không** in bất kỳ credential nào.
 - **Dọn dẹp**: bốn database disposable bị `DROP` ở step cuối (`if: always()`); service container bị hủy cùng job.
 
+## Triển Khai Tái Lập — Reproducible Deployment
+
+Bộ triển khai local/demo dựng được từ một bản clone sạch bằng **một lệnh**. Hạ tầng (PostgreSQL + Redis) chạy trong container; FastAPI monolith chạy trên host.
+
+Hướng dẫn đầy đủ: [`docs/DEPLOYMENT-v3.3.md`](docs/DEPLOYMENT-v3.3.md).
+
+### Khởi động nhanh
+
+```bash
+cp .env.example .env
+# điền POSTGRES_PASSWORD và INTERNAL_SECRET (>= 32 ký tự) vào .env
+bash scripts/deploy_local.sh up
+```
+
+`up` kiểm tra cấu hình → dựng hạ tầng → chờ PostgreSQL → **kiểm tra topology ba database** → khởi động app → chờ `/ready`.
+
+### Các lệnh
+
+| Lệnh | Ý nghĩa |
+| --- | --- |
+| `scripts/deploy_local.sh up` | Dựng và khởi động toàn bộ deployment |
+| `scripts/deploy_local.sh status` | Xem đang chạy gì |
+| `scripts/deploy_local.sh verify` | Chạy bộ kiểm chứng deployment (9 nhóm check) |
+| `scripts/deploy_local.sh down` | Dừng app + hạ tầng — **giữ nguyên volume** |
+| `scripts/deploy_local.sh reset` | Dừng và **xoá volume** — yêu cầu gõ `reset` để xác nhận |
+| `scripts/deploy_local.sh logs` | Theo dõi log của app (`.ci/deploy-app.log`) |
+
+### Điểm an toàn đã cài
+
+- PostgreSQL dùng **`scram-sha-256`**, không `trust` (kết nối không mật khẩu bị từ chối). Cùng thiết lập được áp dụng cho CI service container, nên CI và demo deployment enforce **giống hệt** nhau.
+- ⚠️ `POSTGRES_INITDB_ARGS` chỉ có tác dụng với **volume mới** — `initdb` đọc nó đúng một lần lúc khởi tạo data directory. Volume tạo trước khi có thiết lập này vẫn giữ cấu hình `trust` cũ; cần `reset` để áp dụng lại.
+- Không secret production nào nằm trong Git: `.env` bị gitignore, `.env.example` chỉ chứa placeholder.
+- Ba URL database phải trỏ tới **ba database khác nhau** — nếu không, lệnh khởi động từ chối chạy.
+- `CORE_APP_URL` và `DETECTION_URL` phải cùng trỏ về monolith (cổng của app) — nếu để mặc định split-service 8000/8001, mọi login event và analytics fetch sẽ đi vào cổng không có gì lắng nghe.
+- **Chỉ `reset` mới xoá được volume** — `up` / `verify` / `status` / `logs` / `down` không bao giờ phá huỷ dữ liệu. Bộ kiểm chứng *chứng minh* điều này bằng cách parse thân từng subcommand và từng câu SQL thực thi.
+- Không tự động xoá dữ liệu, không `create_all` lúc khởi động, không recreate schema trên database đã có dữ liệu.
+- `/health` = liveness, `/ready` = readiness (**trả về tĩnh**, không tra dependency), `sources` của Manager facade = trạng thái từng dependency (degrade thay vì crash). Kiểm chứng dependency thực sự nằm ở bộ check deployment, không phải ở `/ready`.
+- Thiếu ML artifact ≠ ML database không khả dụng: cả hai được phân biệt rõ (xem doc §7).
+
+### Kiểm chứng deployment
+
+```bash
+bash scripts/deploy_local.sh verify
+```
+
+Bộ kiểm chứng kiểm tra: ba database đúng schema canonical và cách ly chéo context; app trả lời; ngữ nghĩa `/health` + `/ready` (kèm xác nhận `/ready` là static); Core auth (register/login/me/sai mật khẩu); Detection nhận login event, ML báo trạng thái artifact **và** chứng minh ML database vẫn reachable độc lập với thiếu artifact; Manager facade đọc được từ cả ba nguồn; dependency chết thì **degrade** (200 + `degraded: true`, nguồn `unavailable` với reason code đóng); dữ liệu sống sót qua restart; **chỉ `reset` mới phá huỷ volume** (chứng minh bằng AST + phân tích thân hàm).
+
+### Tương thích runtime
+
+Đã kiểm chứng trên **Docker Engine 29.9.3** (API 1.56, rootless, `fuse-overlayfs`) với **Docker Compose v5.4.0** thật, và trên **Podman 5.8.9** rootless. Cả hai đều chạy trọn vẹn: `reset` → `up` → 62 check → restart container (volume giữ nguyên, dữ liệu sống sót) → 1035 test → 79 smoke, đều xanh.
+
+Lưu ý khi dùng rootless Podman: cần chạy `podman system service` và trỏ `DOCKER_HOST` về socket của nó.
+
 ### Các bước kiểm chứng trong CI
 
 | Bước | Lệnh | Ý nghĩa |
