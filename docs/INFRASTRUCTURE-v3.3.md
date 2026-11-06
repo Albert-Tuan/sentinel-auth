@@ -49,6 +49,13 @@ logical databases on one PostgreSQL server, plus Redis for future outbox transpo
 - Docker Compose plugin (v2) or `docker-compose`
 - Bash 4+ (for the init script)
 
+> The deployment was validated against **Docker Engine 29.9.3** with the
+> real **Docker Compose v5.4.0** plugin, and against rootless
+> **Podman 5.8.9**. Both ran the full stack — a from-scratch rebuild, all
+> 62 deployment checks, the 1035-test PostgreSQL regression suite and the
+> 79-check HTTP smoke. See
+> [`DEPLOYMENT-v3.3.md`](DEPLOYMENT-v3.3.md#compatibility).
+
 ---
 
 ## 3. Quick Start

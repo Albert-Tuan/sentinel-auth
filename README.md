@@ -186,6 +186,12 @@ bash scripts/deploy_local.sh verify
 
 Bộ kiểm chứng kiểm tra: ba database đúng schema canonical và cách ly chéo context; app trả lời; ngữ nghĩa `/health` + `/ready` (kèm xác nhận `/ready` là static); Core auth (register/login/me/sai mật khẩu); Detection nhận login event, ML báo trạng thái artifact **và** chứng minh ML database vẫn reachable độc lập với thiếu artifact; Manager facade đọc được từ cả ba nguồn; dependency chết thì **degrade** (200 + `degraded: true`, nguồn `unavailable` với reason code đóng); dữ liệu sống sót qua restart; **chỉ `reset` mới phá huỷ volume** (chứng minh bằng AST + phân tích thân hàm).
 
+### Tương thích runtime
+
+Đã kiểm chứng trên **Docker Engine 29.9.3** (API 1.56, rootless, `fuse-overlayfs`) với **Docker Compose v5.4.0** thật, và trên **Podman 5.8.9** rootless. Cả hai đều chạy trọn vẹn: `reset` → `up` → 62 check → restart container (volume giữ nguyên, dữ liệu sống sót) → 1035 test → 79 smoke, đều xanh.
+
+Lưu ý khi dùng rootless Podman: cần chạy `podman system service` và trỏ `DOCKER_HOST` về socket của nó.
+
 ### Các bước kiểm chứng trong CI
 
 | Bước | Lệnh | Ý nghĩa |

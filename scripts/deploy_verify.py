@@ -755,6 +755,24 @@ def check_persistence() -> None:
             ), {"username": probe}).fetchone()
         check("the persistence probe row exists in sentinel_core", found is not None,
               f"user={probe}")
+
+        # The cluster's system identifier identifies the DATA DIRECTORY.
+        # It survives a restart and a container rebuild, and it changes
+        # only when the volume is recreated.
+        #
+        # The state file must be tied to it: without that tie, a state
+        # file left behind by a different cluster (another daemon, a
+        # recreated volume) would make the check compare two unrelated
+        # probe identities and report a data loss that never happened.
+        with engine.connect() as conn:
+            cluster_id = str(conn.execute(text(
+                "SELECT system_identifier FROM pg_control_system()"
+            )).scalar())
+    except Exception as exc:  # noqa: BLE001 - the outcome IS the check
+        check("the persistence probe row exists in sentinel_core", False,
+              f"{exc.__class__.__name__}: {exc}")
+        cluster_id = None
+        found = None
     finally:
         engine.dispose()
 
@@ -762,19 +780,50 @@ def check_persistence() -> None:
     state_file = os.path.join(REPO_ROOT, ".ci", "deploy-persistence.json")
     state: Dict[str, Any] = {}
     if os.path.exists(state_file):
-        with open(state_file, encoding="utf-8") as handle:
-            state = json.load(handle)
+        try:
+            with open(state_file, encoding="utf-8") as handle:
+                state = json.load(handle)
+        except (OSError, ValueError):
+            state = {}
 
-    if "probe_id" in state:
-        check("the probe row survived the restart with the same identity",
-              state["probe_id"] == str(found[0]) if found else False,
-              f"before={state['probe_id']} after={found[0] if found else None}")
-    else:
+    current_id = str(found[0]) if found else None
+    recorded_id = state.get("probe_id")
+    recorded_cluster = state.get("cluster_id")
+
+    if recorded_id is None:
+        # First run against this cluster: record the identity.
         os.makedirs(os.path.dirname(state_file), exist_ok=True)
         with open(state_file, "w", encoding="utf-8") as handle:
-            json.dump({"probe_id": str(found[0]) if found else None}, handle)
+            json.dump({"probe_id": current_id, "cluster_id": cluster_id}, handle)
         check("the pre-restart probe identity was recorded", True,
-              f"id={found[0] if found else None}")
+              f"id={current_id} cluster={cluster_id}")
+    elif recorded_cluster is not None and recorded_cluster != cluster_id:
+        # The cluster is a DIFFERENT one: the volume was recreated
+        # between the two runs.  Nothing was lost - the old data is gone
+        # because the volume itself is new.  Re-record the baseline
+        # instead of reporting a false data loss.
+        os.makedirs(os.path.dirname(state_file), exist_ok=True)
+        with open(state_file, "w", encoding="utf-8") as handle:
+            json.dump({"probe_id": current_id, "cluster_id": cluster_id}, handle)
+        check("the persistence baseline was re-recorded for the recreated cluster",
+              True,
+              f"cluster {recorded_cluster} -> {cluster_id} "
+              "(the volume was recreated, so there was no data to lose)")
+    elif recorded_cluster is None:
+        # A state file written by an older version of this script, which
+        # did not record the cluster.  It cannot be compared safely.
+        os.makedirs(os.path.dirname(state_file), exist_ok=True)
+        with open(state_file, "w", encoding="utf-8") as handle:
+            json.dump({"probe_id": current_id, "cluster_id": cluster_id}, handle)
+        check("the persistence baseline was re-recorded with its cluster identity",
+              True,
+              f"cluster={cluster_id} (the previous file carried no cluster identity)")
+    else:
+        # The same cluster: the probe must have kept its identity across
+        # the restart.  A different identity here IS a real data loss.
+        check("the probe row survived the restart with the same identity",
+              recorded_id == current_id,
+              f"before={recorded_id} after={current_id}")
 
 
 # ---------------------------------------------------------------------------

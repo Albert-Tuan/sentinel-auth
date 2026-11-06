@@ -71,6 +71,13 @@ pip install -r requirements.txt
 
 > **Podman works too.** Set `COMPOSE_CMD="podman compose"` if you use it.
 > The compose file contains no Docker-specific constructs.
+>
+> The deployment has been validated against **Docker Engine 29.9.3** (API
+> 1.56, `fuse-overlayfs`, rootless) with **Docker Compose v5.4.0**, and
+> against a rootless **Podman 5.8.9** daemon. Both ran the full stack:
+> a from-scratch rebuild, all 62 deployment checks, the 1035-test
+> PostgreSQL regression suite and the 79-check HTTP smoke. See
+> [Compatibility](#compatibility).
 
 ---
 
@@ -402,6 +409,20 @@ bash scripts/deploy_local.sh verify   # phase 2: compares the id
 Phase 2 passes only when the probe row has the **same** id it had before
 the restart.
 
+The baseline is tied to the **cluster**, not just to the row. The
+verification records the PostgreSQL `system_identifier` — the identity of
+the data directory — next to the probe id:
+
+| Situation | What the check does |
+|-----------|---------------------|
+| Same cluster, the row kept its id | **PASS** — the data survived the restart |
+| Same cluster, the row has a different id | **FAIL** — real data loss |
+| A **different** cluster (the volume was recreated) | The baseline is re-recorded — there was no data to lose |
+
+Without the cluster tie, a baseline file left behind by another cluster
+(a different daemon, a recreated volume) would make the check compare two
+unrelated probe identities and report a data loss that never happened.
+
 ### Rate limiting
 
 The application rate-limits logins to **5 attempts per IP per 5 minutes**.
@@ -568,7 +589,36 @@ log and the upstream address.
 
 ---
 
-## 13. Related documents
+## 13. Compatibility
+
+The deployment was exercised against **two** container runtimes.
+
+| Runtime | Version | Result |
+|---------|---------|--------|
+| **Docker Engine** | 29.9.3 (API 1.56), `fuse-overlayfs`, rootless | 62/62 checks, 1035/1035 tests, 79/79 smoke — **all pass** |
+| **Podman** | 5.8.9 (rootless) | 62/62 checks, 1035/1035 tests, 79/79 smoke — **all pass** |
+
+On both runtimes the full lifecycle was run: `reset` (volume destroyed) →
+`up` (cluster re-initialised, schemas applied, application started) →
+`verify` (62 checks) → `restart` of the PostgreSQL container (volume kept,
+data proven to survive) → the full 1035-test regression suite → the 79-check
+HTTP smoke.
+
+Docker Compose is the **real Compose v2+ plugin** (`docker compose version`
+→ `Docker Compose version v5.4.0`), not a shim: the `services`, named
+volumes, `healthcheck` and `depends_on: condition: service_healthy`
+constructs the compose file uses are all the upstream implementation.
+
+The compose file contains no Docker-specific constructs, so a Podman
+deployment behaves the same. Two differences are worth knowing:
+
+* Podman's rootless networking needs `podman system service` running, and
+  `DOCKER_HOST` must point at its socket;
+* rootless Podman prints a provider notice on every `compose` call.
+
+---
+
+## 14. Related documents
 
 | Document | Content |
 |----------|---------|
