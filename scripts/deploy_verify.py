@@ -7,10 +7,9 @@ FastAPI monolith started by ``scripts/deploy_local.sh``).
 
 The checks are, in order:
 
-1. the three logical databases exist and hold the canonical schema;
+    1. the three logical databases exist and hold the canonical schema;
 2. the FastAPI application answers;
-3. ``/health`` and ``/ready`` carry the agreed semantics;
-4. Core authentication works (register + login against the Core database);
+3. ``/health`` and ``/ready`` carry the agreed semantics;4. Core authentication works (register + login against the Core database);
 5. Detection and ML communicate with the monolith;
 6. the Manager facade can read from Core, Detection and ML;
 7. the behaviour with an unavailable dependency is the degraded one;
@@ -20,7 +19,6 @@ The checks are, in order:
 Checks 1, 4 and 8 are **read-only with respect to the schema** and 4
 writes only the rows it creates.  Nothing here drops a database, reloads a
 schema or recreates a table.
-
 Usage::
 
     python scripts/deploy_verify.py
@@ -191,39 +189,70 @@ def check_application() -> None:
     check("/health reports status=ok", payload.get("status") == "ok",
           json.dumps(payload))
 
-    # Readiness: the deployment can serve traffic.
+    # Readiness: the deployment can serve traffic.  It probes the three
+    # bounded-context databases with a read-only ``SELECT 1``.
     status, body = get("/ready")
-    payload = json.loads(body) if status == 200 else {}
+    payload = json.loads(body) if status in (200, 503) else {}
     check("/ready -> 200", status == 200, f"status={status}")
     check("/ready reports status=ready", payload.get("status") == "ready",
           json.dumps(payload))
 
-    # --- /ready is a STATIC response ----------------------------------
-    # The endpoint answers ``{"status": "ready"}`` without consulting any
-    # dependency.  That is the current contract, and the check states it
-    # explicitly so nobody mistakes it for a dependency-aware probe.
-    #
-    # The dependency-aware verification is the deployment check suite:
-    # check 1 queries all three databases, check 5 exercises Detection and
-    # ML over HTTP, check 6 reads all three sources through the Manager
-    # facade and check 7 proves the degraded behaviour.  /ready alone does
-    # NOT prove that the databases are reachable.
-    check("/ready is a static response, not a dependency probe",
-          payload == {"status": "ready"},
-          f"payload={json.dumps(payload)} "
-          "(the dependency checks are the verification suite, not this endpoint)")
+    # --- /ready is DEPENDENCY-AWARE -------------------------------------
+    # The endpoint answers with one entry per bounded context.  A context
+    # that answered is reported as ``ok``; a context that did not is
+    # reported as ``unavailable``.  The deployment is ready only when all
+    # three answered.
+    checks = payload.get("checks") or {}
+    for context in ("core", "detection", "ml"):
+        entry = checks.get(context) or {}
+        check(f"/ready reports the {context} database as reachable",
+              entry.get("status") == "ok",
+              json.dumps(entry))
 
-    # The proof that /ready does NOT consult a dependency: the deployment
-    # verification reaches the databases directly, and it is the only
-    # place where their reachability is established.
+    # The ML ARTIFACT is a different thing from the ML DATABASE.  A
+    # missing artifact is the normal state of a demo deployment: the
+    # Detection Engine falls back to a rule-only score, so the service
+    # stays ready.  The probe must report it as a degraded artifact, not as
+    # an unavailable database.
+    artifact = checks.get("ml_artifact") or {}
+    check("/ready distinguishes the ML artifact from the ML database",
+          artifact.get("status") in ("ready", "degraded", "unknown"),
+          json.dumps(artifact))
+    check("/ready does not report a missing ML artifact as an unavailable database",
+          (checks.get("ml") or {}).get("status") == "ok",
+          "the ML database answered even though no model is promoted")
+
+    # The probe must be READ-ONLY.  It may not write a row, and it may not
+    # run a heavy query.  The proof is that the ML inference log - which
+    # every scoring request appends to - did not grow while the probe ran.
     from sqlalchemy import create_engine, text
+    engine = create_engine(ML_URL)
+    try:
+        with engine.connect() as conn:
+            before_logs = conn.execute(text(
+                "SELECT count(*) FROM inference_logs"
+            )).scalar()
+        get("/ready")
+        with engine.connect() as conn:
+            after_logs = conn.execute(text(
+                "SELECT count(*) FROM inference_logs"
+            )).scalar()
+        check("the readiness probe writes nothing", before_logs == after_logs,
+              f"inference_logs before={before_logs} after={after_logs}")
+    except Exception as exc:  # noqa: BLE001 - the outcome IS the check
+        check("the readiness probe writes nothing", False,
+              f"{exc.__class__.__name__}: {exc}")
+    finally:
+        engine.dispose()
+
+    # The dependency-aware check reaches the Core database directly, too.
     engine = create_engine(CORE_URL)
     try:
         with engine.connect() as conn:
             reachable = conn.execute(text("SELECT 1")).scalar()
         check("the dependency-aware check reaches the Core database directly",
               reachable == 1,
-              "the verification suite - not /ready - establishes reachability")
+              "the verification suite - and now /ready - establish reachability")
     except Exception as exc:  # noqa: BLE001 - the outcome IS the check
         check("the dependency-aware check reaches the Core database directly",
               False, f"{exc.__class__.__name__}: {exc}")

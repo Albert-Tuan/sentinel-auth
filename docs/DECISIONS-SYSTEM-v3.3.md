@@ -443,6 +443,15 @@ The current prototype provides partial policy management:
 
 This is an **implementation gap** to address during the next implementation phase.
 
+> **M11.3 note (Security Hardening, 2026-11-06).** Policy Create/Edit was
+> deliberately **NOT** implemented in the M11.3 branch.  Security hardening
+> and feature development are kept apart so that the hardening diff stays
+> reviewable and no new authorisation surface is introduced while the
+> existing one is being verified.  The item is carried in the implementation
+> backlog below as **F-1** and is to be implemented as a separate
+> feature branch, with the same role matrix the listing/activation
+> endpoints already enforce.
+
 ---
 
 ## 11. Implementation Backlog
@@ -452,8 +461,9 @@ completeness.
 
 | ID | Item | Priority | Notes |
 |----|------|---------|-------|
-| P1-E | CORS policy | Medium | Wildcard CORS in `app/main.py` |
-| P1-F | Refresh-token concurrency | Medium | Rotation vs passive semantics |
+| F-1 | Policy create/edit endpoints | Medium | APPROVED DESIGN / IMPLEMENTATION PENDING. Deferred out of M11.3 (Security Hardening) on purpose — see Section 10.4. Implement on a separate feature branch; reuse the `SECURITY_ADMIN` / `SECURITY_MANAGER` role matrix of the listing and activation endpoints. |
+| ~~P1-E~~ | ~~CORS policy~~ | — | ✅ RESOLVED in M11.3 — `app/cors_config.py` replaces the wildcard with a configurable allow-list (`CORS_ALLOWED_ORIGINS`); the deployment script and the application refuse a wildcard. |
+| ~~P1-F~~ | ~~Refresh-token concurrency~~ | — | ✅ RESOLVED in M11.3 — the refresh endpoint rotates the stored hash inside the session row, so a second use of the same refresh token cannot mint a second live session (verified against real concurrent transactions). |
 | P1-G | Outbox publisher runtime | High | Event delivery reliability |
 | P1-H | Reconciliation scheduler | Medium | Missed event recovery |
 | P1-B | ~~SOC action workflow~~ | — | ✅ RESOLVED — direct-apply (see Section 9) |
