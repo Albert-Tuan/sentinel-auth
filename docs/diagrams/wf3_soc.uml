@@ -152,7 +152,11 @@ note over S, DDB
   **APPROVED DESIGN / IMPLEMENTATION PENDING:**
   - GET /api/v1/soc/dashboard
   - POST /api/v1/alerts/{id}/escalate
+
+  **IMPLEMENTED (F-1, 2026-11-07):**
+  - GET /api/v1/policies/{id} (policy detail endpoint)
   - POST /api/v1/policies (policy create endpoint)
+  - PUT /api/v1/policies/{id} (policy edit endpoint)
 end note
 
 @enduml
