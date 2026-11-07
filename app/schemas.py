@@ -345,6 +345,139 @@ class PolicyList(BaseModel):
 
 
 # =============================================================================
+# F-1 — Policy Create/Edit contract (UC-DE-15)
+# =============================================================================
+#
+# Contract decisions (see docs/DECISIONS-SYSTEM-v3.3.md section 10.5):
+#
+# 1. ``version`` is IMMUTABLE after creation.  ``risk_assessments.policy_id``
+#    points at ``policies.id``, so the rules that produced a historical
+#    assessment must never change underneath it.  Changing the rules of a
+#    policy that is (or ever was) in service means creating a NEW policy
+#    with a NEW version and activating that one.
+#
+# 2. The write body NEVER carries ``is_active``, ``created_by`` or any
+#    timestamp.  ``is_active`` is owned by the activation endpoint, and the
+#    audit columns are owned by the server.  ``extra="forbid"`` turns a
+#    client that tries to set them into a loud rejection instead of a
+#    silently ignored field.
+#
+# 3. The client MAY send ``rules``/``config`` verbatim (as raw JSON) so that
+#    the *canonical* validators in ``app/detection.py`` -- ``validate_rule``
+#    and ``resolve_config`` -- stay the single source of truth for what a
+#    usable policy is.  Re-validating them with a second, parallel schema
+#    would let the two drift apart.  The shapes below therefore only check
+#    the *envelope* (types, presence).
+# =============================================================================
+
+
+class ServerOwnedPolicyFields(BaseModel):
+    """Fields the server owns.  They must never be set by a client.
+
+    They are DECLARED (rather than left to ``extra="forbid"``) so that the
+    endpoint can reject them with an explicit 400 that names the offending
+    field, instead of a generic 422 about an unexpected key.  A client that
+    sends one of them is told exactly what went wrong.
+    """
+
+    is_active: Optional[bool] = Field(
+        default=None, description="Server-managed. Must not be provided."
+    )
+    created_by: Optional[UUID] = Field(
+        default=None, description="Server-managed. Must not be provided."
+    )
+    created_at: Optional[datetime] = Field(
+        default=None, description="Server-managed. Must not be provided."
+    )
+    updated_at: Optional[datetime] = Field(
+        default=None, description="Server-managed. Must not be provided."
+    )
+    activated_at: Optional[datetime] = Field(
+        default=None, description="Server-managed. Must not be provided."
+    )
+    deactivated_at: Optional[datetime] = Field(
+        default=None, description="Server-managed. Must not be provided."
+    )
+
+
+#: The exact set of fields a client is not allowed to write.
+SERVER_OWNED_POLICY_FIELDS = frozenset({
+    "is_active",
+    "created_by",
+    "created_at",
+    "updated_at",
+    "activated_at",
+    "deactivated_at",
+})
+
+
+class PolicyCreateRequest(ServerOwnedPolicyFields):
+    """Body of ``POST /api/v1/policies``.
+
+    ``rules`` and ``config`` are raw JSON on purpose: the canonical
+    validators in ``app/detection.py`` decide whether the policy is usable
+    (they are the same validators the activation endpoint applies), so a
+    policy that can be created can always be activated.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    version: str = Field(..., pattern=r"^v\d+(\.\d+)*$", examples=["v1.0"])
+    name: Optional[str] = Field(default=None, max_length=255)
+    description: Optional[str] = None
+    rules: List[Dict[str, Any]] = Field(..., min_length=1)
+    config: Dict[str, Any] = Field(default_factory=dict)
+
+
+class PolicyUpdateRequest(ServerOwnedPolicyFields):
+    """Body of ``PUT /api/v1/policies/{policy_id}``.
+
+    The version is NOT editable.  ``expected_updated_at`` is the optimistic
+    concurrency token: the client sends the ``updated_at`` value it last
+    read and the server answers 409 when the policy changed in the
+    meantime.  Sending it is mandatory, because a blind write cannot
+    detect a lost update.
+
+    Only the fields that are actually sent are applied.  A field that is
+    omitted keeps its current value, so a client can move one knob
+    without resending the whole policy.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: Optional[str] = Field(default=None, max_length=255)
+    description: Optional[str] = None
+    rules: Optional[List[Dict[str, Any]]] = None
+    config: Optional[Dict[str, Any]] = None
+    expected_updated_at: datetime = Field(
+        ...,
+        description="Optimistic concurrency token: the updated_at the client last read.",
+    )
+
+
+class PolicyDetail(BaseModel):
+    """Full representation of a policy, returned by Create/Edit.
+
+    ``updated_at`` is exposed so a client can see when the policy last
+    changed; ``PolicyItem`` deliberately stays as it is, because the
+    listing endpoint's contract must not change.
+    """
+
+    id: UUID
+    version: str
+    name: Optional[str] = None
+    description: Optional[str] = None
+    rules: List[Dict[str, Any]] = Field(default_factory=list)
+    config: Dict[str, Any] = Field(default_factory=dict)
+    is_active: bool
+    created_by: Optional[UUID] = None
+    created_at: datetime
+    updated_at: datetime
+    activated_at: Optional[datetime] = None
+    deactivated_at: Optional[datetime] = None
+
+
+# =============================================================================
 # SOC Alert schemas
 # =============================================================================
 
