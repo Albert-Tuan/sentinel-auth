@@ -70,6 +70,27 @@ def app():
     return fastapi_app
 
 
+def iter_routes(routes):
+    """Yield every ``APIRoute`` in a route table, however it is nested.
+
+    FastAPI changed the shape of ``app.routes`` in 0.162: an included
+    ``APIRouter`` is now represented by a ``_IncludedRouter`` wrapper that
+    has **no** ``path`` attribute, instead of being flattened into the
+    top-level list.  Code that inspects the route table therefore has to
+    descend into the included routers explicitly.
+
+    This helper walks both shapes, so a route table inspection behaves
+    identically on every supported FastAPI version.
+    """
+    from fastapi.routing import APIRoute
+
+    for route in routes:
+        if isinstance(route, APIRoute):
+            yield route
+        elif hasattr(route, "original_router"):
+            yield from iter_routes(route.original_router.routes)
+
+
 #: The bounded-context DB dependencies that the routers declare.  Every
 #: module is listed with the context it owns, so the SQLite test session
 #: replaces the real PostgreSQL sessions regardless of which URL the
@@ -326,10 +347,21 @@ SECRET_HEADER = {"X-Internal-Secret": TEST_INTERNAL_SECRET}
 def _set_internal_secret():
     """Ensure ``INTERNAL_SECRET`` is set for every test session.
 
-    Uses session scope so the environment variable is set once before any test
-    runs and cleaned up after the session ends.  Individual test functions do
-    not need to manage the variable.
+    The value is *forced* rather than defaulted.  ``os.environ.setdefault``
+    would keep an ``INTERNAL_SECRET`` that the developer already had in the
+    shell (for example the one loaded from the local ``.env``), which means the
+    test suite would send a real deployment secret to the application and then
+    assert against a different value.  Every internal-boundary test would
+    fail with 401, and the developer's own secret would end up inside test
+    requests and log output.
+
+    The previous value is restored on teardown so the surrounding process
+    keeps the environment it started with.
     """
-    os.environ.setdefault("INTERNAL_SECRET", TEST_INTERNAL_SECRET)
+    previous = os.environ.get("INTERNAL_SECRET")
+    os.environ["INTERNAL_SECRET"] = TEST_INTERNAL_SECRET
     yield
-    os.environ.pop("INTERNAL_SECRET", None)
+    if previous is None:
+        os.environ.pop("INTERNAL_SECRET", None)
+    else:
+        os.environ["INTERNAL_SECRET"] = previous

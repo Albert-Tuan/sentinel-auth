@@ -10,12 +10,19 @@ Design
 ~~~~~~
 
 ``get_internal_secret()`` raises ``InternalAuthConfigurationError`` when the
-secret is absent, empty, or equal to the known-insecure placeholder
-``changeme-in-production``.  Callers that make **outbound** service-to-service
-calls (``Auth → Detection``, ``Detection → ML``, ``Detection → Core``) use
-``get_internal_secret()`` to obtain the header value.  If the secret is not
-configured they receive the exception and can decide how to handle it
-(fail-open for pre-token check; degrade gracefully for ML / action calls).
+secret is absent, empty, equal to the known-insecure placeholder
+``changeme-in-production``, or still carrying a template placeholder prefix
+(``change-me``, ``changeme``, ``replace-me``, ``placeholder``, ``your-``,
+``secret``, ``password``).  The last rule matters because the repository
+ships a template value in ``.env.example``: a copy-paste of that file would
+otherwise give the whole deployment a publicly known service secret.
+``scripts/deploy_local.sh`` applies the same rule, so the application and
+the deployment script agree on what a usable secret is.  Callers that make
+**outbound** service-to-service calls (``Auth → Detection``, ``Detection →
+ML``, ``Detection → Core``) use ``get_internal_secret()`` to obtain the
+header value.  If the secret is not configured they receive the exception
+and can decide how to handle it (fail-open for pre-token check; degrade
+gracefully for ML / action calls).
 
 ``verify_internal_secret()`` raises ``HTTPException(status_code=503)`` when
 the secret is not configured and ``HTTPException(status_code=401)`` when the
@@ -45,6 +52,27 @@ __all__ = [
 
 #: Known-insecure placeholder that must never be used in production.
 _INSECURE_PLACEHOLDER = "changeme-in-production"
+
+#: Prefixes of the placeholder values that ship with the repository or the
+#: deployment tooling.  A secret that still carries one of them is a
+#: copy-paste of a template, not a generated value, so the service must
+#: refuse to start rather than run with a public secret.
+#:
+#: ``scripts/deploy_local.sh`` applies the same rule, so the application and
+#: the deployment script agree on what a usable secret is.
+_INSECURE_PLACEHOLDER_PREFIXES = (
+    "change-me",
+    "changeme",
+    "change_me",
+    "replace-me",
+    "replaceme",
+    "replace_me",
+    "placeholder",
+    "your-",
+    "your_",
+    "secret",
+    "password",
+)
 
 #: Minimum acceptable secret length in characters.
 _MIN_SECRET_LENGTH = 32
@@ -93,6 +121,14 @@ def get_internal_secret() -> str:
             f"INTERNAL_SECRET is set to the known-insecure placeholder "
             f"{_INSECURE_PLACEHOLDER!r}"
         )
+
+    for prefix in _INSECURE_PLACEHOLDER_PREFIXES:
+        if value.lower().startswith(prefix):
+            raise InternalAuthConfigurationError(
+                "INTERNAL_SECRET still holds a template placeholder value "
+                f"(it starts with {prefix!r}). Generate one with: "
+                "python3 -c 'import secrets; print(secrets.token_urlsafe(32))'"
+            )
 
     if len(value) < _MIN_SECRET_LENGTH:
         raise InternalAuthConfigurationError(

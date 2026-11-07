@@ -34,6 +34,7 @@ from uuid import uuid4
 import pytest
 
 from app.models import FeatureStatistic, InferenceLog, ModelVersion, Role, User, UserRole
+from tests.conftest import iter_routes
 
 APP_DIR = os.path.join(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "app"
@@ -1337,8 +1338,8 @@ class TestDegradation:
         from app.main import app
 
         ml_routes = [
-            route for route in app.routes
-            if getattr(route, "path", "").startswith("/api/v1/manager/")
+            route for route in iter_routes(app.routes)
+            if route.path.startswith("/api/v1/manager/")
         ]
         paths = {route.path: route for route in ml_routes}
         for path in ("/api/v1/manager/alerts", "/api/v1/manager/soc-kpi"):
@@ -1887,13 +1888,13 @@ class TestRouterMounting:
     )
 
     def test_the_manager_router_is_mounted(self, app):
-        paths = {route.path for route in app.routes}
+        paths = {route.path for route in iter_routes(app.routes)}
         for path in self.MANAGER_PATHS:
             assert path in paths, f"{path} is not mounted"
 
     def test_the_provider_routers_are_mounted(self, app):
         """Both provider routers are mounted - no conditional mount."""
-        paths = {route.path for route in app.routes}
+        paths = {route.path for route in iter_routes(app.routes)}
         for path in self.PROVIDER_PATHS:
             assert path in paths, f"{path} is not mounted"
 

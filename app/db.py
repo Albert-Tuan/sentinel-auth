@@ -69,6 +69,34 @@ def _legacy_single_db_allowed() -> bool:
     return os.getenv(LEGACY_SINGLE_DB_FLAG, "").strip() == "1"
 
 
+#: How long a single connection attempt may take, in seconds.
+#:
+#: A host that DROPS the packets (rather than refusing them) makes the TCP
+#: handshake wait for the operating system's own timeout, which was measured
+#: at more than 60 seconds in this environment.  A bounded attempt turns
+#: that hang into a prompt, reportable failure.
+#:
+#: The value is deliberately equal to the readiness probe's budget
+#: (``app.readiness.PROBE_TIMEOUT_SECONDS``): a probe must answer inside its
+#: own deadline, and the connect attempt is the slowest step in it.  A
+#: healthy PostgreSQL accepts a connection in a few milliseconds, so the
+#: limit only ever fires when the server is unreachable.
+CONNECT_TIMEOUT_SECONDS = 2
+
+
+def _connect_args(database_url: str) -> Dict[str, int]:
+    """Return the driver-level connect arguments for ``database_url``.
+
+    Only the PostgreSQL driver understands ``connect_timeout``.  A URL that
+    names another driver (or a SQLite URL used by a unit test) gets no
+    connect arguments, because passing an unknown keyword to another
+    dialect's driver is an error.
+    """
+    if not database_url.startswith("postgresql"):
+        return {}
+    return {"connect_timeout": CONNECT_TIMEOUT_SECONDS}
+
+
 #: Single declarative registry for the whole monolith.
 #:
 #: Splitting it into ``CoreBase``/``DetectionBase``/``MLBase`` is NOT done
@@ -185,13 +213,25 @@ def get_engine(database_url: str, context: Optional[str] = None) -> Engine:
     ``context`` is the bounded-context key.  When given, the engine is cached
     per context, so a second call with a *different* URL for the same context
     replaces the cached engine instead of silently returning the first one.
+
+    Every engine is created with a **connect timeout**.  Without it, a
+    database host that drops the packets (a blackholed address, a firewall
+    that silently discards rather than rejects) makes the connection attempt
+    wait for the operating system's own TCP timeout - which was measured at
+    more than 60 seconds here.  A readiness probe that blocks that long is
+    worse than no probe at all: the orchestrator sees a hung health check
+    instead of an answer.
     """
     if context is None:
         # Legacy, context-free behaviour: a single engine per URL.
         for engine in _engines.values():
             if engine.url.render_as_string(hide_password=False) == database_url:
                 return engine
-        engine = create_engine(database_url, pool_pre_ping=True)
+        engine = create_engine(
+            database_url,
+            pool_pre_ping=True,
+            connect_args=_connect_args(database_url),
+        )
         _engines["__legacy__"] = engine
         return engine
 
@@ -200,7 +240,11 @@ def get_engine(database_url: str, context: Optional[str] = None) -> Engine:
         if engine is not None:
             # The configured URL changed; dispose the stale pool.
             engine.dispose()
-        engine = create_engine(database_url, pool_pre_ping=True)
+        engine = create_engine(
+            database_url,
+            pool_pre_ping=True,
+            connect_args=_connect_args(database_url),
+        )
         _engines[context] = engine
     return engine
 
