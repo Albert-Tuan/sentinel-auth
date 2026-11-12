@@ -28,8 +28,17 @@
  *    flight, the response is DISCARDED — a stale refresh can never write
  *    tokens into a newer session.
  *
- * 5. **Failure clears the session.** A failed refresh clears the auth state
- *    and notifies the app, which routes the user back to the login screen.
+ * 5. **Epoch-bound single flight.** The in-flight refresh promise is bound
+ *    to the epoch it was started for. A request that belongs to a NEW
+ *    session never reuses the promise of an OLDER session: it starts its
+ *    own refresh. The mutex is released only by the promise that owns it,
+ *    so a late-settling old promise can never unlock a newer one.
+ *
+ * 6. **Failure clears the session — but only the CURRENT one.** A failed
+ *    refresh clears the auth state and notifies the app, which routes the
+ *    user back to the login screen. The clear is guarded by the same epoch
+ *    check as the success path: a refresh that failed for a SUPERSEDED
+ *    session must not destroy the session that replaced it.
  */
 
 import axios, {
@@ -87,10 +96,16 @@ const NO_REFRESH_PUBLIC_PATHS: RegExp[] = [
 ]
 
 /** Notified when the session dies, so the app can route to the login screen. */
-type SessionExpiredListener = () => void
+type SessionExpiredListener = (epoch: number) => void
 const sessionExpiredListeners = new Set<SessionExpiredListener>()
 
-/** Subscribe to session-expiry events. Returns an unsubscribe function. */
+/**
+ * Subscribe to session-expiry events. Returns an unsubscribe function.
+ *
+ * The listener receives the epoch of the session that expired. A consumer
+ * that is told about an epoch that is no longer current must NOT act on it:
+ * a newer session has already replaced the expired one.
+ */
 export function onSessionExpired(listener: SessionExpiredListener): () => void {
   sessionExpiredListeners.add(listener)
   return () => {
@@ -98,10 +113,10 @@ export function onSessionExpired(listener: SessionExpiredListener): () => void {
   }
 }
 
-function notifySessionExpired(): void {
+function notifySessionExpired(epoch: number): void {
   for (const listener of [...sessionExpiredListeners]) {
     try {
-      listener()
+      listener(epoch)
     } catch {
       // A misbehaving listener must not break the interceptor.
     }
@@ -121,19 +136,34 @@ class StaleSessionError extends Error {
 }
 
 /**
- * The in-flight refresh request. Shared by every concurrent 401.
+ * The in-flight refresh request, shared by every concurrent 401 of the SAME
+ * session, plus the epoch that refresh belongs to.
+ *
+ * The epoch is what binds the promise to a session: a request that belongs
+ * to a newer session must not reuse the promise of an older one.
  */
 let refreshPromise: Promise<string> | null = null
+let refreshEpoch: number | null = null
 
 /**
  * Perform the refresh, deduplicating concurrent callers.
  *
+ * The single-flight mutex is scoped to ONE session: it is only reused while
+ * the epoch it was started for is still the current one. When a new session
+ * is established the old promise is dropped from the mutex (it keeps
+ * running, but nobody waits on it any more) and a fresh refresh is started.
+ *
  * @returns the new access token
  */
 function performRefresh(): Promise<string> {
-  if (refreshPromise) return refreshPromise
-
   const epochAtStart = getEpoch()
+
+  // Reuse the in-flight refresh ONLY when it belongs to the current
+  // session. A promise from a superseded session is never reused.
+  if (refreshPromise && refreshEpoch === epochAtStart) {
+    return refreshPromise
+  }
+
   const refreshToken = getRefreshToken()
 
   if (!refreshToken) {
@@ -176,8 +206,9 @@ function performRefresh(): Promise<string> {
     })
     .catch((error: unknown) => {
       // A stale refresh must NOT clear the session that superseded it —
-      // that session is alive and must stay alive.
-      if (error instanceof StaleSessionError) {
+      // that session is alive and must stay alive. This holds for EVERY
+      // failure mode: HTTP 401, network error, timeout, malformed body.
+      if (error instanceof StaleSessionError || getEpoch() !== epochAtStart) {
         throw new ApiError({
           kind: 'unauthorized',
           userMessage: 'Phiên đăng nhập đã thay đổi. Vui lòng đăng nhập lại.',
@@ -185,15 +216,21 @@ function performRefresh(): Promise<string> {
       }
       // The refresh failed for the CURRENT session: the session is gone.
       clearSession()
-      notifySessionExpired()
+      notifySessionExpired(epochAtStart)
       throw toApiError(error)
     })
     .finally(() => {
       // Release the mutex so the next 401 can start a fresh refresh.
-      if (refreshPromise === promise) refreshPromise = null
+      // Only the promise that OWNS the mutex may release it: a late-settling
+      // old promise must never unlock a newer refresh.
+      if (refreshPromise === promise) {
+        refreshPromise = null
+        refreshEpoch = null
+      }
     })
 
   refreshPromise = promise
+  refreshEpoch = epochAtStart
   return promise
 }
 
@@ -202,6 +239,7 @@ function performRefresh(): Promise<string> {
  */
 export function __resetClientState(): void {
   refreshPromise = null
+  refreshEpoch = null
 }
 
 /**

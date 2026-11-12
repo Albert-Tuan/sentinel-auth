@@ -90,6 +90,24 @@ export function clearSession(): void {
 }
 
 /**
+ * True when a session-expired notification about `expiredEpoch` still
+ * describes the current situation.
+ *
+ * The notification is actionable ONLY when the expired session was the one
+ * that was cleared and nothing has replaced it since:
+ *   - the store must be empty (`current === null`) — if a session exists, a
+ *     NEWER session replaced the expired one and the notification is stale,
+ *   - the epoch must be exactly one past the expired one — the clear that
+ *     produced the notification.
+ *
+ * A consumer that ignores a non-actionable notification will not tear down
+ * a live session.
+ */
+export function isExpiredSessionCurrent(expiredEpoch: number): boolean {
+  return current === null && epoch === expiredEpoch + 1
+}
+
+/**
  * Test helper: reset the store to a pristine state.
  */
 export function __resetStore(): void {

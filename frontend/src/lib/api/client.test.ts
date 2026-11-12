@@ -4,6 +4,10 @@
  * Covers: concurrent 401 -> exactly one refresh, refresh token rotation,
  * refresh failure, retry-once behaviour, no refresh on the auth endpoints,
  * the logout/refresh race, and the "reload requires login again" rule.
+ *
+ * The "stale refresh" block is the regression suite for the M12 review
+ * blockers: a refresh that fails for a SUPERSEDED session must never clear
+ * the session that replaced it.
  */
 
 import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest'
@@ -349,8 +353,223 @@ describe('logout / refresh race', () => {
   })
 })
 
-describe('error normalisation', () => {
-  it('maps status codes to the right error kind', async () => {
+/**
+ * Regression suite for the M12 review blockers.
+ *
+ * A refresh that fails for a session that has SINCE been replaced must not
+ * destroy the newer session. This holds for every failure mode: HTTP 401,
+ * network error and timeout.
+ */
+describe('stale refresh failure (Case A / B)', () => {
+  it('Case A: a 401 on a stale refresh leaves the new session intact', async () => {
+    // Session A is installed.
+    setSession('session-a-access', 'session-a-refresh')
+
+    // The refresh of session A is held open.
+    const releaseRefreshHolder: { current: (() => void) | null } = { current: null }
+    mock.onPost(ENDPOINTS.auth.refresh).reply(async () => {
+      await new Promise<void>((resolve) => {
+        releaseRefreshHolder.current = resolve
+      })
+      return [401, { detail: 'Invalid refresh token' }]
+    })
+    mock.onGet('/alerts').reply(401, { detail: 'expired' })
+
+    const expired = vi.fn()
+    const unsubscribe = onSessionExpired(expired)
+
+    const pending = apiClient.get('/alerts').catch((error) => error)
+
+    // Wait until the refresh is really in flight.
+    await vi.waitFor(() => {
+      expect(releaseRefreshHolder.current).not.toBeNull()
+    })
+
+    // Session B is established while the refresh of session A is running.
+    setSession('session-b-access', 'session-b-refresh')
+
+    // Now the stale refresh fails with a 401.
+    releaseRefreshHolder.current?.()
+
+    const outcome = await pending
+    expect(outcome).toBeInstanceOf(ApiError)
+
+    // Session B survives untouched.
+    expect(getAccessToken()).toBe('session-b-access')
+    expect(getRefreshToken()).toBe('session-b-refresh')
+    // And no expiration was announced for the live session.
+    expect(expired).not.toHaveBeenCalled()
+    unsubscribe()
+  })
+
+  it('Case B: a network error on a stale refresh leaves the new session intact', async () => {
+    setSession('session-a-access', 'session-a-refresh')
+
+    const releaseRefreshHolder: { current: (() => void) | null } = { current: null }
+    mock.onPost(ENDPOINTS.auth.refresh).reply(async () => {
+      await new Promise<void>((resolve) => {
+        releaseRefreshHolder.current = resolve
+      })
+      // A network error carries no response at all.
+      throw Object.assign(new Error('Network Error'), { isAxiosError: true })
+    })
+    mock.onGet('/alerts').reply(401, { detail: 'expired' })
+
+    const expired = vi.fn()
+    const unsubscribe = onSessionExpired(expired)
+
+    const pending = apiClient.get('/alerts').catch((error) => error)
+
+    await vi.waitFor(() => {
+      expect(releaseRefreshHolder.current).not.toBeNull()
+    })
+
+    setSession('session-b-access', 'session-b-refresh')
+    releaseRefreshHolder.current?.()
+
+    const outcome = await pending
+    expect(outcome).toBeInstanceOf(ApiError)
+
+    expect(getAccessToken()).toBe('session-b-access')
+    expect(getRefreshToken()).toBe('session-b-refresh')
+    expect(expired).not.toHaveBeenCalled()
+    unsubscribe()
+  })
+
+  it('Case B: a timeout on a stale refresh leaves the new session intact', async () => {
+    setSession('session-a-access', 'session-a-refresh')
+
+    const releaseRefreshHolder: { current: (() => void) | null } = { current: null }
+    mock.onPost(ENDPOINTS.auth.refresh).reply(async () => {
+      await new Promise<void>((resolve) => {
+        releaseRefreshHolder.current = resolve
+      })
+      throw Object.assign(new Error('timeout of 20000ms exceeded'), {
+        code: 'ECONNABORTED',
+        isAxiosError: true,
+      })
+    })
+    mock.onGet('/alerts').reply(401, { detail: 'expired' })
+
+    const expired = vi.fn()
+    const unsubscribe = onSessionExpired(expired)
+
+    const pending = apiClient.get('/alerts').catch((error) => error)
+
+    await vi.waitFor(() => {
+      expect(releaseRefreshHolder.current).not.toBeNull()
+    })
+
+    setSession('session-b-access', 'session-b-refresh')
+    releaseRefreshHolder.current?.()
+
+    const outcome = await pending
+    expect(outcome).toBeInstanceOf(ApiError)
+
+    expect(getAccessToken()).toBe('session-b-access')
+    expect(getRefreshToken()).toBe('session-b-refresh')
+    expect(expired).not.toHaveBeenCalled()
+    unsubscribe()
+  })
+
+  it('Case D: a new session does not reuse the old session refresh promise', async () => {
+    setSession('session-a-access', 'session-a-refresh')
+
+    let refreshCalls = 0
+    const releaseRefreshHolder: { current: (() => void) | null } = { current: null }
+    mock.onPost(ENDPOINTS.auth.refresh).reply(async (config) => {
+      refreshCalls += 1
+      const body = JSON.parse(config.data as string) as {
+        refresh_token: string
+      }
+      if (body.refresh_token === 'session-a-refresh') {
+        await new Promise<void>((resolve) => {
+          releaseRefreshHolder.current = resolve
+        })
+        return [200, { access_token: 'a2', refresh_token: 'a2-refresh' }]
+      }
+      return [200, { access_token: 'b2', refresh_token: 'b2-refresh' }]
+    })
+    mock.onGet('/alerts').reply((config) => {
+      const auth = config.headers?.Authorization as string
+      if (auth === 'Bearer b2') return [200, { alerts: [] }]
+      return [401, { detail: 'expired' }]
+    })
+
+    const pendingA = apiClient.get('/alerts').catch((error) => error)
+
+    await vi.waitFor(() => {
+      expect(releaseRefreshHolder.current).not.toBeNull()
+    })
+
+    // Session B is established: its own request must trigger its OWN
+    // refresh instead of waiting on the promise of session A.
+    setSession('session-b-access', 'session-b-refresh')
+    const pendingB = apiClient.get('/alerts')
+
+    await expect(pendingB).resolves.toMatchObject({ status: 200 })
+    expect(refreshCalls).toBe(2)
+
+    // Session A's refresh settles afterwards and changes nothing.
+    releaseRefreshHolder.current?.()
+    await pendingA
+
+    expect(getAccessToken()).toBe('b2')
+    expect(getRefreshToken()).toBe('b2-refresh')
+  })
+
+  it('does not let a late-settling old refresh unlock a newer one', async () => {
+    setSession('session-a-access', 'session-a-refresh')
+
+    const releaseAHolder: { current: (() => void) | null } = { current: null }
+    mock.onPost(ENDPOINTS.auth.refresh).reply(async (config) => {
+      const body = JSON.parse(config.data as string) as { refresh_token: string }
+      if (body.refresh_token === 'session-a-refresh') {
+        await new Promise<void>((resolve) => {
+          releaseAHolder.current = resolve
+        })
+        return [200, { access_token: 'a2', refresh_token: 'a2-refresh' }]
+      }
+      return [200, { access_token: 'b2', refresh_token: 'b2-refresh' }]
+    })
+    mock.onGet('/alerts').reply((config) => {
+      const auth = config.headers?.Authorization as string
+      if (auth === 'Bearer b2') return [200, { alerts: [] }]
+      return [401, { detail: 'expired' }]
+    })
+
+    const pendingA = apiClient.get('/alerts').catch((error) => error)
+    await vi.waitFor(() => {
+      expect(releaseAHolder.current).not.toBeNull()
+    })
+
+    setSession('session-b-access', 'session-b-refresh')
+    await expect(apiClient.get('/alerts')).resolves.toMatchObject({ status: 200 })
+
+    // The stale promise settles now — it must not release the mutex that
+    // belongs to the newer session.
+    releaseAHolder.current?.()
+    await pendingA
+
+    // A further 401 must still be able to refresh: the mutex is free.
+    let refreshCalls = 0
+    mock.onPost(ENDPOINTS.auth.refresh).reply(() => {
+      refreshCalls += 1
+      return [200, { access_token: 'b3', refresh_token: 'b3-refresh' }]
+    })
+    mock.onGet('/alerts').reply((config) => {
+      const auth = config.headers?.Authorization as string
+      if (auth === 'Bearer b3') return [200, { alerts: [] }]
+      return [401, { detail: 'expired' }]
+    })
+
+    await expect(apiClient.get('/alerts')).resolves.toMatchObject({ status: 200 })
+    expect(refreshCalls).toBe(1)
+    expect(getAccessToken()).toBe('b3')
+  })
+})
+
+describe('error normalisation', () => {  it('maps status codes to the right error kind', async () => {
     const cases: Array<[number, string]> = [
       [400, 'validation'],
       [422, 'validation'],

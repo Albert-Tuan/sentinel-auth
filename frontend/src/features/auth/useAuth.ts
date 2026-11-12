@@ -28,14 +28,21 @@
  * the authenticated state, even though the HTTP call succeeded.
  */
 
-import { useCallback, useMemo, useReducer } from 'react'
+import { useCallback, useEffect, useMemo, useReducer } from 'react'
 import {
   bestEffortLogout,
   fetchCurrentUser,
   login as loginRequest,
   verifyMfa as verifyMfaRequest,
 } from '@/lib/api/auth.api'
-import { clearSession, getEpoch, getSession, setSession } from '@/lib/api/tokenStore'
+import { onSessionExpired } from '@/lib/api/client'
+import {
+  clearSession,
+  getEpoch,
+  getSession,
+  isExpiredSessionCurrent,
+  setSession,
+} from '@/lib/api/tokenStore'
 import { landingPathFor } from '@/app/router/policy'
 import { ApiError, toApiError } from '@/lib/errors'
 import type { CurrentUser, UserRole } from '@/types/api'
@@ -185,6 +192,32 @@ export interface UseAuthOptions {
 export function useAuth(options: UseAuthOptions = {}) {
   const api = options.api ?? defaultAuthApi
   const [state, dispatch] = useReducer(authReducer, initialAuthState)
+
+  /**
+   * React to a session that died in the transport layer.
+   *
+   * The axios interceptor clears the tokens and emits a session-expired
+   * event when a refresh fails for the CURRENT session. Without this
+   * subscription the React state machine would keep believing the user is
+   * authenticated: the token store would be empty while the UI still shows
+   * the old user and the old roles, and the protected routes would keep
+   * rendering instead of bouncing the user to `/login`.
+   *
+   * The event carries the epoch of the session that expired. It is acted on
+   * ONLY when that expiration still describes the current situation (see
+   * `isExpiredSessionCurrent`), so:
+   *   - a stale notification never tears down a NEWER session,
+   *   - a user who is already anonymous is not "logged out" twice.
+   */
+  useEffect(() => {
+    return onSessionExpired((expiredEpoch) => {
+      if (!isExpiredSessionCurrent(expiredEpoch)) {
+        // A newer session replaced the expired one — leave it alone.
+        return
+      }
+      dispatch({ type: 'SESSION_EXPIRED' })
+    })
+  }, [])
 
   /**
    * Install a freshly minted session and confirm it against `GET /auth/me`.

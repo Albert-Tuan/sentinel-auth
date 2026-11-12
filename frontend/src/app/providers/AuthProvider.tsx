@@ -15,6 +15,7 @@ import {
 } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import { onSessionExpired } from '@/lib/api/client'
+import { isExpiredSessionCurrent } from '@/lib/api/tokenStore'
 import {
   useAuth,
   type AuthApi,
@@ -35,8 +36,20 @@ export function AuthProvider({ children, api }: AuthProviderProps) {
   // The interceptor tells us when the session died (refresh failed). Clear
   // the query cache so no stale, user-scoped data survives the logout, and
   // let the router send the user back to the login screen.
+  //
+  // The `useAuth` hook listens to the very same event and moves the auth
+  // state machine back to `anonymous`; the guard then bounces the user to
+  // `/login`. This effect only owns the cache.
+  //
+  // The notification is ignored when it no longer describes the current
+  // situation: a newer session replaced the expired one, and its cached
+  // data must survive.
   useEffect(() => {
-    return onSessionExpired(() => {
+    return onSessionExpired((expiredEpoch) => {
+      if (!isExpiredSessionCurrent(expiredEpoch)) {
+        // A newer session replaced the expired one — its cache stays.
+        return
+      }
       queryClient.clear()
     })
   }, [queryClient])
