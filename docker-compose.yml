@@ -25,6 +25,15 @@ services:
       POSTGRES_USER: ${POSTGRES_USER:-sentinel}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-sentinel123}
       PGDATA: /var/lib/postgresql/data/pgdata
+      # Force scram-sha-256 everywhere - the loopback "trust" lines that
+      # initdb writes by default are removed, so no connection can be made
+      # without a password.  The image's own default already refuses
+      # "trust", but stating it here means a demo deployment can never be
+      # switched into password-less authentication by an inherited default.
+      #
+      # The entrypoint exports PGPASSWORD while it runs the init scripts,
+      # so the scram-protected local socket does not break the bootstrap.
+      POSTGRES_INITDB_ARGS: "--auth-host=scram-sha-256 --auth-local=scram-sha-256"
       # Database names passed to the init script so custom .env names take effect.
       CORE_DB: ${CORE_DB:-sentinel_core}
       DETECTION_DB: ${DETECTION_DB:-sentinel_detection}

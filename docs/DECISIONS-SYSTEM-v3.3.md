@@ -437,11 +437,123 @@ and protective actions (Section 9).
 
 The current prototype provides partial policy management:
 
-- **Policy listing** (`GET /api/v1/policies`): role-gated — `SECURITY_ADMIN` + `SECURITY_MANAGER` only.
-- **Policy activation** (`POST /api/v1/policies/{id}/activate`): role-gated — `SECURITY_ADMIN` only.
-- **Policy create/edit**: APPROVED DESIGN / IMPLEMENTATION PENDING — no dedicated endpoints exist.
+- **Policy listing** (`GET /api/v1/policies`): role-gated — `SECURITY_ADMIN` + `SECURITY_MANAGER` only. **Unchanged.**
+- **Policy activation** (`POST /api/v1/policies/{id}/activate`): role-gated — `SECURITY_ADMIN` only. **Unchanged.**
+- **Policy create** (`POST /api/v1/policies`): role-gated — `SECURITY_ADMIN` only. **NEW (F-1).**
+- **Policy edit** (`PUT /api/v1/policies/{policy_id}`): role-gated — `SECURITY_ADMIN` only. **NEW (F-1).**
+- **Policy detail** (`GET /api/v1/policies/{policy_id}`): role-gated — `SECURITY_ADMIN` + `SECURITY_MANAGER` only. **NEW (F-1).**
 
-This is an **implementation gap** to address during the next implementation phase.
+> **M11.3 note (Security Hardening, 2026-11-06).** Policy Create/Edit was
+> deliberately **NOT** implemented in the M11.3 branch.  Security hardening
+> and feature development are kept apart so that the hardening diff stays
+> reviewable and no new authorisation surface is introduced while the
+> existing one is being verified.  The item is carried in the implementation
+> backlog below as **F-1** and is to be implemented as a separate
+> feature branch, with the same role matrix the listing/activation
+> endpoints already enforce.
+
+> **F-1 note (2026-11-07).** F-1 is implemented on the feature branch
+> `feature/f1-policy-crud`. The listing and activation contracts are
+> untouched; only the new endpoints were added.
+
+### 10.5 Create/Edit Contract (F-1)
+
+#### 10.5.1 Endpoints
+
+| Method | Path | Role | Success | Errors |
+|--------|------|------|---------|--------|
+| `GET` | `/api/v1/policies` | `SECURITY_ADMIN` + `SECURITY_MANAGER` | `200 OK` + list of summaries | `401` unauthenticated, `403` wrong role |
+| `GET` | `/api/v1/policies/{policy_id}` | `SECURITY_ADMIN` + `SECURITY_MANAGER` | `200 OK` + `PolicyDetail` | `401` unauthenticated, `403` wrong role, `404` unknown policy |
+| `POST` | `/api/v1/policies` | `SECURITY_ADMIN` | `201 Created` + `PolicyDetail` | `400` invalid rules/config, `400` client-set server-owned field, `400`/`422` invalid `version` format, `409` duplicate `version`, `401` unauthenticated, `403` wrong role |
+| `PUT` | `/api/v1/policies/{policy_id}` | `SECURITY_ADMIN` | `200 OK` + `PolicyDetail` | `400` invalid rules/config, `400` client-set server-owned field, `400`/`422` unknown field, `400`/`422` `version` change attempt, `409` policy immutable, `409` stale concurrency token, `409` duplicate `version`, `409` concurrent insert conflict, `404` unknown policy |
+
+> The listing (`GET /api/v1/policies`) and the activation
+> (`POST /api/v1/policies/{id}/activate`) rows are the **pre-existing**
+> contracts and are unchanged by F-1.
+
+#### 10.5.2 Lifecycle and immutability rules
+
+- A policy is **mutable only while it is a draft**: `is_active is False` **and**
+  `activated_at is None`.
+- Once a policy has been activated, `activated_at` is set and **never cleared**.
+  Any policy with `is_active is True` **or** `activated_at is not None` is
+  **frozen**: an edit attempt returns `409 Conflict` ("Policy is immutable").
+- **`version` is immutable once created.** Changing the rules or the config of a
+  deployed policy is done by creating a *new* version and activating it. The
+  `version` field is rejected on the update endpoint.
+- `version` is **unique** across the Detection context.
+- This is what protects the history of previously processed login attempts:
+  `risk_assessments` and `login_attempts` rows reference the policy that was
+  active at the time, and that policy's rules/config never change afterwards.
+
+#### 10.5.3 Create semantics
+
+- The server always creates the policy **inactive** (`is_active=False`,
+  `activated_at=None`). The client cannot set `is_active`.
+- `created_by` is taken from the authenticated session (`ctx.user.id`); the
+  client cannot set it. It is stored as a UUID reference inside the Detection
+  context — **no write to the Core or ML database is performed**.
+- `created_at` and `updated_at` are set by the server; the client cannot set
+  them.
+- Rules and config are validated with the canonical `validate_rule()` and
+  `resolve_config()` from the Detection engine, so the create endpoint
+  accepts exactly the six approved features and the approved operators, and
+  rejects invalid weights, thresholds and rule structures.
+- Validation failures return `400` with
+  `{"detail": {"message": "Policy is invalid", "problems": [...]}}` — the same
+  error contract the activation endpoint already uses.
+- Server-owned fields that the client tries to set are reported explicitly with
+  `400` ("`<field>` is managed by the server and cannot be set by the client");
+  an unknown field (a typo) is rejected by the schema with `422`.
+
+#### 10.5.4 Edit semantics and lost-update prevention
+
+- `PUT /api/v1/policies/{policy_id}` requires `expected_updated_at` (the
+  `updated_at` the client last read) in the request body.
+- The row is locked with `SELECT ... FOR UPDATE`; if the stored `updated_at`
+  differs from `expected_updated_at`, the request returns `409 Conflict`
+  ("Policy was modified by someone else"). This makes a lost update impossible:
+  the second writer of a concurrent pair always sees `409`.
+- The **immutability check runs before the concurrency check**, so that a frozen
+  policy always reports `409` ("Policy is immutable") rather than a spurious
+  concurrency conflict caused by the `updated_at` bump of an activation.
+- Fields that the client omits are preserved; `rules` and `config` are replaced
+  as a whole when provided.
+
+#### 10.5.5 Bounded-context isolation
+
+All three F-1 endpoints use only the Detection database session. They never
+write to the Core context (`users`, `sessions`, `audit_logs`) nor to the ML
+context (`model_versions`, `inference_logs`, `feature_statistics`). The detail
+endpoint is a **pure read**: it opens no transaction that writes and it does not
+touch the scoring path.
+
+#### 10.5.6 The detail endpoint (`GET /api/v1/policies/{policy_id}`)
+
+The detail endpoint is a **supporting endpoint for the edit endpoint**. It does
+**not** extend the policy lifecycle.
+
+- **Why it exists.** The listing endpoint returns a *summary* (it deliberately
+  does not expose the rules or the config), and the create/edit endpoints
+  return the full payload only to the caller that just wrote. A client that
+  wants to edit a policy therefore had **no way to read the current state**,
+  and hence no way to obtain the `updated_at` token the edit endpoint
+  requires. The detail endpoint closes that gap.
+- **What it returns.** The existing `PolicyDetail` model — exactly the same
+  payload the create and edit endpoints already return: `id`, `version`,
+  `name`, `description`, `rules`, `config`, `is_active`, `created_by`,
+  `created_at`, `updated_at`, `activated_at`, `deactivated_at`.
+- **Authorisation.** `SECURITY_ADMIN` and `SECURITY_MANAGER` only (the same
+  matrix the listing endpoint enforces). `SOC_ANALYST` and `USER` get `403`;
+  an unauthenticated request gets `401`; an unknown `policy_id` gets `404`.
+- **Timestamp precision.** `updated_at` is returned with full microsecond
+  precision, so the value can be sent straight back as `expected_updated_at`
+  without a lossy round trip. A truncated token would be rejected by the edit
+  endpoint for a reason the client cannot see.
+- **What it does NOT do.** It never writes, it never activates, it never
+  changes how a policy is scored, and it never alters the historical
+  `risk_assessments` / `login_attempts` rows. Reading a policy that has
+  already been active is a plain read of a frozen row.
 
 ---
 
@@ -452,14 +564,15 @@ completeness.
 
 | ID | Item | Priority | Notes |
 |----|------|---------|-------|
-| P1-E | CORS policy | Medium | Wildcard CORS in `app/main.py` |
-| P1-F | Refresh-token concurrency | Medium | Rotation vs passive semantics |
+| F-1 | ~~Policy create/edit endpoints~~ | — | ✅ RESOLVED in F-1 (2026-11-07) — `POST /api/v1/policies`, `GET /api/v1/policies/{policy_id}` and `PUT /api/v1/policies/{policy_id}`, with `SECURITY_ADMIN` owning create/edit, `SECURITY_MANAGER` view-only, draft-only mutability, `version` uniqueness and immutability, optimistic concurrency via `expected_updated_at`, and Detection-context-only writes. See Section 10.5. |
+| ~~P1-E~~ | ~~CORS policy~~ | — | ✅ RESOLVED in M11.3 — `app/cors_config.py` replaces the wildcard with a configurable allow-list (`CORS_ALLOWED_ORIGINS`); the deployment script and the application refuse a wildcard. |
+| ~~P1-F~~ | ~~Refresh-token concurrency~~ | — | ✅ RESOLVED in M11.3 — the refresh endpoint rotates the stored hash inside the session row, so a second use of the same refresh token cannot mint a second live session (verified against real concurrent transactions). |
 | P1-G | Outbox publisher runtime | High | Event delivery reliability |
 | P1-H | Reconciliation scheduler | Medium | Missed event recovery |
 | P1-B | ~~SOC action workflow~~ | — | ✅ RESOLVED — direct-apply (see Section 9) |
 | P1-C | ~~Policy management roles~~ | — | ✅ RESOLVED — Security Admin only (see Section 10) |
 | — | Role-gated protective actions | High | Enforce executor role on `POST /internal/detection/actions` |
-| — | Role-gated policy management | High | Enforce Security Admin role on policy CRUD endpoints |
+| — | ~~Role-gated policy management~~ | — | ✅ RESOLVED in F-1 — the Security Admin role is enforced on the policy CRUD endpoints (see Section 10.1 / 10.5). |
 | — | Token introspection endpoint | Low | Future cross-service auth |
 | — | Three independent services | High | Current monolith split |
 

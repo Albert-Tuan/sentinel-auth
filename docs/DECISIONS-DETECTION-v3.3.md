@@ -431,7 +431,9 @@ Mọi endpoint dành cho giao tiếp **service-to-service** đều:
 | `GET`  | `/api/v1/soc/dashboard` | ~~IMPLEMENTATION PENDING~~ *(APPROVED DESIGN — not in current prototype)* |
 | `GET`  | `/api/v1/login-attempts` | Tra cứu lịch sử đăng nhập (UC-DE-14) |
 | `GET`  | `/api/v1/policies` | Danh sách chính sách (UC-DE-15) |
-| `POST` | `/api/v1/policies` | ~~IMPLEMENTATION PENDING~~ *(APPROVED DESIGN — no create endpoint in current prototype)* |
+| `GET`  | `/api/v1/policies/{id}` | Chi tiết một chính sách (phục vụ Edit + optimistic concurrency) — **F-1** |
+| `POST` | `/api/v1/policies` | Tạo chính sách mới (luôn inactive) — **F-1** |
+| `PUT`  | `/api/v1/policies/{id}` | Sửa chính sách **draft** (chưa từng kích hoạt) — **F-1** |
 | `POST` | `/api/v1/policies/{id}/activate` | Kích hoạt chính sách (UC-DE-15) |
 
 > **Bốn hành động bảo vệ** dùng chung cho cả hai endpoint `/actions`:
@@ -447,7 +449,7 @@ Mọi endpoint dành cho giao tiếp **service-to-service** đều:
 | `403 Forbidden` | Đã xác thực nhưng không đủ quyền |
 | `404 Not Found` | Không tìm thấy tài nguyên |
 | `408 Request Timeout` | ML Service vượt quá 5 giây |
-| `409 Conflict` | `event_id` trùng, hoặc cảnh báo đã có người xử lý |
+| `409 Conflict` | `event_id` trùng, cảnh báo đã có người xử lý, `version` chính sách trùng, sửa một policy đã đóng băng, hoặc token concurrency (`expected_updated_at`) đã cũ |
 | `202 Accepted` | Đã nhận, đang xử lý nền |
 | `500 Internal Server Error` | Lỗi không mong muốn |
 
@@ -480,6 +482,105 @@ CREATE TABLE IF NOT EXISTS policies (
 - ERD v3.3 mô tả khớp
 - Tách `weights` / `thresholds` thành cột riêng (như schema v2 trong `app/models.py`)
   là dấu hiệu chưa hoàn thiện thiết kế → đã gộp vào `config`
+
+---
+
+## 6.1 Vòng đời Policy Create/Edit (F-1) — CHUẨN
+
+> Bổ sung 2026-11-07, trên feature branch `feature/f1-policy-crud`.
+> Xem thêm `docs/DECISIONS-SYSTEM-v3.3.md` §10.5.
+
+### 6.1.1. Điểm bất biến của `version`
+
+`version` là **bất biến kể từ lúc tạo**. Không sửa được sau khi tạo, kể cả khi
+policy còn là draft. Muốn đổi `rules`/`config` của một policy đã triển khai thì
+phải **tạo một `version` mới** rồi kích hoạt nó.
+
+Lý do: `risk_assessments` và `login_attempts` tham chiếu tới policy đang chạy tại
+thời điểm đó. Nếu `version` hay `rules` của policy đã kích hoạt bị sửa, lịch sử
+chấm điểm sẽ không còn tái lập được. Vì vậy:
+
+- `version` là **UNIQUE** ở mức database (`policies.version UNIQUE`).
+- Trường `version` bị **từ chối** trong body của `PUT /api/v1/policies/{id}`.
+
+### 6.1.2. Chỉ draft mới sửa được
+
+Một policy chỉ sửa được khi **cả hai** điều kiện đúng:
+
+- `is_active IS FALSE`
+- `activated_at IS NULL`
+
+`activated_at` **không bao giờ** được xoá khi deactivate. Vì vậy policy đã từng
+kích hoạt một lần thì **đóng băng vĩnh viễn**, kể cả khi hiện không active.
+Sửa policy đã kích hoạt → `409 Conflict` ("Policy is immutable").
+
+Cách đúng để thay đổi chính sách đang chạy:
+`POST /api/v1/policies` (bản mới, inactive) → `PUT` (nếu cần chỉnh) →
+`POST /api/v1/policies/{id}/activate`.
+
+### 6.1.3. Chống lost update
+
+`PUT /api/v1/policies/{id}` bắt buộc có `expected_updated_at` (giá trị
+`updated_at` mà client vừa đọc). Server khoá dòng bằng `SELECT ... FOR UPDATE`
+và so khớp `updated_at`; lệch → `409 Conflict` ("Policy was modified by someone
+else"). Người ghi thứ hai trong một cặp request đồng thời luôn nhận `409`.
+
+**Thứ tự kiểm tra quan trọng:** kiểm tra bất biến chạy **trước** kiểm tra
+concurrency, để policy đã đóng băng luôn trả `409 "Policy is immutable"` thay vì
+một lỗi concurrency gây hiểu lầm.
+
+### 6.1.4. Validate bằng đúng bộ kiểm tra chuẩn
+
+Endpoint create/edit **dùng lại** `validate_rule()` và `resolve_config()` của
+Detection engine. Không có bộ kiểm tra riêng. Nhờ vậy:
+
+- Chỉ nhận đúng **6 `field`** và **6 `operator`** đã phê duyệt (mục 1.3, 1.4).
+- Weight/threshold/config sai bị từ chối trước khi ghi vào database.
+- Lỗi trả `400` với `{"detail": {"message": "Policy is invalid", "problems": [...]}}`
+  — **cùng contract lỗi** với endpoint activate.
+
+### 6.1.5. Trường do server quản lý
+
+Client **không** được tự đặt: `is_active`, `created_by`, `created_at`,
+`updated_at`, `activated_at`, `deactivated_at`.
+
+- Create luôn tạo policy **inactive** (`is_active=False`, `activated_at=NULL`).
+- `created_by` lấy từ session (`ctx.user.id`), lưu dưới dạng tham chiếu UUID
+  **trong Detection context** — không ghi sang core-db hay ml-db.
+- Client cố tình gửi trường server-owned → `400` với thông báo rõ ràng.
+  Client gửi trường lạ (typo) → `422` (do `extra="forbid"`).
+
+### 6.1.6. Không đổi schema
+
+F-1 **không** đổi schema. Ràng buộc single-active-policy ở mức database và
+constraint `UNIQUE` của `version` đã tồn tại sẵn nên được tái sử dụng nguyên vẹn.
+Các endpoint mới chỉ dùng session của Detection context.
+
+### 6.1.7. Endpoint chi tiết — `GET /api/v1/policies/{id}`
+
+> Bổ sung 2026-11-07 (F-1). Xem thêm `docs/DECISIONS-SYSTEM-v3.3.md` §10.5.6.
+
+Endpoint chi tiết là **endpoint phục vụ cho endpoint edit**. Nó **không** mở
+rộng vòng đời của policy.
+
+- **Vì sao cần.** Endpoint list (`GET /api/v1/policies`) chỉ trả về **bản tóm
+  tắt** — cố tình không trả `rules`/`config`; endpoint create/edit chỉ trả đầy đủ
+  cho bên ghi. Một client muốn sửa policy thì **không có cách nào đọc trạng
+  thái hiện tại**, và do đó cũng **không lấy được** token `updated_at` mà
+  endpoint edit đòi hỏi. Endpoint chi tiết lấp khoảng trống đó.
+- **Trả về.** Dùng lại đúng model `PolicyDetail` — cùng payload với create/edit:
+  `id`, `version`, `name`, `description`, `rules`, `config`, `is_active`,
+  `created_by`, `created_at`, `updated_at`, `activated_at`, `deactivated_at`.
+- **Phân quyền.** `SECURITY_ADMIN` và `SECURITY_MANAGER` (cùng ma trận với
+  endpoint list). `SOC_ANALYST` và `USER` → `403`; chưa xác thực → `401`;
+  `policy_id` không tồn tại → `404`.
+- **Độ chính xác timestamp.** `updated_at` được trả về với **đủ micro giây**, để
+  client gửi thẳng lại làm `expected_updated_at` mà không bị mất độ chính xác.
+  Một token bị cắt bớt sẽ bị từ chối ở endpoint edit với một lý do mà client
+  không nhìn thấy.
+- **Không làm gì thêm.** Không ghi, không kích hoạt, không thay đổi cách chấm
+  điểm, không đụng tới `risk_assessments` / `login_attempts` đã có. Đọc một
+  policy đã từng kích hoạt chỉ là đọc một dòng đã đóng băng.
 
 ---
 
