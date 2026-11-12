@@ -470,3 +470,319 @@ jobs:
             exit 1
           fi
           echo "the disposable databases were dropped"
+
+  # ---------------------------------------------------------------------------
+  # Frontend — hermetic unit/component pass
+  # ---------------------------------------------------------------------------
+  # This job is deliberately independent of the backend job: it needs no
+  # database, no network and no credential, so a frontend regression is
+  # reported as a frontend regression instead of being buried in a backend
+  # failure.
+  #
+  # The job proves, in this order:
+  #   1. `npm ci`          — the lockfile installs reproducibly
+  #   2. `tsc -b`          — a strict TypeScript check (no emit)
+  #   3. `eslint .`        — lint
+  #   4. `vitest run`      — unit/component tests, hermetic (no backend)
+  #   5. `npm run build`   — the production bundle
+  frontend:
+    name: Frontend (unit & build)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    defaults:
+      run:
+        working-directory: frontend
+
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      # -------------------------------------------------------------------
+      # `npm ci` installs exactly what the lockfile pins — it never resolves
+      # a range, so a drifting dependency cannot enter the build.
+      # -------------------------------------------------------------------
+      - name: Install the frontend dependencies
+        run: npm ci
+
+      # -------------------------------------------------------------------
+      # The strict typecheck.  `tsc -b` uses the project references
+      # (tsconfig.app.json + tsconfig.node.json), so BOTH the application
+      # and the build configuration are checked.
+      # -------------------------------------------------------------------
+      - name: Type-check (strict TypeScript)
+        run: npx tsc -b --force
+
+      - name: Lint
+        run: npm run lint
+
+      # -------------------------------------------------------------------
+      # The hermetic unit/component suite.  `vitest.config.ts` excludes
+      # `src/test/integration/**`, so nothing here talks to a backend.
+      # -------------------------------------------------------------------
+      - name: Run the unit/component tests
+        run: npm run test
+
+      # -------------------------------------------------------------------
+      # The production build.  `npm run build` runs `tsc -b` itself, so the
+      # bundle can only be produced from a type-correct tree.
+      # -------------------------------------------------------------------
+      - name: Build the production bundle
+        run: npm run build
+
+      - name: Publish the build summary
+        if: always()
+        run: |
+          set -uo pipefail
+          {
+            echo "### Frontend build summary"
+            echo
+            echo "- node: $(node --version)"
+            echo "- npm: $(npm --version)"
+            if [ -d dist ]; then
+              echo "- bundle:"
+              du -sh dist
+              ls -1 dist/assets 2>/dev/null | sed 's/^/  - /' || true
+            else
+              echo "- no \`dist/\` directory was produced"
+            fi
+          } >> "${GITHUB_STEP_SUMMARY}" 2>&1 || true
+
+  # ---------------------------------------------------------------------------
+  # Frontend — real HTTP integration pass
+  # ---------------------------------------------------------------------------
+  # This job runs the frontend's REAL integration suite: the tests under
+  # `frontend/src/test/integration` talk to a live FastAPI server over real
+  # HTTP, with no mock and no MSW.  They exercise the real axios client
+  # (including the refresh interceptor), the real in-memory token store and
+  # the real auth state machine.
+  #
+  # It is a SEPARATE job on purpose: the unit/component suite above must
+  # never be presented as integration coverage.  The evidence this job
+  # produces is a real server, a real database and a real SMTP hop.
+  frontend-integration:
+    name: Frontend (real HTTP integration)
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    env:
+      TZ: UTC
+      PYTHONHASHSEED: "0"
+
+      # --- Disposable PostgreSQL ------------------------------------------
+      POSTGRES_HOST: 127.0.0.1
+      POSTGRES_PORT: "5432"
+      POSTGRES_USER: sentinel
+      POSTGRES_PASSWORD: sentinel_ci_disposable
+      PGPASSWORD: sentinel_ci_disposable
+
+      CORE_DB: sentinel_core_test
+      DETECTION_DB: sentinel_detection_test
+      ML_DB: sentinel_ml_test
+      POSTGRES_DB: sentinel_legacy_test
+
+      # --- The live backend -----------------------------------------------
+      M12_API_ORIGIN: http://127.0.0.1:8000
+      M12_API_ROOT: http://127.0.0.1:8000/api/v1
+      M12_OTP_LOG: /tmp/m12_otp_capture.log
+      # The integration suite talks to the database directly for its
+      # rate-limiter housekeeping.  This URL makes the `psql` client run
+      # directly instead of going through a container runtime.
+      M12_DATABASE_URL: postgresql://sentinel:sentinel_ci_disposable@127.0.0.1:5432/sentinel_core_test
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: sentinel
+          POSTGRES_PASSWORD: sentinel_ci_disposable
+          POSTGRES_DB: postgres
+          TZ: UTC
+          POSTGRES_INITDB_ARGS: "--auth-host=scram-sha-256 --auth-local=scram-sha-256"
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U sentinel"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      - name: Install the dependencies
+        run: |
+          set -euo pipefail
+          npm --prefix frontend ci
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+
+      # -------------------------------------------------------------------
+      # The throwaway internal secret.  It is generated inside the runner,
+      # masked, and never stored in GitHub.
+      # -------------------------------------------------------------------
+      - name: Generate the test-only internal secret and the fixture passwords
+        run: |
+          set -euo pipefail
+          secret="$(python -c 'import secrets; print(secrets.token_urlsafe(32))')"
+          echo "::add-mask::${secret}"
+          {
+            echo "CI_INTERNAL_SECRET=${secret}"
+            echo "M12_USER_PASSWORD=$(python -c 'import secrets; print(secrets.token_urlsafe(18))')"
+            echo "M12_ADMIN_PASSWORD=$(python -c 'import secrets; print(secrets.token_urlsafe(18))')"
+            echo "M12_MANAGER_PASSWORD=$(python -c 'import secrets; print(secrets.token_urlsafe(18))')"
+            echo "M12_PLAIN_PASSWORD=$(python -c 'import secrets; print(secrets.token_urlsafe(18))')"
+          } >> "${GITHUB_ENV}"
+
+      - name: Provision the disposable databases
+        run: bash scripts/ci_bootstrap_postgres.sh
+
+      - name: Seed the frontend integration fixtures
+        env:
+          CORE_DATABASE_URL: postgresql://sentinel:sentinel_ci_disposable@127.0.0.1:5432/sentinel_core_test
+          M12_USER_PASSWORD: ${{ env.M12_USER_PASSWORD }}
+          M12_ADMIN_PASSWORD: ${{ env.M12_ADMIN_PASSWORD }}
+          M12_MANAGER_PASSWORD: ${{ env.M12_MANAGER_PASSWORD }}
+          M12_PLAIN_PASSWORD: ${{ env.M12_PLAIN_PASSWORD }}
+        run: python scripts/ci_seed_frontend_users.py
+
+      # -------------------------------------------------------------------
+      # The SMTP sink.  The MFA handshake has to deliver a REAL OTP through
+      # a real SMTP hop — the suite reads it back from the capture file.
+      # -------------------------------------------------------------------
+      - name: Start the SMTP capture sink
+        run: |
+          set -euo pipefail
+          nohup python scripts/ci_smtp_sink.py \
+            --host 127.0.0.1 --port 1025 --log "${M12_OTP_LOG}" \
+            > /tmp/smtp_sink.log 2>&1 &
+          echo "SMTP_SINK_PID=$!" >> "${GITHUB_ENV}"
+          for attempt in $(seq 1 30); do
+            if python -c "import socket,sys; s=socket.socket(); s.settimeout(1); s.connect(('127.0.0.1',1025)); s.close()"; then
+              echo "the SMTP sink is accepting connections"
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "the SMTP sink did not start" >&2
+          cat /tmp/smtp_sink.log >&2 || true
+          exit 1
+
+      # -------------------------------------------------------------------
+      # The live backend.  It runs against the SAME disposable databases the
+      # suite inspects, and it is the real application — the real router,
+      # the real RBAC layer, the real token rotation.
+      #
+      # `DETECTION_URL` is empty on purpose: the Detection Engine is a
+      # separate bounded context with its own CI coverage, and the frontend
+      # contract under test is the Core/Auth API.  With Detection absent,
+      # Core takes its documented fail-open path.
+      # -------------------------------------------------------------------
+      - name: Start the backend
+        env:
+          INTERNAL_SECRET: ${{ env.CI_INTERNAL_SECRET }}
+        run: |
+          set -euo pipefail
+          export CORE_DATABASE_URL="postgresql://sentinel:sentinel_ci_disposable@127.0.0.1:5432/sentinel_core_test"
+          export DETECTION_DATABASE_URL="postgresql://sentinel:sentinel_ci_disposable@127.0.0.1:5432/sentinel_detection_test"
+          export ML_DATABASE_URL="postgresql://sentinel:sentinel_ci_disposable@127.0.0.1:5432/sentinel_ml_test"
+          export DETECTION_URL=""
+          export RUN_PRE_TOKEN_CHECK="0"
+          export MFA_SMTP_HOST="127.0.0.1"
+          export MFA_SMTP_PORT="1025"
+          export CORS_ALLOWED_ORIGINS="http://localhost:5173,http://127.0.0.1:5173,http://localhost:8000,http://127.0.0.1:8000"
+          nohup python -m uvicorn app.main:app \
+            --host 127.0.0.1 --port 8000 --log-level warning \
+            > /tmp/backend.log 2>&1 &
+          echo "BACKEND_PID=$!" >> "${GITHUB_ENV}"
+          for attempt in $(seq 1 60); do
+            if curl -fsS http://127.0.0.1:8000/health > /dev/null 2>&1; then
+              echo "the backend is answering on 127.0.0.1:8000"
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "the backend did not start" >&2
+          cat /tmp/backend.log >&2 || true
+          exit 1
+
+      # -------------------------------------------------------------------
+      # The real HTTP integration suite.
+      # -------------------------------------------------------------------
+      - name: Run the real HTTP integration tests
+        working-directory: frontend
+        env:
+          M12_PASSWORD: ${{ env.M12_USER_PASSWORD }}
+          M12_MFA_PASSWORD: ${{ env.M12_ADMIN_PASSWORD }}
+        run: npm run test:integration
+
+      - name: Publish the integration summary
+        if: always()
+        run: |
+          set -uo pipefail
+          {
+            echo "### Frontend real HTTP integration"
+            echo
+            echo "- API origin: ${M12_API_ORIGIN}"
+            echo "- OTP capture file: ${M12_OTP_LOG}"
+            echo
+            if [ -f "${M12_OTP_LOG}" ]; then
+              echo "captured OTP messages: $(grep -c '^TO=' "${M12_OTP_LOG}" || echo 0)"
+            else
+              echo "no OTP capture file was produced"
+            fi
+          } >> "${GITHUB_STEP_SUMMARY}" 2>&1 || true
+
+      # -------------------------------------------------------------------
+      # Failure diagnostics — environment only, never a credential.
+      # -------------------------------------------------------------------
+      - name: Collect failure diagnostics
+        if: failure()
+        run: |
+          set -uo pipefail
+          {
+            echo "### Frontend integration diagnostics"
+            echo
+            echo "#### backend log"
+            tail -100 /tmp/backend.log 2>/dev/null || true
+            echo
+            echo "#### SMTP sink log"
+            tail -50 /tmp/smtp_sink.log 2>/dev/null || true
+            echo
+            echo "#### node"
+            node --version
+          } >> "${GITHUB_STEP_SUMMARY}" 2>&1 || true
+
+      - name: Stop the backend and the SMTP sink
+        if: always()
+        run: |
+          set -uo pipefail
+          if [ -n "${BACKEND_PID:-}" ]; then
+            kill "${BACKEND_PID}" 2>/dev/null || true
+          fi
+          if [ -n "${SMTP_SINK_PID:-}" ]; then
+            kill "${SMTP_SINK_PID}" 2>/dev/null || true
+          fi
+          echo "the backend and the SMTP sink were stopped"
