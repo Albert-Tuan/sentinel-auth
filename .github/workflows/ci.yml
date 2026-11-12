@@ -661,7 +661,7 @@ jobs:
 
       - name: Seed the frontend integration fixtures
         env:
-          CORE_DATABASE_URL: postgresql://sentinel:sentinel_ci_disposable@127.0.0.1:5432/sentinel_core_test
+          CORE_DATABASE_URL: postgresql+psycopg2://sentinel:sentinel_ci_disposable@127.0.0.1:5432/sentinel_core_test
           M12_USER_PASSWORD: ${{ env.M12_USER_PASSWORD }}
           M12_ADMIN_PASSWORD: ${{ env.M12_ADMIN_PASSWORD }}
           M12_MANAGER_PASSWORD: ${{ env.M12_MANAGER_PASSWORD }}
@@ -700,14 +700,65 @@ jobs:
       # contract under test is the Core/Auth API.  With Detection absent,
       # Core takes its documented fail-open path.
       # -------------------------------------------------------------------
+      - name: Verify the PostgreSQL driver returns the expected INET type
+        run: |
+          set -euo pipefail
+          # The backend's response models declare the ``INET`` columns as
+          # strings.  psycopg2 returns ``str``; psycopg3 returns
+          # ``ipaddress.IPv4Address``.  A driver mismatch therefore breaks
+          # the endpoints that serialise those columns — ``GET /devices``
+          # answers 500 — long after the backend has started successfully.
+          #
+          # This step asserts the contract at the database boundary, so a
+          # driver change fails here with a clear message instead of
+          # surfacing as an opaque 500 inside the test suite.
+          python - <<'PY'
+          import sys
+          from sqlalchemy import create_engine, text
+
+          url = (
+              "postgresql+psycopg2://sentinel:sentinel_ci_disposable"
+              "@127.0.0.1:5432/sentinel_core_test"
+          )
+          engine = create_engine(url)
+          with engine.connect() as connection:
+              value = connection.execute(
+                  text("SELECT '127.0.0.1'::inet")
+              ).scalar()
+          engine.dispose()
+
+          if not isinstance(value, str):
+              print(
+                  f"ERROR: the INET column came back as {type(value).__name__}, "
+                  f"not str. The response models require a string.",
+                  file=sys.stderr,
+              )
+              sys.exit(1)
+          print("OK: the INET column is returned as a string")
+          PY
+
       - name: Start the backend
         env:
           INTERNAL_SECRET: ${{ env.CI_INTERNAL_SECRET }}
         run: |
           set -euo pipefail
-          export CORE_DATABASE_URL="postgresql://sentinel:sentinel_ci_disposable@127.0.0.1:5432/sentinel_core_test"
-          export DETECTION_DATABASE_URL="postgresql://sentinel:sentinel_ci_disposable@127.0.0.1:5432/sentinel_detection_test"
-          export ML_DATABASE_URL="postgresql://sentinel:sentinel_ci_disposable@127.0.0.1:5432/sentinel_ml_test"
+          # The driver is pinned explicitly to psycopg2.
+          #
+          # SQLAlchemy 2.1 changed the default driver of a bare
+          # ``postgresql://`` URL from psycopg2 to psycopg3, and the two
+          # drivers do not return the same Python types for an ``INET``
+          # column: psycopg2 yields ``str``, psycopg3 yields
+          # ``ipaddress.IPv4Address``.  ``GET /devices`` declares
+          # ``last_ip`` as a string, so under psycopg3 the response model
+          # rejects the row and the endpoint answers 500.
+          #
+          # The backend's own PostgreSQL test modules already pin
+          # ``postgresql+psycopg2://`` for exactly this reason; this job
+          # uses the same convention so the deployed application and the
+          # test suite speak the same dialect.
+          export CORE_DATABASE_URL="postgresql+psycopg2://sentinel:sentinel_ci_disposable@127.0.0.1:5432/sentinel_core_test"
+          export DETECTION_DATABASE_URL="postgresql+psycopg2://sentinel:sentinel_ci_disposable@127.0.0.1:5432/sentinel_detection_test"
+          export ML_DATABASE_URL="postgresql+psycopg2://sentinel:sentinel_ci_disposable@127.0.0.1:5432/sentinel_ml_test"
           export DETECTION_URL=""
           export RUN_PRE_TOKEN_CHECK="0"
           export MFA_SMTP_HOST="127.0.0.1"
