@@ -22,7 +22,7 @@ export function MobileNav() {
   return (
     <nav
       aria-label="Điều hướng chính (mobile)"
-      className="md:hidden border-b border-slate-200 bg-slate-50"
+      className="border-b border-border bg-panel md:hidden"
     >
       <ul className="flex gap-1 overflow-x-auto p-2">
         {items.map((item) => (
@@ -31,10 +31,10 @@ export function MobileNav() {
               to={item.path}
               className={({ isActive }) =>
                 cn(
-                  'block rounded-md px-3 py-2 text-sm font-medium',
+                  'label-ops block border-l-2 px-3 py-2',
                   isActive
-                    ? 'bg-indigo-50 text-indigo-700'
-                    : 'text-slate-600 hover:bg-slate-100',
+                    ? 'border-l-primary bg-surface-raised text-text'
+                    : 'border-l-transparent text-text-muted hover:text-text',
                 )
               }
             >

@@ -121,6 +121,16 @@ export const SECTIONS: SectionPolicy[] = [
     landingPriority: 20,
   },
   {
+    id: 'login-history',
+    prefixes: [PATHS.loginHistory],
+    routes: [{ path: PATHS.loginHistory, page: 'login-history' }],
+    access: 'roles',
+    roles: [UserRole.SOC_ANALYST, UserRole.SECURITY_MANAGER],
+    nav: [{ label: 'Lịch sử đăng nhập', path: PATHS.loginHistory }],
+    landing: PATHS.loginHistory,
+    landingPriority: 18,
+  },
+  {
     id: 'policies',
     prefixes: ['/policies'],
     routes: [
