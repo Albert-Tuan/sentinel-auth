@@ -12,7 +12,7 @@ import { Topbar } from '@/app/layout/Topbar'
  */
 export function AppShell() {
   return (
-    <div className="flex min-h-screen bg-slate-100">
+    <div className="flex min-h-screen bg-surface">
       <Sidebar />
       <div className="flex min-w-0 flex-1 flex-col">
         <Topbar />

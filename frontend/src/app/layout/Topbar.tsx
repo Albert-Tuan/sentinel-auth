@@ -16,13 +16,13 @@ export function Topbar() {
   }
 
   return (
-    <header className="flex items-center justify-between border-b border-slate-200 bg-white px-4 py-3">
+    <header className="flex items-center justify-between border-b border-border bg-panel px-4 py-3">
       <div className="min-w-0">
-        <p className="truncate text-sm font-semibold text-slate-900">
+        <p className="truncate text-sm font-semibold text-text">
           {auth.user?.username ?? '—'}
         </p>
         {auth.roles.length > 0 && (
-          <p className="truncate text-xs text-slate-500">
+          <p className="label-ops truncate text-text-muted">
             {auth.roles.join(' · ')}
           </p>
         )}

@@ -669,6 +669,21 @@ jobs:
         run: python scripts/ci_seed_frontend_users.py
 
       # -------------------------------------------------------------------
+      # The SOC alert fixtures (Stage 4).
+      #
+      # They live in the DETECTION database, because that is where the
+      # alerts, the login attempts, the risk assessments, the detection
+      # logs and the timeline live.  The fixture set deliberately covers
+      # the three states the frontend must render: a fully scored alert,
+      # a rule-only fallback (a NULL ``ml_score``) and a low-risk alert
+      # that is already acknowledged.
+      # -------------------------------------------------------------------
+      - name: Seed the SOC alert fixtures
+        env:
+          DETECTION_DATABASE_URL: postgresql+psycopg2://sentinel:sentinel_ci_disposable@127.0.0.1:5432/sentinel_detection_test
+        run: python scripts/ci_seed_frontend_alerts.py
+
+      # -------------------------------------------------------------------
       # The SMTP sink.  The MFA handshake has to deliver a REAL OTP through
       # a real SMTP hop — the suite reads it back from the capture file.
       # -------------------------------------------------------------------
@@ -787,6 +802,12 @@ jobs:
         env:
           M12_PASSWORD: ${{ env.M12_USER_PASSWORD }}
           M12_MFA_PASSWORD: ${{ env.M12_ADMIN_PASSWORD }}
+          # The Stage 4 alert suite verifies the RBAC contract with the
+          # real roles: an analyst and a manager are allowed, an admin
+          # and a plain user are denied.
+          M12_MANAGER_PASSWORD: ${{ env.M12_MANAGER_PASSWORD }}
+          M12_ADMIN_PASSWORD: ${{ env.M12_ADMIN_PASSWORD }}
+          M12_PLAIN_PASSWORD: ${{ env.M12_PLAIN_PASSWORD }}
         run: npm run test:integration
 
       - name: Publish the integration summary

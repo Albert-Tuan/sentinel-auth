@@ -33,13 +33,13 @@ export function MfaVerifyPage() {
   }
 
   return (
-    <main className="flex min-h-screen items-center justify-center bg-slate-100 px-4">
-      <div className="w-full max-w-sm rounded-lg border border-slate-200 bg-white p-8 shadow-sm">
+    <main className="flex min-h-screen items-center justify-center bg-surface px-4">
+      <div className="w-full max-w-sm border border-border bg-surface-raised p-8">
         <header className="mb-6">
-          <h1 className="text-xl font-semibold text-slate-900">
+          <h1 className="page-title text-text">
             Xác thực hai yếu tố
           </h1>
-          <p className="mt-1 text-sm text-slate-500">
+          <p className="mt-1 text-sm text-text-muted">
             Tài khoản của bạn yêu cầu mã xác thực bổ sung trước khi đăng nhập.
           </p>
         </header>

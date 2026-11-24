@@ -32,9 +32,9 @@ export function Pagination({
   return (
     <nav
       aria-label="Phân trang"
-      className="flex flex-wrap items-center justify-between gap-2 text-sm text-slate-600"
+      className="flex flex-wrap items-center justify-between gap-2 text-sm text-text-muted"
     >
-      <p>
+      <p className="telemetry">
         {total === 0
           ? 'Không có bản ghi'
           : `Hiển thị ${from}–${to} trên ${total} bản ghi`}
@@ -47,7 +47,7 @@ export function Pagination({
         >
           Trước
         </Button>
-        <span className="text-xs">
+        <span className="telemetry text-xs">
           Trang {page} / {lastPage}
         </span>
         <Button

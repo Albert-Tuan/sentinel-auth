@@ -206,13 +206,13 @@ export function TrustedDeviceLoginPage() {
   }
 
   return (
-    <main className="flex min-h-screen items-center justify-center bg-slate-100 px-4">
-      <div className="w-full max-w-sm rounded-lg border border-slate-200 bg-white p-8 shadow-sm">
+    <main className="flex min-h-screen items-center justify-center bg-surface px-4">
+      <div className="w-full max-w-sm rounded-lg border border-border bg-surface-raised p-8">
         <header className="mb-6">
-          <h1 className="text-xl font-semibold text-slate-900">
+          <h1 className="text-xl font-semibold text-text">
             Đăng nhập bằng thiết bị tin cậy
           </h1>
-          <p className="mt-1 text-sm text-slate-500">
+          <p className="mt-1 text-sm text-text-muted">
             Xác nhận thiết bị này từ một thiết bị đã đăng nhập.
           </p>
         </header>
@@ -255,7 +255,7 @@ export function TrustedDeviceLoginPage() {
         {phase.kind === 'pending' && (
           <div className="flex flex-col gap-4">
             <Spinner label="Đang chờ thiết bị đã đăng nhập xác nhận..." />
-            <p className="text-sm text-slate-500">
+            <p className="text-sm text-text-muted">
               Mở ứng dụng trên một thiết bị đã đăng nhập và phê duyệt yêu
               cầu này. Yêu cầu hết hạn lúc{' '}
               {new Date(phase.expiresAt).toLocaleTimeString('vi-VN')}.

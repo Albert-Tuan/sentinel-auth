@@ -17,19 +17,20 @@ export function Sidebar() {
   return (
     <nav
       aria-label="Điều hướng chính"
-      className="hidden w-56 shrink-0 border-r border-slate-200 bg-slate-50 p-3 md:block"
+      className="hidden w-60 shrink-0 border-r border-border bg-panel p-3 md:block"
     >
-      <ul className="flex flex-col gap-1">
+      <p className="heading-ops px-3 pb-3 pt-1 text-text">Sentinel Auth</p>
+      <ul className="flex flex-col">
         {items.map((item) => (
           <li key={item.path}>
             <NavLink
               to={item.path}
               className={({ isActive }) =>
                 cn(
-                  'block rounded-md px-3 py-2 text-sm font-medium',
+                  'label-ops block border-l-2 px-3 py-2',
                   isActive
-                    ? 'bg-indigo-50 text-indigo-700'
-                    : 'text-slate-600 hover:bg-slate-100',
+                    ? 'border-l-primary bg-surface-raised text-text'
+                    : 'border-l-transparent text-text-muted hover:bg-surface-raised hover:text-text',
                 )
               }
             >

@@ -31,6 +31,18 @@ import { SessionsPage } from '@/features/sessions/pages/SessionsPage'
 import { TrustedDevicesPage } from '@/features/devices/pages/TrustedDevicesPage'
 import { TrustedDeviceLoginPage } from '@/features/devices/pages/TrustedDeviceLoginPage'
 import { ProfilePage } from '@/features/profile/pages/ProfilePage'
+import { AlertQueuePage } from '@/features/alerts/pages/AlertQueuePage'
+import { AlertDetailPage } from '@/features/alerts/pages/AlertDetailPage'
+import { AuditLogsPage } from '@/features/admin/pages/AuditLogsPage'
+import { LoginHistoryPage } from '@/features/login-history/pages/LoginHistoryPage'
+import { UserManagementPage } from '@/features/admin/pages/UserManagementPage'
+import { PolicyListPage } from '@/features/policies/pages/PolicyListPage'
+import { PolicyDetailPage } from '@/features/policies/pages/PolicyDetailPage'
+import { ManagerDashboardPage } from '@/features/manager/pages/ManagerDashboardPage'
+import { ManagerTrendsPage } from '@/features/manager/pages/ManagerTrendsPage'
+import { ManagerAlertsPage } from '@/features/manager/pages/ManagerAlertsPage'
+import { ManagerSocKpiPage } from '@/features/manager/pages/ManagerSocKpiPage'
+import { ManagerMlStatsPage } from '@/features/manager/pages/ManagerMlStatsPage'
 
 export type PageFactory = (key: string) => React.ReactNode
 
@@ -47,6 +59,18 @@ const IMPLEMENTED_PAGES: Record<string, React.ReactNode> = {
   sessions: <SessionsPage />,
   devices: <TrustedDevicesPage />,
   profile: <ProfilePage />,
+  alerts: <AlertQueuePage />,
+  'alert-detail': <AlertDetailPage />,
+  'login-history': <LoginHistoryPage />,
+  'admin-users': <UserManagementPage />,
+  'audit-logs': <AuditLogsPage />,
+  policies: <PolicyListPage />,
+  'policy-detail': <PolicyDetailPage />,
+  'manager-dashboard': <ManagerDashboardPage />,
+  'manager-trends': <ManagerTrendsPage />,
+  'manager-alerts': <ManagerAlertsPage />,
+  'manager-soc-kpi': <ManagerSocKpiPage />,
+  'manager-ml-stats': <ManagerMlStatsPage />,
 }
 
 /**

@@ -10,6 +10,14 @@ export interface ConfirmDialogProps {
   /** A destructive action asks the user to confirm the consequence. */
   destructive?: boolean
   busy?: boolean
+  /**
+   * Disables the confirm button.
+   *
+   * Used when the confirmation carries a field that must be valid first —
+   * for example an analyst UUID. The dialog then cannot be confirmed with
+   * a value the backend would reject.
+   */
+  confirmDisabled?: boolean
   onConfirm: () => void
   onCancel: () => void
 }
@@ -20,6 +28,10 @@ export interface ConfirmDialogProps {
  * Used for irreversible actions ("untrust all devices", "revoke session",
  * "logout everywhere"). The confirm button is disabled while the action is
  * in flight so a double click cannot fire two mutations.
+ *
+ * The design system drops an OPAQUE 85% `#050811` curtain over the lower
+ * views — never an aesthetic blur — and gives the drawer a 1px outline
+ * that is cyan for a normal action and red for a destructive one.
  *
  * The dialog traps focus loosely: Escape cancels, and the confirm button
  * takes focus when the dialog opens.
@@ -32,6 +44,7 @@ export function ConfirmDialog({
   cancelLabel = 'Hủy',
   destructive = false,
   busy = false,
+  confirmDisabled = false,
   onConfirm,
   onCancel,
 }: ConfirmDialogProps) {
@@ -55,7 +68,7 @@ export function ConfirmDialog({
 
   return (
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/40 p-4"
+      className="fixed inset-0 z-50 flex items-center justify-center bg-[#050811]/85 p-4"
       role="presentation"
       onClick={() => {
         if (!busy) onCancel()
@@ -65,16 +78,18 @@ export function ConfirmDialog({
         role="dialog"
         aria-modal="true"
         aria-labelledby="confirm-dialog-title"
-        className="w-full max-w-md rounded-lg bg-white p-5 shadow-xl"
+        className={`w-full max-w-md border bg-panel p-5 ${
+          destructive ? 'border-danger' : 'border-secondary'
+        }`}
         onClick={(event) => event.stopPropagation()}
       >
         <h2
           id="confirm-dialog-title"
-          className="text-base font-semibold text-slate-900"
+          className="heading-ops text-text"
         >
           {title}
         </h2>
-        <div className="mt-2 text-sm text-slate-600">{message}</div>
+        <div className="mt-2 text-sm text-text-muted">{message}</div>
         <div className="mt-5 flex justify-end gap-2">
           <Button variant="secondary" onClick={onCancel} disabled={busy}>
             {cancelLabel}
@@ -84,6 +99,7 @@ export function ConfirmDialog({
             variant={destructive ? 'danger' : 'primary'}
             onClick={onConfirm}
             loading={busy}
+            disabled={confirmDisabled}
           >
             {confirmLabel}
           </Button>

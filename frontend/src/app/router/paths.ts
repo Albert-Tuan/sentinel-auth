@@ -18,6 +18,7 @@ export const PATHS = {
   home: '/',
 
   alerts: '/alerts',
+  loginHistory: '/login-history',
   policies: '/policies',
 
   adminUsers: '/admin/users',

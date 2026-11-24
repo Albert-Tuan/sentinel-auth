@@ -63,6 +63,24 @@ interface RetryableRequestConfig extends InternalAxiosRequestConfig {
   _retry?: boolean
   /** Set to skip the refresh path entirely for a specific request. */
   _skipRefresh?: boolean
+  /**
+   * The access token this request was sent with.
+   *
+   * It is the evidence that decides whether a 401 needs a refresh at all:
+   * if the store already holds a DIFFERENT token, another flow has
+   * refreshed the session in the meantime and this request only has to
+   * be replayed with the new token.
+   */
+  _sentAccessToken?: string | null
+  /**
+   * The session epoch at the moment this request went out.
+   *
+   * Together with `_sentAccessToken` it distinguishes "the session was
+   * refreshed under me" (same epoch, different token) from "the session
+   * was replaced" (different epoch) - only the first may be replayed with
+   * the token the store holds now.
+   */
+  _sentEpoch?: number
 }
 
 /**
@@ -265,6 +283,14 @@ apiClient.interceptors.request.use((config) => {
   if (token && !config.headers.get('Authorization')) {
     config.headers.set('Authorization', `Bearer ${token}`)
   }
+  // Record the token this request actually went out with.  The response
+  // interceptor compares it against the store to detect that another flow
+  // already refreshed the session.
+  const retryable = config as RetryableRequestConfig
+  if (retryable._sentAccessToken === undefined) {
+    retryable._sentAccessToken = token
+    retryable._sentEpoch = getEpoch()
+  }
   return config
 })
 
@@ -295,6 +321,63 @@ apiClient.interceptors.response.use(
 
     // Mark before refreshing so the replay can never loop.
     config._retry = true
+
+    // The request belongs to a session that has since been REPLACED.
+    //
+    // The epoch is bumped by every session boundary change (a new login,
+    // a logout), so `_sentEpoch !== getEpoch()` means the request went
+    // out under an OLDER session than the one the store holds now.
+    //
+    // Such a request must not touch the current session AT ALL:
+    //   - it must not replay with the current access token, because that
+    //     would run the old request's body under the new user's identity;
+    //   - it must not refresh, because `performRefresh` reads the CURRENT
+    //     refresh token and would rotate the NEW session.  If that refresh
+    //     then failed, `performRefresh` would clear the session and notify
+    //     the app - logging the new user out over a stale request.
+    //
+    // The request is therefore failed with the 401 it actually received.
+    // The current session is left completely untouched: its tokens, its
+    // expiry state and its React Query cache all survive.
+    if (
+      config._sentEpoch !== undefined &&
+      config._sentEpoch !== getEpoch()
+    ) {
+      throw new ApiError({
+        kind: 'unauthorized',
+        status: 401,
+        userMessage: 'Phiên đăng nhập đã thay đổi. Vui lòng đăng nhập lại.',
+      })
+    }
+
+    // A 401 only means "this request's token is stale".  If the store
+    // already holds a DIFFERENT access token, another flow has refreshed
+    // the session in the meantime and there is nothing left to refresh:
+    // this request only has to be replayed with the token that is now
+    // current.
+    //
+    // Without this check a late-arriving 401 would start a SECOND
+    // refresh: the single-flight mutex is released as soon as the first
+    // refresh settles, so a 401 that reaches the interceptor after that
+    // point would find the mutex free and refresh again.  The second
+    // refresh would read the ALREADY ROTATED refresh token, succeed, and
+    // rotate the token a second time - a race that only shows up when the
+    // 401s arrive far enough apart (a slow runner, a loaded CI machine).
+    //
+    // The epoch guard above has already proved the request belongs to the
+    // CURRENT session, so the token in the store is the token of the
+    // session this request was sent for.
+    const currentAccessToken = getAccessToken()
+    if (
+      config._sentAccessToken !== undefined &&
+      config._sentAccessToken !== null &&
+      currentAccessToken !== null &&
+      currentAccessToken !== config._sentAccessToken
+    ) {
+      config.headers = config.headers ?? ({} as never)
+      config.headers.set('Authorization', `Bearer ${currentAccessToken}`)
+      return await apiClient.request(config)
+    }
 
     try {
       const accessToken = await performRefresh()

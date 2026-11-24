@@ -43,7 +43,7 @@ export function MfaCodeInput({
       {localError && !error && <ErrorState message={localError} />}
 
       <div className="flex flex-col gap-1">
-        <label htmlFor="mfa-code" className="text-sm font-medium text-slate-700">
+        <label htmlFor="mfa-code" className="label-ops text-text-muted">
           Mã xác thực
         </label>
         <input
@@ -56,9 +56,9 @@ export function MfaCodeInput({
           value={code}
           onChange={(event) => setCode(event.target.value.replace(/\D/g, ''))}
           disabled={loading}
-          className="rounded-md border border-slate-300 px-3 py-2 text-center font-mono text-lg tracking-[0.5em] outline-none focus:border-indigo-500 focus:ring-2 focus:ring-indigo-200 disabled:bg-slate-100"
+          className="telemetry border border-border bg-surface-sunken px-3 py-2 text-center text-lg tracking-[0.5em] text-text outline-none focus:border-primary disabled:text-degraded"
         />
-        <p className="text-xs text-slate-500">
+        <p className="text-xs text-text-muted">
           Nhập mã 6 chữ số đã được gửi tới kênh xác thực của bạn.
         </p>
       </div>
