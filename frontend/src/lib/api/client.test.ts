@@ -94,6 +94,110 @@ describe('single-flight refresh', () => {
     expect(getRefreshToken()).toBe('new-refresh')
   })
 
+  it('does NOT refresh again when a late 401 arrives after the first refresh settled', async () => {
+    // Regression test for the M12 CI race.
+    //
+    // The single-flight mutex is released as soon as the first refresh
+    // settles.  A 401 that reaches the interceptor AFTER that point finds
+    // the mutex free and used to start a SECOND refresh.  That second
+    // refresh reads the ALREADY ROTATED refresh token, succeeds and
+    // rotates the token again - so the backend records two refresh
+    // sessions where exactly one was intended.
+    //
+    // The race only shows up when the 401s arrive far enough apart, which
+    // is why it escaped the unit suite (its mock holds the refresh
+    // response open, so every 401 always lands while the refresh is in
+    // flight) and only appeared on a slow CI runner.
+    setSession(FAKE_ACCESS_TOKEN, FAKE_REFRESH_TOKEN)
+
+    let refreshCalls = 0
+    mock.onPost(ENDPOINTS.auth.refresh).reply(async () => {
+      refreshCalls += 1
+      return [
+        200,
+        {
+          access_token: `new-access-${refreshCalls}`,
+          refresh_token: `new-refresh-${refreshCalls}`,
+        },
+      ]
+    })
+
+    // The SECOND request answers 401 only AFTER the first refresh has
+    // settled, so it reaches the interceptor with the mutex already free.
+    // Both requests were sent with the SAME original token.
+    let releaseLateResponse: (() => void) | null = null
+    const lateResponseGate = new Promise<void>((resolve) => {
+      releaseLateResponse = resolve
+    })
+    let callIndex = 0
+    mock.onGet('/alerts').reply(async (config) => {
+      const auth = config.headers?.Authorization as string
+      if (auth?.startsWith('Bearer new-access-')) return [200, { alerts: [] }]
+      callIndex += 1
+      if (callIndex === 1) return [401, { detail: 'expired' }]
+      // The late 401: it waits until the first refresh has finished.
+      await lateResponseGate
+      return [401, { detail: 'expired' }]
+    })
+
+    const first = apiClient.get('/alerts')
+    const late = apiClient.get('/alerts')
+
+    // Let the first request complete its whole 401 -> refresh -> replay
+    // cycle, then release the late 401.
+    await first
+    releaseLateResponse!()
+
+    const results = await Promise.all([first, late])
+
+    expect(refreshCalls).toBe(1)
+    for (const result of results) {
+      expect(result.status).toBe(200)
+    }
+    expect(getAccessToken()).toBe('new-access-1')
+  })
+
+  it('replays a late 401 with the current token instead of refreshing again', async () => {
+    setSession(FAKE_ACCESS_TOKEN, FAKE_REFRESH_TOKEN)
+
+    let refreshCalls = 0
+    mock.onPost(ENDPOINTS.auth.refresh).reply(async () => {
+      refreshCalls += 1
+      return [
+        200,
+        {
+          access_token: `new-access-${refreshCalls}`,
+          refresh_token: `new-refresh-${refreshCalls}`,
+        },
+      ]
+    })
+
+    let releaseLateResponse: (() => void) | null = null
+    const lateResponseGate = new Promise<void>((resolve) => {
+      releaseLateResponse = resolve
+    })
+    let callIndex = 0
+    mock.onGet('/alerts').reply(async (config) => {
+      const auth = config.headers?.Authorization as string
+      if (auth?.startsWith('Bearer new-access-')) return [200, { alerts: [] }]
+      callIndex += 1
+      if (callIndex === 1) return [401, { detail: 'expired' }]
+      await lateResponseGate
+      return [401, { detail: 'expired' }]
+    })
+
+    const first = apiClient.get('/alerts')
+    const late = apiClient.get('/alerts')
+    await first
+    releaseLateResponse!()
+    await late
+
+    // The late 401 found the session already refreshed, so it replayed
+    // with the current token instead of rotating it a second time.
+    expect(refreshCalls).toBe(1)
+    expect(getRefreshToken()).toBe('new-refresh-1')
+  })
+
   it('rotates BOTH tokens on a successful refresh', async () => {
     setSession(FAKE_ACCESS_TOKEN, FAKE_REFRESH_TOKEN)
     mock.onPost(ENDPOINTS.auth.refresh).reply(200, {
