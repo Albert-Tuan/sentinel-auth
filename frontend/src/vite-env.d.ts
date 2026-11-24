@@ -1,5 +1,12 @@
 /// <reference types="vite/client" />
 
+/**
+ * Stylesheet imports are side-effect imports of a non-JS file. Vite
+ * resolves them at build time; TypeScript needs the wildcard module
+ * declaration below to accept them.
+ */
+declare module '*.css'
+
 interface ImportMetaEnv {
   /**
    * The API origin. Empty means "use the Vite dev proxy" (same-origin).

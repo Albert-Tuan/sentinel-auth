@@ -30,7 +30,12 @@ export interface DataTableProps<T> {
 }
 
 /**
- * A responsive data table.
+ * A dense data table.
+ *
+ * The design system calls for a 32px row height, alternating row shading
+ * between the panel and the raised surface, and a 1px hairline baseline
+ * between rows. Column headers are uppercase with wide tracking, and
+ * technical values are tabular-aligned.
  *
  * On small screens the table scrolls horizontally rather than collapsing
  * into stacked cards — the columns are a fixed contract that the backend
@@ -52,32 +57,33 @@ export function DataTable<T>({
   return (
     <div
       className={cn(
-        'overflow-x-auto rounded-md border border-slate-200 bg-white',
+        'overflow-x-auto border border-border bg-surface-raised',
         className,
       )}
     >
       <table className="w-full min-w-full border-collapse text-left text-sm">
         {caption && <caption className="sr-only">{caption}</caption>}
-        <thead className="bg-slate-50">
+        <thead className="bg-panel">
           <tr>
             {columns.map((column) => (
               <th
                 key={column.key}
                 scope="col"
-                className="whitespace-nowrap px-3 py-2 text-xs font-semibold uppercase tracking-wide text-slate-500"
+                className="label-ops whitespace-nowrap border-b border-border px-3 py-2 text-text-muted"
               >
                 {column.header}
               </th>
             ))}
           </tr>
         </thead>
-        <tbody className="divide-y divide-slate-100">
+        <tbody>
           {rows.map((row, index) => (
             <tr
               key={rowKey(row, index)}
               className={cn(
-                'hover:bg-slate-50',
-                onRowClick && 'cursor-pointer',
+                'h-8 border-b border-border last:border-b-0',
+                index % 2 === 1 ? 'bg-panel' : 'bg-surface-raised',
+                onRowClick && 'cursor-pointer hover:bg-surface hover:border-l-2 hover:border-l-primary',
               )}
               onClick={onRowClick ? () => onRowClick(row) : undefined}
               onKeyDown={
@@ -96,7 +102,10 @@ export function DataTable<T>({
               {columns.map((column) => (
                 <td
                   key={column.key}
-                  className={cn('px-3 py-2 text-slate-700', column.className)}
+                  className={cn(
+                    'px-3 py-1.5 align-middle text-text',
+                    column.className,
+                  )}
                 >
                   {column.render(row, index)}
                 </td>

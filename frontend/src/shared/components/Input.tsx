@@ -8,6 +8,14 @@ export interface InputProps extends InputHTMLAttributes<HTMLInputElement> {
   hint?: string
 }
 
+/**
+ * A single-line field.
+ *
+ * The design system puts the label OUTSIDE and ABOVE the control, in
+ * uppercase with wide tracking, and gives the input a recessed surface
+ * (`--color-surface-sunken`) so it reads as a hole in the panel rather
+ * than a raised card.
+ */
 export function Input({ label, error, hint, className, id, ...rest }: InputProps) {
   const generatedId = useId()
   const inputId = id ?? generatedId
@@ -17,7 +25,7 @@ export function Input({ label, error, hint, className, id, ...rest }: InputProps
   return (
     <div className="flex flex-col gap-1">
       {label && (
-        <label htmlFor={inputId} className="text-sm font-medium text-slate-700">
+        <label htmlFor={inputId} className="label-ops text-text-muted">
           {label}
         </label>
       )}
@@ -26,20 +34,18 @@ export function Input({ label, error, hint, className, id, ...rest }: InputProps
         aria-invalid={error ? true : undefined}
         aria-describedby={error ? errorId : hint ? hintId : undefined}
         className={cn(
-          'rounded-md border px-3 py-2 text-sm outline-none focus:ring-2 disabled:bg-slate-100',
-          error
-            ? 'border-red-400 focus:border-red-500 focus:ring-red-200'
-            : 'border-slate-300 focus:border-indigo-500 focus:ring-indigo-200',
+          'telemetry w-full border bg-surface-sunken px-3 py-2 text-sm text-text outline-none placeholder:text-degraded focus:border-primary disabled:text-degraded',
+          error ? 'border-danger' : 'border-border',
           className,
         )}
         {...rest}
       />
       {error ? (
-        <p id={errorId} role="alert" className="text-xs text-red-600">
+        <p id={errorId} role="alert" className="text-xs text-danger">
           {error}
         </p>
       ) : hint ? (
-        <p id={hintId} className="text-xs text-slate-500">
+        <p id={hintId} className="text-xs text-text-muted">
           {hint}
         </p>
       ) : null}
