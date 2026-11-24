@@ -56,25 +56,37 @@ export const AlertResolution = {
 } as const
 export type AlertResolution = (typeof AlertResolution)[keyof typeof AlertResolution]
 
+/**
+ * The four canonical alert statuses.
+ *
+ * Mirrors `app/alerts.py::ALERT_STATUSES` and the `chk_alerts_status`
+ * CHECK constraint. `ESCALATED` is deliberately NOT a status: escalation
+ * is recorded as an `alert_timeline` event instead.
+ */
 export const AlertStatus = {
-  new: 'new',
+  open: 'open',
   acknowledged: 'acknowledged',
-  in_progress: 'in_progress',
   resolved: 'resolved',
   false_positive: 'false_positive',
-  escalated: 'escalated',
 } as const
 export type AlertStatus = (typeof AlertStatus)[keyof typeof AlertStatus]
 
-/** Timeline event types accepted by `POST /alerts/{id}/timeline`. */
+/**
+ * The canonical timeline event types.
+ *
+ * Mirrors `app/alerts.py::TIMELINE_EVENT_TYPES` and the
+ * `alert_timeline.event_type` CHECK constraint.
+ */
 export const TimelineEventType = {
-  note_added: 'note_added',
-  escalated: 'escalated',
+  created: 'created',
   assigned: 'assigned',
+  unassigned: 'unassigned',
   acknowledged: 'acknowledged',
-  resolved: 'resolved',
-  action_taken: 'action_taken',
+  escalated: 'escalated',
+  note_added: 'note_added',
   status_changed: 'status_changed',
+  resolved: 'resolved',
+  false_positive: 'false_positive',
 } as const
 export type TimelineEventType = (typeof TimelineEventType)[keyof typeof TimelineEventType]
 
@@ -296,12 +308,20 @@ export interface AuditLogList {
 
 export interface AlertItem {
   id: string
-  login_attempt_id: string | null
+  /** Never null — the backend declares it NOT NULL. */
+  login_attempt_id: string
   policy_id: string | null
   status: AlertStatus | string
-  risk_level: RiskLevel | string
+  /** Null when the alert has not been risk-scored. */
+  risk_level: RiskLevel | string | null
   detection_reason: string | null
-  detection_scores: Record<string, number> | null
+  /**
+   * Free-form score map. Null when the backend stored no scores at all —
+   * which is NOT the same as an empty map, and NOT the same as a score of
+   * zero.
+   */
+  detection_scores: Record<string, unknown> | null
+  /** The `soc_analysts.id` UUID, NOT a `users.id`. */
   assigned_to_id: string | null
   resolved_by_id: string | null
   resolved_at: string | null
@@ -316,6 +336,82 @@ export interface AlertListResponse {
   total: number
   page: number
   limit: number
+}
+
+/**
+ * The login attempt behind an alert, as the evidence bundle reports it.
+ *
+ * Every optional field is genuinely nullable: the attempt may have been
+ * recorded without a username, an IP or a user id.
+ */
+export interface LoginAttemptSummary {
+  id: string
+  event_id: string
+  timestamp: string
+  outcome: string
+  username_attempted: string | null
+  ip_address: string | null
+  user_agent: string | null
+  user_id: string | null
+  mfa_used: boolean
+  risk_level: RiskLevel | string | null
+  detection_decision: string | null
+}
+
+/**
+ * The risk assessment behind an alert.
+ *
+ * Every field is nullable, and the nullability is MEANINGFUL:
+ *   - `ml_score: null` means the ML engine produced no score (rule-only
+ *    fallback, or the model was unavailable). It is NOT a score of zero.
+ *   - `ml_status` explains the fallback: e.g. `fallback`, `unavailable`.
+ *   - `rule_score: null` means no rule produced a score at all.
+ *   - `combined_score: null` means the two could not be combined.
+ *
+ * The UI must never invent an ML score where the backend returned null.
+ */
+export interface RiskAssessmentSummary {
+  rule_score: number | null
+  ml_score: number | null
+  combined_score: number | null
+  /** e.g. `ok`, `fallback`, `unavailable`, `skipped`. */
+  ml_status: string | null
+  ml_model_version: string | null
+  ml_reason_codes: unknown[] | null
+  ml_features_used: Record<string, unknown> | null
+  rule_hits: unknown[] | null
+  risk_level: RiskLevel | string | null
+  decision: string | null
+}
+
+/** One row of the detection pipeline log. */
+export interface DetectionLogSummary {
+  id: string
+  stage: string
+  stage_detail: string | null
+  rule_name: string | null
+  /** Null when the stage did not record a verdict. */
+  triggered: boolean | null
+  /** Null when the stage contributed nothing to the score. */
+  score_contribution: number | null
+  decision: string | null
+  reason: string | null
+  details: Record<string, unknown> | null
+  created_at: string
+}
+
+/**
+ * The full evidence bundle of one alert.
+ *
+ * `login_attempt` and `risk_assessment` are null when the underlying
+ * record does not exist — the alert still renders, without that section.
+ */
+export interface AlertEvidence {
+  alert: AlertItem
+  login_attempt: LoginAttemptSummary | null
+  risk_assessment: RiskAssessmentSummary | null
+  detection_logs: DetectionLogSummary[]
+  timeline: TimelineEvent[]
 }
 
 export interface AlertAcknowledgeRequest {
@@ -353,9 +449,13 @@ export interface TimelineEvent {
   id: string
   alert_id: string
   event_type: string
-  comment: string | null
+  /** Null when the event has no actor (e.g. a system-generated event). */
   actor_id: string | null
-  actor_type: string | null
+  /** `user` | `system` | … — defaults to `user` on the backend. */
+  actor_type: string
+  old_value: string | null
+  new_value: string | null
+  comment: string | null
   ip_address: string | null
   created_at: string
 }
@@ -416,15 +516,29 @@ export interface PendingTrustedDeviceResponse {
 // Login history
 // ---------------------------------------------------------------------------
 
+/**
+ * One row of `GET /login-attempts`.
+ *
+ * The timestamp field is `timestamp` (not `created_at`): the backend
+ * reports the moment of the attempt.
+ */
 export interface LoginAttemptItem {
   id: string
+  event_id: string
   user_id: string | null
-  username_attempted: string
+  username_attempted: string | null
   ip_address: string | null
   user_agent: string | null
+  device_fingerprint: string | null
   outcome: string
+  mfa_used: boolean
+  timestamp: string
+  status: string
   risk_level: RiskLevel | string | null
-  created_at: string
+  detection_decision: string | null
+  policy_id: string | null
+  primary_alert_id: string | null
+  request_id: string | null
 }
 
 export interface LoginAttemptListResponse {

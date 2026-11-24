@@ -31,6 +31,8 @@ import { SessionsPage } from '@/features/sessions/pages/SessionsPage'
 import { TrustedDevicesPage } from '@/features/devices/pages/TrustedDevicesPage'
 import { TrustedDeviceLoginPage } from '@/features/devices/pages/TrustedDeviceLoginPage'
 import { ProfilePage } from '@/features/profile/pages/ProfilePage'
+import { AlertQueuePage } from '@/features/alerts/pages/AlertQueuePage'
+import { AlertDetailPage } from '@/features/alerts/pages/AlertDetailPage'
 
 export type PageFactory = (key: string) => React.ReactNode
 
@@ -47,6 +49,8 @@ const IMPLEMENTED_PAGES: Record<string, React.ReactNode> = {
   sessions: <SessionsPage />,
   devices: <TrustedDevicesPage />,
   profile: <ProfilePage />,
+  alerts: <AlertQueuePage />,
+  'alert-detail': <AlertDetailPage />,
 }
 
 /**

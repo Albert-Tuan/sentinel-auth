@@ -19,6 +19,14 @@ export interface DataTableProps<T> {
   /** Rendered when `rows` is empty. */
   empty?: ReactNode
   className?: string
+  /**
+   * Called when a row is clicked.
+   *
+   * When present the row becomes an interactive control: it is
+   * focusable, exposes `role="button"` and reacts to Enter/Space, so the
+   * table stays keyboard-navigable.
+   */
+  onRowClick?: (row: T) => void
 }
 
 /**
@@ -35,6 +43,7 @@ export function DataTable<T>({
   caption,
   empty,
   className,
+  onRowClick,
 }: DataTableProps<T>) {
   if (rows.length === 0 && empty) {
     return <>{empty}</>
@@ -64,7 +73,26 @@ export function DataTable<T>({
         </thead>
         <tbody className="divide-y divide-slate-100">
           {rows.map((row, index) => (
-            <tr key={rowKey(row, index)} className="hover:bg-slate-50">
+            <tr
+              key={rowKey(row, index)}
+              className={cn(
+                'hover:bg-slate-50',
+                onRowClick && 'cursor-pointer',
+              )}
+              onClick={onRowClick ? () => onRowClick(row) : undefined}
+              onKeyDown={
+                onRowClick
+                  ? (event) => {
+                      if (event.key === 'Enter' || event.key === ' ') {
+                        event.preventDefault()
+                        onRowClick(row)
+                      }
+                    }
+                  : undefined
+              }
+              tabIndex={onRowClick ? 0 : undefined}
+              role={onRowClick ? 'button' : undefined}
+            >
               {columns.map((column) => (
                 <td
                   key={column.key}
