@@ -44,11 +44,11 @@ export function LoginPage() {
   }
 
   return (
-    <main className="flex min-h-screen items-center justify-center bg-slate-100 px-4">
-      <div className="w-full max-w-sm rounded-lg border border-slate-200 bg-white p-8 shadow-sm">
+    <main className="flex min-h-screen items-center justify-center bg-surface px-4">
+      <div className="w-full max-w-sm border border-border bg-surface-raised p-8">
         <header className="mb-6">
-          <h1 className="text-xl font-semibold text-slate-900">Sentinel Auth</h1>
-          <p className="mt-1 text-sm text-slate-500">
+          <h1 className="page-title text-text">Sentinel Auth</h1>
+          <p className="mt-1 text-sm text-text-muted">
             Đăng nhập để truy cập bảng điều khiển an ninh.
           </p>
         </header>
@@ -63,10 +63,10 @@ export function LoginPage() {
           />
         )}
 
-        <div className="mt-6 border-t border-slate-100 pt-4 text-center">
+        <div className="mt-6 border-t border-border pt-4 text-center">
           <Link
             to={PATHS.trustedDeviceLogin}
-            className="text-sm text-indigo-600 hover:text-indigo-700 hover:underline"
+            className="text-sm text-secondary hover:text-primary hover:underline"
           >
             Đăng nhập bằng thiết bị tin cậy
           </Link>

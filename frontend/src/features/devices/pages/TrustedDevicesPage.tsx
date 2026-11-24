@@ -99,7 +99,8 @@ export function TrustedDevicesPage() {
     {
       key: 'name',
       header: 'Tên thiết bị',
-      render: (device) => device.device_name || <span className="text-slate-400">—</span>,
+      render: (device) =>
+        device.device_name || <span className="text-degraded">—</span>,
     },
     {
       key: 'device',
@@ -113,12 +114,16 @@ export function TrustedDevicesPage() {
     {
       key: 'ip',
       header: 'IP gần nhất',
-      render: (device) => device.last_ip ?? '—',
+      render: (device) => (
+        <span className="telemetry">{device.last_ip ?? '—'}</span>
+      ),
     },
     {
       key: 'lastUsed',
       header: 'Dùng lần cuối',
-      render: (device) => formatDateTime(device.last_used_at),
+      render: (device) => (
+        <span className="telemetry">{formatDateTime(device.last_used_at)}</span>
+      ),
     },
     {
       key: 'expires',
@@ -126,7 +131,7 @@ export function TrustedDevicesPage() {
       render: (device) =>
         device.expires_at ? (
           <span className="flex items-center gap-2">
-            {formatDateTime(device.expires_at)}
+            <span className="telemetry">{formatDateTime(device.expires_at)}</span>
             {isExpired(device.expires_at) && (
               <Badge tone="danger">Đã hết hạn</Badge>
             )}
@@ -141,7 +146,7 @@ export function TrustedDevicesPage() {
       render: (device) => (
         <Button
           variant="ghost"
-          className="text-red-600 hover:bg-red-50"
+          className="text-danger hover:bg-danger/10"
           onClick={() => setUntrustTarget(device)}
           aria-label={`Gỡ bỏ thiết bị ${device.device_name ?? device.id}`}
         >
@@ -157,10 +162,10 @@ export function TrustedDevicesPage() {
     <div className="flex flex-col gap-4">
       <header className="flex flex-wrap items-center justify-between gap-3">
         <div>
-          <h1 className="text-xl font-semibold text-slate-900">
+          <h1 className="page-title text-text">
             Thiết bị tin cậy
           </h1>
-          <p className="text-sm text-slate-500">
+          <p className="text-sm text-text-muted">
             Thiết bị đã được tin cậy có thể đăng nhập mà không cần mã xác
             thực hai yếu tố.
           </p>
@@ -177,7 +182,7 @@ export function TrustedDevicesPage() {
       <form
         onSubmit={handleSubmit}
         noValidate
-        className="flex flex-wrap items-end gap-3 rounded-md border border-slate-200 bg-white p-4"
+        className="flex flex-wrap items-end gap-3 border border-border bg-surface-raised p-4"
       >
         <div className="min-w-56 flex-1">
           <Input
@@ -208,13 +213,13 @@ export function TrustedDevicesPage() {
       )}
 
       {trustMutation.isSuccess && (
-        <p className="text-sm text-emerald-700">
+        <p className="text-sm text-success">
           {trustMutation.data.message}
         </p>
       )}
 
       {devicesQuery.isPending && (
-        <div className="flex items-center gap-2 text-sm text-slate-600">
+        <div className="flex items-center gap-2 text-sm text-text-muted">
           <Spinner /> Đang tải danh sách thiết bị…
         </div>
       )}

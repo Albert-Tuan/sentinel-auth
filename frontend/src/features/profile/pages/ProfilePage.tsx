@@ -65,33 +65,35 @@ export function ProfilePage() {
       key: 'label',
       header: 'Trường',
       render: (row: ProfileRow) => (
-        <span className="font-medium text-slate-600">{row.label}</span>
+        <span className="label-ops text-text-muted">{row.label}</span>
       ),
       className: 'w-56',
     },
     {
       key: 'value',
       header: 'Giá trị',
-      render: (row: ProfileRow) => row.value,
+      render: (row: ProfileRow) => (
+        <span className="telemetry text-text">{row.value}</span>
+      ),
     },
   ]
 
   return (
     <div className="flex flex-col gap-4">
       <header>
-        <h1 className="text-xl font-semibold text-slate-900">Hồ sơ</h1>
-        <p className="text-sm text-slate-500">
+        <h1 className="page-title text-text">Hồ sơ</h1>
+        <p className="text-sm text-text-muted">
           Thông tin tài khoản đang đăng nhập.
         </p>
       </header>
 
-      <section className="rounded-md border border-slate-200 bg-white p-4">
-        <h2 className="text-sm font-semibold uppercase tracking-wide text-slate-500">
+      <section className="border border-border bg-surface-raised p-4">
+        <h2 className="label-ops border-b border-border pb-2 text-text-muted">
           Vai trò
         </h2>
-        <div className="mt-2 flex flex-wrap gap-2">
+        <div className="mt-3 flex flex-wrap gap-2">
           {roles.length === 0 ? (
-            <span className="text-sm text-slate-500">Chưa có vai trò nào.</span>
+            <span className="text-sm text-degraded">Chưa có vai trò nào.</span>
           ) : (
             roles.map((role) => (
               <Badge key={role} tone="info">

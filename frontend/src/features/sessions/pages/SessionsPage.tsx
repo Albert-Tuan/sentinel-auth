@@ -106,7 +106,7 @@ export function SessionsPage() {
       render: (session) => (
         <Button
           variant="ghost"
-          className="text-red-600 hover:bg-red-50"
+          className="text-danger hover:bg-danger/10"
           onClick={() => setRevokeTarget(session)}
           aria-label={`Thu hồi phiên ${session.id}`}
         >
@@ -122,8 +122,8 @@ export function SessionsPage() {
     <div className="flex flex-col gap-4">
       <header className="flex flex-wrap items-center justify-between gap-3">
         <div>
-          <h1 className="text-xl font-semibold text-slate-900">Phiên đăng nhập</h1>
-          <p className="text-sm text-slate-500">
+          <h1 className="text-xl font-semibold text-text">Phiên đăng nhập</h1>
+          <p className="text-sm text-text-muted">
             Các phiên đang hoạt động của tài khoản này.
           </p>
         </div>
@@ -137,7 +137,7 @@ export function SessionsPage() {
       </header>
 
       {sessionsQuery.isPending && (
-        <div className="flex items-center gap-2 text-sm text-slate-600">
+        <div className="flex items-center gap-2 text-sm text-text-muted">
           <Spinner /> Đang tải danh sách phiên…
         </div>
       )}
