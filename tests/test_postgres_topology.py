@@ -688,9 +688,23 @@ class TestRealDatabaseRouting:
         from app.db import get_core_db, get_detection_db, get_ml_db
         from app.models import Role
 
-        monkeypatch.setenv("CORE_DATABASE_URL", str(core_engine.url))
-        monkeypatch.setenv("DETECTION_DATABASE_URL", str(detection_engine.url))
-        monkeypatch.setenv("ML_DATABASE_URL", str(ml_engine.url))
+        # ``str(engine.url)`` masks the password as ``***``, so the URL would
+        # not authenticate against a server that requires a password (the
+        # GitHub Actions service container uses scram-sha-256).  Render the
+        # URL with the password intact so the routing probe works against
+        # both trust-auth and password-auth servers.
+        monkeypatch.setenv(
+            "CORE_DATABASE_URL",
+            core_engine.url.render_as_string(hide_password=False),
+        )
+        monkeypatch.setenv(
+            "DETECTION_DATABASE_URL",
+            detection_engine.url.render_as_string(hide_password=False),
+        )
+        monkeypatch.setenv(
+            "ML_DATABASE_URL",
+            ml_engine.url.render_as_string(hide_password=False),
+        )
         monkeypatch.delenv("DATABASE_URL", raising=False)
 
         from app import db

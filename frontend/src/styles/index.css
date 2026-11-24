@@ -1,0 +1,133 @@
+@import 'tailwindcss';
+
+/*
+ * Sentinel Telemetry Operator — design token bridge.
+ *
+ * The Stitch project `6351989476271203310` renders a brutalist, dark SOC
+ * console: zero border radii, 1px monolithic borders, Space Grotesk
+ * headings, Geist body text and JetBrains Mono for telemetry.
+ *
+ * This file translates that design system into Tailwind v4 theme tokens.
+ * The mapping is ONE-WAY and by SEMANTIC NAME on purpose:
+ *
+ *   - The frontend never uses a Stitch colour name (`bg-primary-container`,
+ *     `text-on-surface`). It uses `bg-surface-raised`, `text-text-muted`, …
+ *     so a future Stitch re-theme only touches this file.
+ *   - The semantic colours `danger`, `risk-high`, `degraded`, `surface`,
+ *     `panel`, `surface-raised`, `border` and `border-strong` are
+ *     FRONTEND-OWNED: Stitch has no 1-1 equivalent for them, so they are
+ *     defined here and must not be overwritten from the Stitch side.
+ *
+ * See `docs/frontend/M12-STITCH-MASTER-PROMPT.md` §1 and §7.
+ */
+@theme {
+  /* --- Stitch: Sentinel Telemetry Operator ----------------------------- */
+  --color-primary: #14b8a6;
+  --color-on-primary: #020617;
+  --color-secondary: #22d3ee;
+  --color-success: #10b981;
+  --color-warning: #f59e0b;
+
+  --color-text: #f8fafc;
+  --color-text-muted: #94a3b8;
+
+  /* --- Frontend-owned (NOT taken from Stitch) -------------------------- */
+  --color-danger: #ef4444;
+  --color-risk-high: #f97316;
+  --color-degraded: #64748b;
+
+  --color-surface: #0b1220;
+  --color-panel: #111827;
+  --color-surface-raised: #182235;
+  --color-surface-sunken: #070e1c;
+  --color-border: #1e293b;
+  --color-border-strong: #334155;
+
+  /* --- Shape: the roundedness token is locked to 0 ---------------------- */
+  --radius-card: 0px;
+  --radius-control: 0px;
+
+  /*
+   * The whole default radius scale is collapsed to 0. The design system
+   * forbids decorative curvature everywhere, and overriding the scale
+   * (rather than removing each `rounded-*` call site) means a component
+   * cannot accidentally reintroduce a radius.
+   */
+  --radius-none: 0px;
+  --radius-xs: 0px;
+  --radius-sm: 0px;
+  --radius-md: 0px;
+  --radius-lg: 0px;
+  --radius-xl: 0px;
+  --radius-2xl: 0px;
+  --radius-3xl: 0px;
+  --radius-4xl: 0px;
+  --radius-full: 0px;
+
+  /* --- Typography ------------------------------------------------------ */
+  --font-display: 'Space Grotesk', ui-sans-serif, system-ui, sans-serif;
+  --font-sans: 'Geist Variable', 'Geist', ui-sans-serif, system-ui, sans-serif;
+  --font-mono: 'JetBrains Mono', ui-monospace, 'SFMono-Regular', monospace;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  background-color: var(--color-surface);
+  color: var(--color-text);
+  font-family: var(--font-sans);
+  font-size: 13px;
+  line-height: 18px;
+  -webkit-font-smoothing: antialiased;
+}
+
+/*
+ * Operational labels are uppercase with wide tracking, so a reader can
+ * scan a dense console under stress. The class is opt-in: it is applied
+ * to labels, table headers and status chips.
+ */
+@utility label-ops {
+  font-family: var(--font-sans);
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 12px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+/* Section headings inside a card. */
+@utility heading-ops {
+  font-family: var(--font-display);
+  font-size: 15px;
+  font-weight: 600;
+  line-height: 20px;
+  letter-spacing: 0.01em;
+}
+
+/* Page title. */
+@utility page-title {
+  font-family: var(--font-display);
+  font-size: 18px;
+  font-weight: 600;
+  line-height: 24px;
+}
+
+/* Technical values: IPs, hashes, UUIDs, timestamps. */
+@utility telemetry {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+}
+
+/* Visible keyboard focus. The design system forbids glow, so the ring is
+ * a hard 1px border swap instead of a soft halo. */
+@layer base {
+  :focus-visible {
+    outline: 1px solid var(--color-primary);
+    outline-offset: 1px;
+  }
+}

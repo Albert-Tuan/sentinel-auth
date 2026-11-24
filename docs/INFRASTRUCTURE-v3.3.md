@@ -3,9 +3,15 @@
 > **Status:** APPROVED
 > **Version:** 1.0
 > **Date:** 2026-10-09
+> **Updated:** 2026-11-06 (M11.2 — see [`DEPLOYMENT-v3.3.md`](DEPLOYMENT-v3.3.md))
 
 This document describes the local development infrastructure for Sentinel Auth v3.3.
 It covers Docker-based local setup, database topology, and service dependencies.
+
+> **Looking for the one-command deployment?** See
+> [`DEPLOYMENT-v3.3.md`](DEPLOYMENT-v3.3.md) — it describes the operated
+> deployment (`scripts/deploy_local.sh up`), the configuration validation,
+> the deployment verification and the known demo limitations.
 
 ---
 
@@ -43,6 +49,13 @@ logical databases on one PostgreSQL server, plus Redis for future outbox transpo
 - Docker Compose plugin (v2) or `docker-compose`
 - Bash 4+ (for the init script)
 
+> The deployment was validated against **Docker Engine 29.9.3** with the
+> real **Docker Compose v5.4.0** plugin, and against rootless
+> **Podman 5.8.9**. Both ran the full stack — a from-scratch rebuild, all
+> 62 deployment checks, the 1035-test PostgreSQL regression suite and the
+> 79-check HTTP smoke. See
+> [`DEPLOYMENT-v3.3.md`](DEPLOYMENT-v3.3.md#compatibility).
+
 ---
 
 ## 3. Quick Start
@@ -52,6 +65,28 @@ logical databases on one PostgreSQL server, plus Redis for future outbox transpo
 ```bash
 docker compose up -d
 ```
+
+> **Authentication:** the compose file pins
+> `POSTGRES_INITDB_ARGS="--auth-host=scram-sha-256 --auth-local=scram-sha-256"`,
+> so the `trust` lines that `initdb` writes by default are removed and
+> every connection needs a password. Verify it with a passwordless
+> connection, which must be refused:
+>
+> ```bash
+> PGPASSWORD="" psql -h 127.0.0.1 -p 5432 -U sentinel -d postgres -c "SELECT 1"
+> # -> fe_sendauth: no password supplied
+> ```
+>
+> ⚠️ **`POSTGRES_INITDB_ARGS` only affects a NEW volume.** `initdb` reads
+> it once, when it initialises a fresh data directory; it is not a
+> runtime setting. A volume created **before** this setting was added
+> keeps its old `trust` configuration even after the compose file
+> changes. Recreate it with
+> `bash scripts/deploy_local.sh reset && bash scripts/deploy_local.sh up`
+> to apply the setting. The same setting is applied to the CI service
+> container in `.github/workflows/ci.yml`, where the data directory is
+> always empty, so it always takes effect there. See
+> [`DEPLOYMENT-v3.3.md`](DEPLOYMENT-v3.3.md) for the full caveat.
 
 Wait for services to become healthy:
 

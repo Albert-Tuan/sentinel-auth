@@ -42,10 +42,15 @@ from app.schemas import (
     LoginAttemptStatusResponse,
     LoginEventRequest,
     LoginEventResponse,
+    PolicyCreateRequest,
+    PolicyDetail,
+    PolicyUpdateRequest,
     RANGE_OPERATORS,
     RuleHit,
+    SERVER_OWNED_POLICY_FIELDS,
 )
 from app.authz import AuthContext, get_current_auth_context, require_roles
+from app.time_utils import as_utc
 
 logger = logging.getLogger(__name__)
 
@@ -1256,6 +1261,86 @@ async def detection_health(db=Depends(get_detection_db)) -> InternalHealthRespon
 # Policy management (UC-DE-15) - Security Admin only
 # =============================================================================
 
+def _policy_detail(policy: Policy) -> Dict[str, Any]:
+    """Serialise a policy row into the canonical detail payload."""
+    return {
+        "id": str(policy.id),
+        "version": policy.version,
+        "name": policy.name,
+        "description": policy.description,
+        "rules": policy.rules if isinstance(policy.rules, list) else [],
+        "config": policy.config if isinstance(policy.config, dict) else {},
+        "is_active": bool(policy.is_active),
+        "created_by": str(policy.created_by) if policy.created_by else None,
+        "created_at": policy.created_at,
+        "updated_at": policy.updated_at,
+        "activated_at": policy.activated_at,
+        "deactivated_at": policy.deactivated_at,
+    }
+
+
+def _policy_validation_problems(
+    rules: Any, config: Any
+) -> List[str]:
+    """Validate a policy payload with the canonical validators.
+
+    This is the SAME validation the activation endpoint applies, so a
+    policy that passes here can always be activated later.  Keeping one
+    validator is deliberate: two parallel rule grammars would drift and
+    let a policy be created that can never be activated.
+
+    Returns a list of human-readable problems; empty means usable.
+    """
+    problems: List[str] = []
+
+    if not isinstance(rules, list) or not rules:
+        return ["rules must be a non-empty list of rule objects"]
+
+    seen_names: set = set()
+    for index, rule in enumerate(rules):
+        issue = validate_rule(rule)
+        if issue:
+            label = rule.get("name", index) if isinstance(rule, dict) else index
+            problems.append(f"rule {label}: {issue}")
+            continue
+        name = rule.get("name")
+        if name in seen_names:
+            problems.append(f"rule {name}: duplicate rule name")
+            continue
+        seen_names.add(name)
+
+    _, config_problems = resolve_config(config)
+    problems.extend(config_problems)
+
+    return problems
+
+
+def _server_owned_problems(body: Any) -> List[str]:
+    """Report the server-owned fields a client tried to set.
+
+    ``is_active`` belongs to the activation endpoint, and ``created_by``
+    plus every timestamp belong to the server.  The request schemas declare
+    those fields (instead of leaving them to ``extra="forbid"``) precisely
+    so the client gets a 400 that NAMES the offending field rather than a
+    generic 422 about an unexpected key.
+    """
+    problems: List[str] = []
+    if not hasattr(body, "model_dump"):
+        return problems
+    data = body.model_dump()
+    for field in sorted(SERVER_OWNED_POLICY_FIELDS):
+        if data.get(field) is not None:
+            problems.append(
+                f"{field} is managed by the server and cannot be set by the client"
+            )
+    return problems
+
+
+def _same_instant(left: datetime, right: datetime) -> bool:
+    """Compare two timestamps as instants, ignoring tzinfo representation."""
+    return as_utc(left) == as_utc(right)
+
+
 @policy_router.get("", response_model=list)
 async def list_policies(
     ctx: AuthContext = Depends(require_roles("SECURITY_ADMIN", "SECURITY_MANAGER")),
@@ -1276,6 +1361,36 @@ async def list_policies(
         }
         for p in policies
     ]
+
+
+@policy_router.get("/{policy_id}", response_model=PolicyDetail)
+async def get_policy(
+    policy_id: UUID,
+    ctx: AuthContext = Depends(require_roles("SECURITY_ADMIN", "SECURITY_MANAGER")),
+    db=Depends(get_detection_db),
+) -> PolicyDetail:
+    """Return the full detail of one policy.  SECURITY_ADMIN or SECURITY_MANAGER only.
+
+    The listing endpoint returns a *summary* (it deliberately does not
+    expose the rules or the config), so a client that wants to edit a
+    policy has no way to read the current state, and therefore no way to
+    obtain the ``updated_at`` token the edit endpoint requires.  This
+    endpoint closes that gap.
+
+    It is a READ endpoint and it does not extend the policy lifecycle:
+    it exposes exactly the same payload the create and edit endpoints
+    already return (``PolicyDetail``), it never writes, and it does not
+    change how a policy is scored.
+
+    ``updated_at`` is returned with full microsecond precision so the
+    value can be sent straight back as ``expected_updated_at`` without
+    losing precision - a truncated token would fail the optimistic
+    concurrency check for a reason the client cannot see.
+    """
+    policy = db.query(Policy).filter(Policy.id == policy_id).first()
+    if policy is None:
+        raise HTTPException(status_code=http_status.HTTP_404_NOT_FOUND, detail="Policy not found")
+    return PolicyDetail(**_policy_detail(policy))
 
 
 @policy_router.post("/{policy_id}/activate")
@@ -1335,3 +1450,226 @@ async def activate_policy(
     policy.deactivated_at = None
     db.commit()
     return {"status": "activated", "version": policy.version}
+
+
+# =============================================================================
+# F-1 — Policy Create / Edit (UC-DE-15)
+# =============================================================================
+#
+# Contract (docs/DECISIONS-SYSTEM-v3.3.md section 10.5):
+#
+# * Detail  -> ``GET  /api/v1/policies/{policy_id}`` (SECURITY_ADMIN, SECURITY_MANAGER)
+# * Create  -> ``POST /api/v1/policies``            (SECURITY_ADMIN)
+# * Edit    -> ``PUT  /api/v1/policies/{policy_id}`` (SECURITY_ADMIN)
+#
+# The detail endpoint is defined above, next to the listing endpoint it
+# complements.  It is a pure read: it exists so a client can read the
+# current state of a policy and obtain the ``updated_at`` token the edit
+# endpoint requires.  It does not extend the policy lifecycle.
+#
+# Invariants enforced here:
+#
+# 1. A new policy is ALWAYS inactive.  Only the activation endpoint may
+#    set ``is_active``, and the database keeps the single-active-policy
+#    invariant (partial unique index ``idx_policies_single_active``).
+#
+# 2. ``version`` is immutable and unique.  It identifies a policy lineage
+#    in ``risk_assessments.policy_id``, so changing the rules of a policy
+#    that is in service means creating a NEW policy with a NEW version.
+#
+# 3. The rules/config of a policy that is currently active -- or that has
+#    EVER been active -- are frozen.  Editing such a policy would change
+#    the meaning of historical risk assessments that reference it.  The
+#    supported flow is: create a new inactive policy, edit it while it is
+#    still a draft, then activate it.
+#
+# 4. A client may not set ``is_active``, ``created_by`` or any timestamp.
+#
+# 5. Optimistic concurrency: the Edit body carries ``expected_updated_at``,
+#    the value the client last read.  A mismatch means somebody else wrote
+#    in between, so the write is refused with 409 instead of silently
+#    overwriting their work.
+# =============================================================================
+
+
+@policy_router.post("", response_model=PolicyDetail, status_code=http_status.HTTP_201_CREATED)
+async def create_policy(
+    body: PolicyCreateRequest,
+    ctx: AuthContext = Depends(require_roles("SECURITY_ADMIN")),
+    db=Depends(get_detection_db),
+) -> PolicyDetail:
+    """Create a new detection policy.  SECURITY_ADMIN only.
+
+    The policy is created INACTIVE: activation is a separate, explicit
+    step (``POST /api/v1/policies/{id}/activate``) so that a half-finished
+    policy can never influence the scoring of a login.
+
+    The body is validated with the same canonical validators the
+    activation endpoint uses, so a policy that can be created can always
+    be activated.  A duplicate version is a 409; an invalid policy is a
+    400 that lists every problem at once.
+    """
+    problems = _server_owned_problems(body)
+    if problems:
+        raise HTTPException(
+            status_code=http_status.HTTP_400_BAD_REQUEST,
+            detail={"message": "Policy is invalid", "problems": problems},
+        )
+
+    problems = _policy_validation_problems(body.rules, body.config)
+    if problems:
+        raise HTTPException(
+            status_code=http_status.HTTP_400_BAD_REQUEST,
+            detail={"message": "Policy is invalid", "problems": problems},
+        )
+
+    existing = db.query(Policy).filter(Policy.version == body.version).first()
+    if existing is not None:
+        raise HTTPException(
+            status_code=http_status.HTTP_409_CONFLICT,
+            detail={
+                "message": "Policy version already exists",
+                "problems": [f"version {body.version!r} is already used by another policy"],
+            },
+        )
+
+    now = datetime.now(timezone.utc)
+    policy = Policy(
+        version=body.version,
+        name=body.name,
+        description=body.description,
+        rules=body.rules,
+        config=body.config if body.config else {},
+        is_active=False,
+        created_by=ctx.user.id,
+        created_at=now,
+        updated_at=now,
+        activated_at=None,
+        deactivated_at=None,
+    )
+    db.add(policy)
+    try:
+        db.commit()
+    except IntegrityError:
+        # Another request inserted the same version between the SELECT
+        # above and this COMMIT.  The unique index is the final arbiter.
+        db.rollback()
+        raise HTTPException(
+            status_code=http_status.HTTP_409_CONFLICT,
+            detail={
+                "message": "Policy version already exists",
+                "problems": [f"version {body.version!r} is already used by another policy"],
+            },
+        )
+
+    return PolicyDetail(**_policy_detail(policy))
+
+
+@policy_router.put("/{policy_id}", response_model=PolicyDetail)
+async def edit_policy(
+    policy_id: UUID,
+    body: PolicyUpdateRequest,
+    ctx: AuthContext = Depends(require_roles("SECURITY_ADMIN")),
+    db=Depends(get_detection_db),
+) -> PolicyDetail:
+    """Edit a draft detection policy.  SECURITY_ADMIN only.
+
+    Only a policy that has NEVER been active can be edited.  A policy that
+    is active right now, or that has been active at some point in the
+    past, is frozen: its rules are referenced by the risk assessments it
+    produced, and changing them would rewrite history.  To change a
+    policy that is in service, create a new version and activate that.
+
+    The write is guarded by an optimistic-concurrency token
+    (``expected_updated_at``).  When it does not match the stored value,
+    another writer got there first and the request is refused with 409.
+    """
+    problems = _server_owned_problems(body)
+    if problems:
+        raise HTTPException(
+            status_code=http_status.HTTP_400_BAD_REQUEST,
+            detail={"message": "Policy is invalid", "problems": problems},
+        )
+
+    # Row lock: two concurrent edits of the SAME policy must not both read
+    # the old row and both write.  The loser sees the winner's
+    # updated_at and is rejected by the concurrency check below.
+    policy = (
+        db.query(Policy)
+        .filter(Policy.id == policy_id)
+        .with_for_update()
+        .first()
+    )
+    if policy is None:
+        raise HTTPException(status_code=http_status.HTTP_404_NOT_FOUND, detail="Policy not found")
+
+    # Immutability is checked FIRST, before the concurrency token.
+    # It is a property of the policy itself, so the answer does not
+    # depend on what the client last read.  Reporting "immutable" is
+    # actionable ("create a new version"), while "modified by someone
+    # else" would send the client looking for a concurrent writer that
+    # may not exist -- activating a policy also bumps updated_at.
+    if policy.is_active:
+        raise HTTPException(
+            status_code=http_status.HTTP_409_CONFLICT,
+            detail={
+                "message": "Policy is immutable",
+                "problems": [
+                    "an active policy cannot be edited; create a new version "
+                    "and activate it instead"
+                ],
+            },
+        )
+
+    if policy.activated_at is not None:
+        raise HTTPException(
+            status_code=http_status.HTTP_409_CONFLICT,
+            detail={
+                "message": "Policy is immutable",
+                "problems": [
+                    "this policy has already been activated and its historical "
+                    "risk assessments reference it; create a new version instead"
+                ],
+            },
+        )
+
+    # Optimistic concurrency: the token the client read must still be the
+    # stored one.  Without this a blind write silently discards a
+    # concurrent change (a lost update).
+    if not _same_instant(policy.updated_at, body.expected_updated_at):
+        raise HTTPException(
+            status_code=http_status.HTTP_409_CONFLICT,
+            detail={
+                "message": "Policy was modified by someone else",
+                "problems": [
+                    "expected_updated_at does not match the current policy; "
+                    "re-read the policy and retry"
+                ],
+            },
+        )
+
+    # Only the fields the client actually sent are applied; an omitted
+    # field keeps its current value.
+    new_rules = policy.rules if body.rules is None else body.rules
+    new_config = policy.config if body.config is None else body.config
+
+    if body.rules is not None or body.config is not None:
+        problems = _policy_validation_problems(new_rules, new_config)
+        if problems:
+            raise HTTPException(
+                status_code=http_status.HTTP_400_BAD_REQUEST,
+                detail={"message": "Policy is invalid", "problems": problems},
+            )
+
+    if body.name is not None:
+        policy.name = body.name
+    if body.description is not None:
+        policy.description = body.description
+    if body.rules is not None:
+        policy.rules = body.rules
+    if body.config is not None:
+        policy.config = body.config
+    policy.updated_at = datetime.now(timezone.utc)
+
+    db.commit()
+    return PolicyDetail(**_policy_detail(policy))

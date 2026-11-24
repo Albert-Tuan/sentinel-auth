@@ -82,6 +82,7 @@ from sklearn.ensemble import IsolationForest
 from sklearn.preprocessing import MinMaxScaler
 from sqlalchemy import create_engine, text
 from sqlalchemy.engine import Engine
+from tests.conftest import iter_routes
 
 UTC = timezone.utc
 
@@ -926,13 +927,45 @@ def live_environment(pg_engines, ml_artifact):
             os.environ[name] = value
 
 
+@pytest.fixture(scope="module", autouse=True)
+def role_timezone_isolation(pg_engines):
+    """Guarantee the role timezone is back to the server default on exit.
+
+    The timezone tests in
+    ``TestLiveSessionTimezoneIndependence`` scope their change to one
+    database (``ALTER ROLE ... IN DATABASE ...``) and reset it in a
+    ``finally`` block.  This fixture is the safety net for the case where
+    the process dies between the change and the reset: on a clean teardown
+    it resets the role on all three databases, so the next test module
+    never inherits a non-UTC session timezone.
+    """
+    yield
+
+    for engine in pg_engines.values():
+        try:
+            with engine.begin() as conn:
+                conn.execute(
+                    text(
+                        f"ALTER ROLE sentinel IN DATABASE "
+                        f"{_database_name(str(engine.url))} RESET TIME ZONE"
+                    )
+                )
+            engine.dispose()
+        except Exception:  # pragma: no cover - teardown must never mask a failure
+            pass
+
+
 @pytest.fixture()
 def seeded(pg_engines, ml_artifact) -> Dict[str, Any]:
     """Seed the deterministic fixture into the three databases."""
     core_ids = _seed_core(pg_engines["core"])
     detection_ids = _seed_detection(pg_engines["detection"], core_ids)
     _seed_ml(pg_engines["ml"], ml_artifact["model_id"], str(ml_artifact["path"]))
-    return {"core": core_ids, "detection": detection_ids}
+    return {
+        "core": core_ids,
+        "detection": detection_ids,
+        "ml": {"model_id": ml_artifact["model_id"]},
+    }
 
 
 @pytest.fixture()
@@ -1163,7 +1196,7 @@ class TestExplicitRouterMounting:
     def test_the_provider_routers_are_mounted_in_the_route_table(self):
         from app.main import app as fastapi_app
 
-        paths = {route.path for route in fastapi_app.routes}
+        paths = {route.path for route in iter_routes(fastapi_app.routes)}
         assert "/api/v1/internal/analytics/core" in paths
         assert "/api/v1/internal/analytics/detection" in paths
         for path in MANAGER_ENDPOINTS:
@@ -2243,7 +2276,72 @@ class TestLiveSessionTimezoneIndependence:
     The timezone is set at the **role** level, so every connection the
     application opens inherits it - a ``SET TIME ZONE`` on the test's own
     connection would not reach the application's pool.
+
+    Two properties make this safe to run inside the shared suite:
+
+    * **Isolation** - the setting is applied per *database*
+      (``ALTER ROLE sentinel IN DATABASE <db> SET TIME ZONE``), so the
+      Core and Detection databases and any other test are untouched.
+    * **Cleanup** - the role setting is reset in a ``finally`` block and
+      again by the module-scoped autouse fixture, so a failed assertion
+      cannot leave the server in a non-UTC state.
     """
+
+    #: The non-UTC zone the test forces.  It must differ from the **server
+    #: default** timezone, otherwise the assertion "the setting was applied"
+    #: would pass even when the statement had no effect.  The disposable
+    #: server runs with ``Asia/Ho_Chi_Minh`` (UTC+7), so the test uses
+    #: ``Asia/Kathmandu`` (UTC+05:45) - a different UTC offset, which is
+    #: exactly what a naive local-time truncation would expose.
+    FOREIGN_ZONE = "Asia/Kathmandu"
+
+    def _force_foreign_zone(self, engine: Engine) -> None:
+        """Set the role timezone for this database only, then drop the pool."""
+        with engine.begin() as conn:
+            conn.execute(
+                text(
+                    f"ALTER ROLE sentinel IN DATABASE {_database_name(str(engine.url))} "
+                    f"SET TIME ZONE '{self.FOREIGN_ZONE}'"
+                )
+            )
+        engine.dispose()
+
+    def _reset_zone(self, engine: Engine) -> None:
+        """Undo :meth:`_force_foreign_zone`."""
+        with engine.begin() as conn:
+            conn.execute(
+                text(
+                    f"ALTER ROLE sentinel IN DATABASE {_database_name(str(engine.url))} "
+                    f"RESET TIME ZONE"
+                )
+            )
+        engine.dispose()
+
+    def _current_zone(self, engine: Engine) -> str:
+        with engine.connect() as conn:
+            return conn.execute(text("SHOW TIME ZONE")).scalar()
+
+    def test_the_forced_zone_really_differs_from_the_server_default(
+        self, pg_engines
+    ):
+        """Guard the guard: the forced zone must not be the server default.
+
+        If the disposable server ever runs with the same timezone the test
+        forces, every "the setting was applied" assertion below becomes
+        vacuous and the timezone tests would silently prove nothing.
+        """
+        server_default = None
+        with pg_engines["ml"].connect() as conn:
+            server_default = conn.execute(
+                text("SELECT setting FROM pg_settings WHERE name = 'TimeZone'")
+            ).scalar()
+
+        assert server_default != self.FOREIGN_ZONE, (
+            f"the server default timezone is {server_default!r}, which is the "
+            f"same zone this test forces - the timezone assertions would be "
+            f"vacuous.  Change FOREIGN_ZONE to a zone with a different UTC "
+            f"offset."
+        )
 
     def test_the_daily_buckets_do_not_depend_on_the_session_timezone(
         self, client, pg_engines
@@ -2258,14 +2356,11 @@ class TestLiveSessionTimezoneIndependence:
 
         # Force every future connection of this role into a non-UTC zone and
         # drop the pooled connections so the next read really uses it.
-        with pg_engines["ml"].begin() as conn:
-            conn.execute(text("ALTER ROLE sentinel SET TIME ZONE 'Asia/Ho_Chi_Minh'"))
-        pg_engines["ml"].dispose()
+        self._force_foreign_zone(pg_engines["ml"])
         try:
-            with pg_engines["ml"].connect() as conn:
-                zone = conn.execute(text("SHOW TIME ZONE")).scalar()
-            assert zone == "Asia/Ho_Chi_Minh", (
-                f"the connection timezone is {zone!r}, the test did not apply"
+            assert self._current_zone(pg_engines["ml"]) == self.FOREIGN_ZONE, (
+                "the connection timezone is not the forced zone - the test "
+                "did not apply"
             )
 
             shifted = _daily(client)
@@ -2275,9 +2370,78 @@ class TestLiveSessionTimezoneIndependence:
                 "not UTC - the day boundary must be a UTC floor"
             )
         finally:
+            self._reset_zone(pg_engines["ml"])
+
+    def test_a_row_that_straddles_a_local_day_boundary_stays_on_its_utc_day(
+        self, client, pg_engines, seeded
+    ):
+        """A row at 20:00 UTC belongs to 2026-10-01, in **every** timezone.
+
+        The seed fixture only contains rows between 05:00 and 08:00 UTC, so
+        a timezone-sensitive truncation would still land on the same day
+        and the test above would pass vacuously.  This test inserts a row
+        at 2026-10-01T20:00Z, which is 2026-10-02 03:00 in UTC+7 and
+        2026-10-02 01:45 in UTC+05:45 - a local day boundary that a naive
+        local-time truncation would cross.
+
+        The bucket must stay on 2026-10-01 (the UTC floor) and the count
+        must be 5, not 4.
+        """
+        created = datetime(2026, 10, 1, 20, 0, tzinfo=UTC)
+        with pg_engines["ml"].begin() as conn:
+            conn.execute(
+                text(
+                    "INSERT INTO inference_logs (request_id, model_version_id, "
+                    "model_version_used, features, normalized_score, "
+                    "is_anomaly, reason_codes, model_status, processing_time_ms, "
+                    "created_at) VALUES (:r, :id, :v, CAST(:f AS jsonb), :s, "
+                    ":a, CAST(:c AS jsonb), :st, :ms, :cr)"
+                ),
+                {
+                    "r": str(uuid4()),
+                    "id": seeded["ml"]["model_id"],
+                    "v": LIVE_MODEL_VERSION,
+                    "f": json.dumps({
+                        "hour_of_day": 20, "fail_count_24h": 3,
+                        "ip_change_rate_7d": 0.2, "new_device": True,
+                        "average_login_interval_seconds": 900,
+                        "deviation_score": 0.7,
+                    }),
+                    "s": 0.95, "a": True,
+                    "c": json.dumps(["high_fail_count"]), "st": "ready",
+                    "ms": 15, "cr": created,
+                },
+            )
+        try:
+            self._force_foreign_zone(pg_engines["ml"])
+            try:
+                response = _get(client, "/api/v1/manager/ml-stats")
+                assert response.status_code == 200, response.text
+                daily = response.json()["daily"]
+
+                days = [row["day"] for row in daily]
+                assert days == ["2026-10-01"], (
+                    f"the row at 20:00 UTC landed on {days} - the day bucket "
+                    f"is truncated in the session timezone, not in UTC"
+                )
+                assert daily[0]["total"] == 5, (
+                    f"expected the 20:00 UTC row in the 2026-10-01 bucket "
+                    f"(5 rows), got {daily[0]['total']}"
+                )
+                assert daily[0]["anomalies"] == 2, (
+                    f"expected 2 anomalies in the 2026-10-01 bucket, got "
+                    f"{daily[0]['anomalies']}"
+                )
+            finally:
+                self._reset_zone(pg_engines["ml"])
+        finally:
             with pg_engines["ml"].begin() as conn:
-                conn.execute(text("ALTER ROLE sentinel RESET TIME ZONE"))
-            pg_engines["ml"].dispose()
+                conn.execute(
+                    text(
+                        "DELETE FROM inference_logs WHERE created_at = :cr"
+                    ),
+                    {"cr": created},
+                )
 
     def test_the_trends_buckets_do_not_depend_on_the_session_timezone(
         self, client, pg_engines
@@ -2290,15 +2454,37 @@ class TestLiveSessionTimezoneIndependence:
 
         baseline = _starts(client)
 
-        with pg_engines["ml"].begin() as conn:
-            conn.execute(text("ALTER ROLE sentinel SET TIME ZONE 'Asia/Ho_Chi_Minh'"))
-        pg_engines["ml"].dispose()
+        self._force_foreign_zone(pg_engines["ml"])
         try:
             assert _starts(client) == baseline, (
                 "the ML hourly buckets moved when the session timezone was "
                 "not UTC - the bucket floors must be UTC"
             )
         finally:
-            with pg_engines["ml"].begin() as conn:
-                conn.execute(text("ALTER ROLE sentinel RESET TIME ZONE"))
-            pg_engines["ml"].dispose()
+            self._reset_zone(pg_engines["ml"])
+
+    def test_the_timezone_change_does_not_leak_into_the_other_databases(
+        self, client, pg_engines
+    ):
+        """The setting is scoped to one database - the siblings stay on UTC.
+
+        ``ALTER ROLE ... SET`` without ``IN DATABASE`` would change the role
+        for **every** database on the server, so a Core or Detection query
+        could inherit the foreign zone.  The scoped form keeps the three
+        bounded contexts independent.
+        """
+        for engine in pg_engines.values():
+            self._reset_zone(engine)
+
+        self._force_foreign_zone(pg_engines["ml"])
+
+        try:
+            assert self._current_zone(pg_engines["ml"]) == self.FOREIGN_ZONE
+            for name in ("core", "detection"):
+                zone = self._current_zone(pg_engines[name])
+                assert zone != self.FOREIGN_ZONE, (
+                    f"the {name} database inherited the foreign timezone - the "
+                    f"role setting is not scoped to one database"
+                )
+        finally:
+            self._reset_zone(pg_engines["ml"])
