@@ -322,6 +322,34 @@ apiClient.interceptors.response.use(
     // Mark before refreshing so the replay can never loop.
     config._retry = true
 
+    // The request belongs to a session that has since been REPLACED.
+    //
+    // The epoch is bumped by every session boundary change (a new login,
+    // a logout), so `_sentEpoch !== getEpoch()` means the request went
+    // out under an OLDER session than the one the store holds now.
+    //
+    // Such a request must not touch the current session AT ALL:
+    //   - it must not replay with the current access token, because that
+    //     would run the old request's body under the new user's identity;
+    //   - it must not refresh, because `performRefresh` reads the CURRENT
+    //     refresh token and would rotate the NEW session.  If that refresh
+    //     then failed, `performRefresh` would clear the session and notify
+    //     the app - logging the new user out over a stale request.
+    //
+    // The request is therefore failed with the 401 it actually received.
+    // The current session is left completely untouched: its tokens, its
+    // expiry state and its React Query cache all survive.
+    if (
+      config._sentEpoch !== undefined &&
+      config._sentEpoch !== getEpoch()
+    ) {
+      throw new ApiError({
+        kind: 'unauthorized',
+        status: 401,
+        userMessage: 'Phiên đăng nhập đã thay đổi. Vui lòng đăng nhập lại.',
+      })
+    }
+
     // A 401 only means "this request's token is stale".  If the store
     // already holds a DIFFERENT access token, another flow has refreshed
     // the session in the meantime and there is nothing left to refresh:
@@ -335,11 +363,12 @@ apiClient.interceptors.response.use(
     // refresh would read the ALREADY ROTATED refresh token, succeed, and
     // rotate the token a second time - a race that only shows up when the
     // 401s arrive far enough apart (a slow runner, a loaded CI machine).
+    //
+    // The epoch guard above has already proved the request belongs to the
+    // CURRENT session, so the token in the store is the token of the
+    // session this request was sent for.
     const currentAccessToken = getAccessToken()
-    const sameSession =
-      config._sentEpoch === undefined || config._sentEpoch === getEpoch()
     if (
-      sameSession &&
       config._sentAccessToken !== undefined &&
       config._sentAccessToken !== null &&
       currentAccessToken !== null &&

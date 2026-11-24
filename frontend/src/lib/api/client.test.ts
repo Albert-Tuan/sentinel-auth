@@ -125,9 +125,9 @@ describe('single-flight refresh', () => {
     // The SECOND request answers 401 only AFTER the first refresh has
     // settled, so it reaches the interceptor with the mutex already free.
     // Both requests were sent with the SAME original token.
-    let releaseLateResponse: (() => void) | null = null
+    const releaseLateResponse: { current: (() => void) | null } = { current: null }
     const lateResponseGate = new Promise<void>((resolve) => {
-      releaseLateResponse = resolve
+      releaseLateResponse.current = resolve
     })
     let callIndex = 0
     mock.onGet('/alerts').reply(async (config) => {
@@ -146,7 +146,7 @@ describe('single-flight refresh', () => {
     // Let the first request complete its whole 401 -> refresh -> replay
     // cycle, then release the late 401.
     await first
-    releaseLateResponse!()
+    releaseLateResponse.current?.()
 
     const results = await Promise.all([first, late])
 
@@ -172,9 +172,9 @@ describe('single-flight refresh', () => {
       ]
     })
 
-    let releaseLateResponse: (() => void) | null = null
+    const releaseLateResponse: { current: (() => void) | null } = { current: null }
     const lateResponseGate = new Promise<void>((resolve) => {
-      releaseLateResponse = resolve
+      releaseLateResponse.current = resolve
     })
     let callIndex = 0
     mock.onGet('/alerts').reply(async (config) => {
@@ -189,7 +189,7 @@ describe('single-flight refresh', () => {
     const first = apiClient.get('/alerts')
     const late = apiClient.get('/alerts')
     await first
-    releaseLateResponse!()
+    releaseLateResponse.current?.()
     await late
 
     // The late 401 found the session already refreshed, so it replayed
@@ -670,6 +670,274 @@ describe('stale refresh failure (Case A / B)', () => {
     await expect(apiClient.get('/alerts')).resolves.toMatchObject({ status: 200 })
     expect(refreshCalls).toBe(1)
     expect(getAccessToken()).toBe('b3')
+  })
+})
+
+describe('epoch guard (a request from a replaced session)', () => {
+  /**
+   * Wait until the request has actually LEFT the client.
+   *
+   * The request interceptor runs on a microtask, so a request created and
+   * then immediately followed by `setSession()` would go out with the NEW
+   * token - it would be a request of the new session, not a stale one.
+   * The scenario under test needs the request to carry session A's token
+   * and to still be in flight when session B is established.
+   */
+  const waitForRequestToLeave = async (): Promise<void> => {
+    await vi.waitFor(() => {
+      expect(mock.history.get.length).toBeGreaterThan(0)
+    })
+  }
+
+  /**
+   * A request that was sent under session A must not touch session B.
+   *
+   * The epoch is bumped by every session boundary change, so the guard can
+   * tell "this request belongs to an older session" from "this request
+   * belongs to the current session but its token was rotated".
+   *
+   * Before the guard, a late 401 from session A fell through to
+   * `performRefresh()`, which reads the CURRENT refresh token - session
+   * B's. That rotated B's session, and if the refresh failed it cleared B
+   * and announced the expiry, which logs B out and wipes B's query cache.
+   */
+  it('never refreshes and never replays a request from a replaced session', async () => {
+    setSession('session-a-access', 'session-a-refresh')
+
+    let refreshCalls = 0
+    mock.onPost(ENDPOINTS.auth.refresh).reply(() => {
+      refreshCalls += 1
+      return [200, { access_token: 'rotated', refresh_token: 'rotated-refresh' }]
+    })
+
+    // The 401 for session A is held back until session B exists.
+    const releaseLateResponse: { current: (() => void) | null } = { current: null }
+    const lateResponseGate = new Promise<void>((resolve) => {
+      releaseLateResponse.current = resolve
+    })
+    mock.onGet('/alerts').reply(async () => {
+      await lateResponseGate
+      return [401, { detail: 'expired' }]
+    })
+
+    const expired = vi.fn()
+    const unsubscribe = onSessionExpired(expired)
+
+    const pending = apiClient.get('/alerts').catch((error) => error)
+
+    // The request is now genuinely on the wire with session A's token.
+    await waitForRequestToLeave()
+
+    // Session B replaces session A while the request is still in flight.
+    setSession('session-b-access', 'session-b-refresh')
+
+    // Now the late 401 for session A arrives.
+    releaseLateResponse.current?.()
+    const outcome = await pending
+
+    // The request fails with the 401 it actually received.
+    expect(outcome).toBeInstanceOf(ApiError)
+    expect((outcome as ApiError).kind).toBe('unauthorized')
+
+    // Session B was never refreshed.
+    expect(refreshCalls).toBe(0)
+
+    // Session B is still authenticated and its tokens are untouched.
+    expect(getAccessToken()).toBe('session-b-access')
+    expect(getRefreshToken()).toBe('session-b-refresh')
+
+    // No expiry was announced, so B's query cache is not cleared and B is
+    // not logged out.
+    expect(expired).not.toHaveBeenCalled()
+
+    unsubscribe()
+  })
+
+  it('does not refresh the new session when a tokenless request 401s late', async () => {
+    // The scenario that actually tears down the live session.
+    //
+    // The request went out BEFORE any session existed, so it carried no
+    // access token.  The user then logged in (session B).  When the stale
+    // 401 arrives, there is no token to compare against, so without the
+    // epoch guard the request falls through to `performRefresh()` - which
+    // reads the CURRENT refresh token and rotates session B.
+    __resetStore()
+
+    let refreshCalls = 0
+    mock.onPost(ENDPOINTS.auth.refresh).reply(() => {
+      refreshCalls += 1
+      return [
+        200,
+        { access_token: 'b-rotated-access', refresh_token: 'b-rotated-refresh' },
+      ]
+    })
+
+    const releaseLateResponse: { current: (() => void) | null } = { current: null }
+    const lateResponseGate = new Promise<void>((resolve) => {
+      releaseLateResponse.current = resolve
+    })
+    mock.onGet('/alerts').reply(async () => {
+      await lateResponseGate
+      return [401, { detail: 'expired' }]
+    })
+
+    const expired = vi.fn()
+    const unsubscribe = onSessionExpired(expired)
+
+    const pending = apiClient.get('/alerts').catch((error) => error)
+
+    // The request is on the wire, without any token.
+    await waitForRequestToLeave()
+
+    // The user logs in while the request is still in flight.
+    setSession('session-b-access', 'session-b-refresh')
+
+    releaseLateResponse.current?.()
+    const outcome = await pending
+
+    expect(outcome).toBeInstanceOf(ApiError)
+    expect((outcome as ApiError).kind).toBe('unauthorized')
+
+    // Session B was never refreshed.
+    expect(refreshCalls).toBe(0)
+
+    // Session B keeps its tokens and stays authenticated.
+    expect(getAccessToken()).toBe('session-b-access')
+    expect(getRefreshToken()).toBe('session-b-refresh')
+    expect(expired).not.toHaveBeenCalled()
+
+    unsubscribe()
+  })
+
+  it('does not log the new session out when the refresh would have failed', async () => {
+    // The proof that the guard matters: WITHOUT it, the late 401 of a
+    // tokenless request would refresh session B with B's own refresh
+    // token.  A refresh that fails clears the session and announces the
+    // expiry, which tears down the live session - the user is logged out
+    // over a request that belonged to nobody.
+    __resetStore()
+
+    // B's refresh token is already dead, so a refresh of B would fail
+    // with a 401 - exactly the situation the guard has to prevent.
+    mock.onPost(ENDPOINTS.auth.refresh).reply(401, {
+      detail: 'Invalid refresh token',
+    })
+
+    const releaseLateResponse: { current: (() => void) | null } = { current: null }
+    const lateResponseGate = new Promise<void>((resolve) => {
+      releaseLateResponse.current = resolve
+    })
+    mock.onGet('/alerts').reply(async () => {
+      await lateResponseGate
+      return [401, { detail: 'expired' }]
+    })
+
+    const expired = vi.fn()
+    const unsubscribe = onSessionExpired(expired)
+
+    const pending = apiClient.get('/alerts').catch((error) => error)
+    await waitForRequestToLeave()
+    setSession('session-b-access', 'session-b-dead-refresh')
+    releaseLateResponse.current?.()
+    await pending
+
+    // Session B is still alive.
+    expect(getAccessToken()).toBe('session-b-access')
+    expect(getRefreshToken()).toBe('session-b-dead-refresh')
+    expect(expired).not.toHaveBeenCalled()
+
+    unsubscribe()
+  })
+
+  it('does not replay a replaced session request with the current token', async () => {
+    setSession('session-a-access', 'session-a-refresh')
+
+    let replayedWith: string | undefined
+    const releaseLateResponse: { current: (() => void) | null } = { current: null }
+    const lateResponseGate = new Promise<void>((resolve) => {
+      releaseLateResponse.current = resolve
+    })
+    mock.onGet('/alerts').reply(async (config) => {
+      const auth = config.headers?.Authorization as string
+      if (auth === 'Bearer session-b-access') {
+        replayedWith = auth
+        return [200, { alerts: [] }]
+      }
+      await lateResponseGate
+      return [401, { detail: 'expired' }]
+    })
+
+    const pending = apiClient.get('/alerts').catch((error) => error)
+    await waitForRequestToLeave()
+    setSession('session-b-access', 'session-b-refresh')
+    releaseLateResponse.current?.()
+    const outcome = await pending
+
+    // The request was NOT replayed under session B's identity.
+    expect(outcome).toBeInstanceOf(ApiError)
+    expect(replayedWith).toBeUndefined()
+  })
+
+  it('still refreshes and retries for a request of the CURRENT session', async () => {
+    // The guard must not break the normal path: a request of the current
+    // session whose token was rotated still refreshes once and retries.
+    setSession('current-access', 'current-refresh')
+
+    let refreshCalls = 0
+    mock.onPost(ENDPOINTS.auth.refresh).reply(() => {
+      refreshCalls += 1
+      return [
+        200,
+        { access_token: 'rotated-access', refresh_token: 'rotated-refresh' },
+      ]
+    })
+    mock.onGet('/alerts').reply((config) => {
+      const auth = config.headers?.Authorization as string
+      return auth === 'Bearer rotated-access'
+        ? [200, { alerts: [] }]
+        : [401, { detail: 'expired' }]
+    })
+
+    await expect(apiClient.get('/alerts')).resolves.toMatchObject({ status: 200 })
+    expect(refreshCalls).toBe(1)
+    expect(getAccessToken()).toBe('rotated-access')
+  })
+
+  it('still replays a same-session late 401 with the current token', async () => {
+    // The late-401 optimisation for the SAME session must survive the
+    // guard: a rotated token is replayed, never refreshed twice.
+    setSession('current-access', 'current-refresh')
+
+    let refreshCalls = 0
+    mock.onPost(ENDPOINTS.auth.refresh).reply(() => {
+      refreshCalls += 1
+      return [
+        200,
+        { access_token: `rotated-access-${refreshCalls}`, refresh_token: 'r' },
+      ]
+    })
+
+    const releaseLateResponse: { current: (() => void) | null } = { current: null }
+    const lateResponseGate = new Promise<void>((resolve) => {
+      releaseLateResponse.current = resolve
+    })
+    let callIndex = 0
+    mock.onGet('/alerts').reply(async (config) => {
+      const auth = config.headers?.Authorization as string
+      if (auth?.startsWith('Bearer rotated-access-')) return [200, { alerts: [] }]
+      callIndex += 1
+      if (callIndex === 1) return [401, { detail: 'expired' }]
+      await lateResponseGate
+      return [401, { detail: 'expired' }]
+    })
+
+    const first = apiClient.get('/alerts')
+    const late = apiClient.get('/alerts')
+    await first
+    releaseLateResponse.current?.()
+    await late
+
+    expect(refreshCalls).toBe(1)
   })
 })
 
