@@ -24,7 +24,7 @@ export function DetectionLogTable({ logs }: DetectionLogTableProps) {
         <span className="flex flex-col">
           <span className="font-medium">{log.stage}</span>
           {log.stage_detail && (
-            <span className="text-xs text-slate-500">{log.stage_detail}</span>
+            <span className="text-xs text-text-muted">{log.stage_detail}</span>
           )}
         </span>
       ),
@@ -36,7 +36,7 @@ export function DetectionLogTable({ logs }: DetectionLogTableProps) {
         log.rule_name ? (
           <span className="font-mono text-xs">{log.rule_name}</span>
         ) : (
-          <span className="text-slate-400">—</span>
+          <span className="text-degraded">—</span>
         ),
     },
     {
@@ -45,7 +45,7 @@ export function DetectionLogTable({ logs }: DetectionLogTableProps) {
       render: (log) => {
         // `triggered` is null when the stage recorded no verdict at all.
         if (log.triggered === null || log.triggered === undefined) {
-          return <span className="text-slate-400">—</span>
+          return <span className="text-degraded">—</span>
         }
         return log.triggered ? (
           <Badge tone="danger">Có</Badge>
@@ -60,7 +60,7 @@ export function DetectionLogTable({ logs }: DetectionLogTableProps) {
       render: (log) =>
         log.score_contribution === null ||
         log.score_contribution === undefined ? (
-          <span className="text-slate-400">—</span>
+          <span className="text-degraded">—</span>
         ) : (
           log.score_contribution.toFixed(4)
         ),
@@ -72,7 +72,7 @@ export function DetectionLogTable({ logs }: DetectionLogTableProps) {
         log.decision ? (
           <span className="font-mono text-xs">{log.decision}</span>
         ) : (
-          <span className="text-slate-400">—</span>
+          <span className="text-degraded">—</span>
         ),
     },
     {
@@ -82,7 +82,7 @@ export function DetectionLogTable({ logs }: DetectionLogTableProps) {
         log.reason ? (
           <span title={log.reason}>{log.reason}</span>
         ) : (
-          <span className="text-slate-400">—</span>
+          <span className="text-degraded">—</span>
         ),
     },
     {

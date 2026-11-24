@@ -39,17 +39,17 @@ function ScoreRow({
 
   return (
     <div className="flex flex-col">
-      <dt className="text-xs uppercase tracking-wide text-slate-500">
+      <dt className="text-xs uppercase tracking-wide text-text-muted">
         {label}
       </dt>
-      <dd className="text-sm text-slate-800">
+      <dd className="text-sm text-text">
         {missing ? (
-          <span className="text-slate-400">Không có dữ liệu</span>
+          <span className="text-degraded">Không có dữ liệu</span>
         ) : (
           <span className="font-mono">{value.toFixed(4)}</span>
         )}
       </dd>
-      {hint && <p className="text-xs text-slate-500">{hint}</p>}
+      {hint && <p className="text-xs text-text-muted">{hint}</p>}
     </div>
   )
 }
@@ -66,11 +66,11 @@ function DetailRow({
 }) {
   return (
     <div className="flex flex-col">
-      <dt className="text-xs uppercase tracking-wide text-slate-500">
+      <dt className="text-xs uppercase tracking-wide text-text-muted">
         {label}
       </dt>
-      <dd className="break-words text-sm text-slate-800">
-        {value ? value : <span className="text-slate-400">Không có dữ liệu</span>}
+      <dd className="break-words text-sm text-text">
+        {value ? value : <span className="text-degraded">Không có dữ liệu</span>}
       </dd>
     </div>
   )
@@ -117,7 +117,7 @@ export function AlertEvidencePanel({ evidence }: AlertEvidencePanelProps) {
   return (
     <div className="flex flex-col gap-6">
       <section aria-labelledby="evidence-attempt-heading" className="flex flex-col gap-3">
-        <h3 id="evidence-attempt-heading" className="text-sm font-semibold text-slate-900">
+        <h3 id="evidence-attempt-heading" className="text-sm font-semibold text-text">
           Lần đăng nhập
         </h3>
         {attempt === null ? (
@@ -126,7 +126,7 @@ export function AlertEvidencePanel({ evidence }: AlertEvidencePanelProps) {
             description="Bản ghi lần đăng nhập của cảnh báo này không tồn tại."
           />
         ) : (
-          <dl className="grid grid-cols-1 gap-4 rounded-md border border-slate-200 bg-white p-4 sm:grid-cols-2">
+          <dl className="grid grid-cols-1 gap-4 rounded-md border border-border bg-surface-raised p-4 sm:grid-cols-2">
             <DetailRow label="Tài khoản" value={attempt.username_attempted} />
             <DetailRow label="Kết quả" value={attempt.outcome} />
             <DetailRow label="Địa chỉ IP" value={attempt.ip_address} />
@@ -148,7 +148,7 @@ export function AlertEvidencePanel({ evidence }: AlertEvidencePanelProps) {
       </section>
 
       <section aria-labelledby="evidence-risk-heading" className="flex flex-col gap-3">
-        <h3 id="evidence-risk-heading" className="text-sm font-semibold text-slate-900">
+        <h3 id="evidence-risk-heading" className="text-sm font-semibold text-text">
           Đánh giá rủi ro
         </h3>
         {assessment === null ? (
@@ -157,7 +157,7 @@ export function AlertEvidencePanel({ evidence }: AlertEvidencePanelProps) {
             description="Chưa có bản ghi đánh giá rủi ro cho cảnh báo này."
           />
         ) : (
-          <div className="flex flex-col gap-4 rounded-md border border-slate-200 bg-white p-4">
+          <div className="flex flex-col gap-4 rounded-md border border-border bg-surface-raised p-4">
             <dl className="grid grid-cols-1 gap-4 sm:grid-cols-3">
               <ScoreRow label="Điểm quy tắc" value={assessment.rule_score} />
               <ScoreRow label="Điểm ML" value={assessment.ml_score} />
@@ -172,7 +172,7 @@ export function AlertEvidencePanel({ evidence }: AlertEvidencePanelProps) {
               analyst must see it.
             */}
             <div className="flex flex-wrap items-center gap-2">
-              <span className="text-xs uppercase tracking-wide text-slate-500">
+              <span className="text-xs uppercase tracking-wide text-text-muted">
                 Trạng thái ML
               </span>
               {assessment.ml_status ? (
@@ -183,17 +183,17 @@ export function AlertEvidencePanel({ evidence }: AlertEvidencePanelProps) {
                 <Badge tone="neutral">Không có dữ liệu</Badge>
               )}
               {assessment.ml_model_version && (
-                <span className="font-mono text-xs text-slate-500">
+                <span className="font-mono text-xs text-text-muted">
                   {assessment.ml_model_version}
                 </span>
               )}
               {isRuleOnly(assessment) && (
-                <span className="text-xs text-amber-700">
+                <span className="text-xs text-warning">
                   Không có điểm ML — chỉ dùng điểm quy tắc (rule-only).
                 </span>
               )}
               {assessment.ml_score === null && !isRuleOnly(assessment) && (
-                <span className="text-xs text-slate-500">
+                <span className="text-xs text-text-muted">
                   Không có điểm ML từ engine.
                 </span>
               )}
@@ -206,10 +206,10 @@ export function AlertEvidencePanel({ evidence }: AlertEvidencePanelProps) {
 
             {assessment.rule_hits && assessment.rule_hits.length > 0 && (
               <div className="flex flex-col gap-1">
-                <span className="text-xs uppercase tracking-wide text-slate-500">
+                <span className="text-xs uppercase tracking-wide text-text-muted">
                   Quy tắc đã kích hoạt
                 </span>
-                <ul className="list-inside list-disc text-sm text-slate-700">
+                <ul className="list-inside list-disc text-sm text-text">
                   {assessment.rule_hits.map((hit, index) => (
                     <li key={index}>
                       {typeof hit === 'string'
@@ -224,7 +224,7 @@ export function AlertEvidencePanel({ evidence }: AlertEvidencePanelProps) {
             {assessment.ml_reason_codes &&
               assessment.ml_reason_codes.length > 0 && (
                 <div className="flex flex-col gap-1">
-                  <span className="text-xs uppercase tracking-wide text-slate-500">
+                  <span className="text-xs uppercase tracking-wide text-text-muted">
                     Mã lý do ML
                   </span>
                   <div className="flex flex-wrap gap-1">
@@ -241,7 +241,7 @@ export function AlertEvidencePanel({ evidence }: AlertEvidencePanelProps) {
       </section>
 
       <section aria-labelledby="evidence-logs-heading" className="flex flex-col gap-3">
-        <h3 id="evidence-logs-heading" className="text-sm font-semibold text-slate-900">
+        <h3 id="evidence-logs-heading" className="text-sm font-semibold text-text">
           Log phát hiện
         </h3>
         <DetectionLogTable logs={logs} />

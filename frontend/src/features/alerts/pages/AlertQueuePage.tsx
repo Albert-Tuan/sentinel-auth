@@ -195,8 +195,8 @@ export function AlertQueuePage() {
   return (
     <div className="flex flex-col gap-4">
       <header>
-        <h1 className="text-xl font-semibold text-slate-900">Hàng đợi cảnh báo</h1>
-        <p className="text-sm text-slate-500">
+        <h1 className="text-xl font-semibold text-text">Hàng đợi cảnh báo</h1>
+        <p className="text-sm text-text-muted">
           Cảnh báo an ninh do Detection Engine tạo ra, mới nhất trước. Chọn
           một cảnh báo để mở chi tiết điều tra.
         </p>
@@ -209,7 +209,7 @@ export function AlertQueuePage() {
       />
 
       {alertsQuery.isPending && (
-        <div className="flex items-center gap-2 text-sm text-slate-600">
+        <div className="flex items-center gap-2 text-sm text-text-muted">
           <Spinner /> Đang tải danh sách cảnh báo…
         </div>
       )}

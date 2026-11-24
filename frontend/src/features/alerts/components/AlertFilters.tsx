@@ -70,20 +70,20 @@ export function AlertFilters({
 
   return (
     <div
-      className="flex flex-wrap items-end gap-3 rounded-md border border-slate-200 bg-white p-4"
+      className="flex flex-wrap items-end gap-3 rounded-md border border-border bg-surface-raised p-4"
       role="search"
       aria-label="Bộ lọc danh sách cảnh báo"
     >
       <div className="w-48">
         <label
           htmlFor="alert-filter-status"
-          className="text-sm font-medium text-slate-700"
+          className="label-ops text-text-muted"
         >
           Trạng thái
         </label>
         <select
           id="alert-filter-status"
-          className="mt-1 w-full rounded-md border border-slate-300 bg-white px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-indigo-200 disabled:bg-slate-100"
+          className="mt-1 w-full rounded-md border border-border bg-surface-sunken px-3 py-2 text-sm text-text outline-none placeholder:text-degraded focus:border-primary disabled:text-degraded"
           value={value.status}
           onChange={(event) =>
             onChange({ ...value, status: event.target.value })
@@ -101,13 +101,13 @@ export function AlertFilters({
       <div className="w-48">
         <label
           htmlFor="alert-filter-risk"
-          className="text-sm font-medium text-slate-700"
+          className="label-ops text-text-muted"
         >
           Mức rủi ro
         </label>
         <select
           id="alert-filter-risk"
-          className="mt-1 w-full rounded-md border border-slate-300 bg-white px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-indigo-200 disabled:bg-slate-100"
+          className="mt-1 w-full rounded-md border border-border bg-surface-sunken px-3 py-2 text-sm text-text outline-none placeholder:text-degraded focus:border-primary disabled:text-degraded"
           value={value.risk_level}
           onChange={(event) =>
             onChange({ ...value, risk_level: event.target.value })

@@ -59,7 +59,7 @@ export function AlertTable({ alerts, subjects = {} }: AlertTableProps) {
         alert.detection_reason ? (
           <span title={alert.detection_reason}>{alert.detection_reason}</span>
         ) : (
-          <span className="text-slate-400">—</span>
+          <span className="text-degraded">—</span>
         ),
     },
     {
@@ -70,7 +70,7 @@ export function AlertTable({ alerts, subjects = {} }: AlertTableProps) {
         return subject?.username ? (
           subject.username
         ) : (
-          <span className="text-slate-400">—</span>
+          <span className="text-degraded">—</span>
         )
       },
     },
@@ -82,7 +82,7 @@ export function AlertTable({ alerts, subjects = {} }: AlertTableProps) {
         return subject?.ip_address ? (
           subject.ip_address
         ) : (
-          <span className="text-slate-400">—</span>
+          <span className="text-degraded">—</span>
         )
       },
     },
@@ -93,7 +93,7 @@ export function AlertTable({ alerts, subjects = {} }: AlertTableProps) {
         alert.assigned_to_id ? (
           <span className="font-mono text-xs">{alert.assigned_to_id}</span>
         ) : (
-          <span className="text-slate-400">Chưa giao</span>
+          <span className="text-degraded">Chưa giao</span>
         ),
     },
     {

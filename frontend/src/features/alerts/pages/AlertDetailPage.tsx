@@ -1,7 +1,7 @@
 /**
  * S-21 — Alert Detail (`/alerts/:alertId`).
  *
- * A READ-ONLY investigation screen. It merges three real endpoints:
+ * The investigation WORKSPACE. It merges three real endpoints:
  *
  *   GET /alerts/{id}            → the alert overview
  *   GET /alerts/{id}/evidence   → attempt + risk assessment + logs
@@ -10,8 +10,10 @@
  * The three requests are independent, so each section renders as soon as
  * its own data arrives: a failing timeline does not hide the evidence.
  *
- * Stage 5 owns every mutation (acknowledge / resolve / assign / actions
- * / add note); this screen never writes.
+ * The mutations live in `<AlertActionPanel/>` (acknowledge / resolve /
+ * assign / protective action / note) and are only rendered once the alert
+ * overview has loaded — the panel needs the current status to know which
+ * actions are still legal.
  */
 
 import { useQuery } from '@tanstack/react-query'
@@ -25,6 +27,7 @@ import { RiskBadge } from '@/shared/components/RiskBadge'
 import { Spinner } from '@/shared/components/Spinner'
 import { StatusBadge } from '@/shared/components/StatusBadge'
 
+import { AlertActionPanel } from '@/features/alerts/components/AlertActionPanel'
 import { AlertEvidencePanel } from '@/features/alerts/components/AlertEvidencePanel'
 import { TimelineFeed } from '@/features/alerts/components/TimelineFeed'
 import { PATHS } from '@/app/router/paths'
@@ -66,15 +69,15 @@ export function AlertDetailPage() {
         <div>
           <Link
             to={PATHS.alerts}
-            className="text-sm text-indigo-600 hover:underline"
+            className="text-sm text-secondary hover:underline"
           >
             ← Về hàng đợi cảnh báo
           </Link>
-          <h1 className="mt-1 text-xl font-semibold text-slate-900">
+          <h1 className="mt-1 text-xl font-semibold text-text">
             Chi tiết cảnh báo
           </h1>
           {alert && (
-            <p className="font-mono text-xs text-slate-500">{alert.id}</p>
+            <p className="font-mono text-xs text-text-muted">{alert.id}</p>
           )}
         </div>
         {alert && (
@@ -86,7 +89,7 @@ export function AlertDetailPage() {
       </header>
 
       {alertQuery.isPending && (
-        <div className="flex items-center gap-2 text-sm text-slate-600">
+        <div className="flex items-center gap-2 text-sm text-text-muted">
           <Spinner /> Đang tải cảnh báo…
         </div>
       )}
@@ -108,12 +111,14 @@ export function AlertDetailPage() {
 
       {alert && <AlertOverview alert={alert} />}
 
+      {alert && <AlertActionPanel alert={alert} />}
+
       <section aria-labelledby="alert-evidence-heading" className="flex flex-col gap-3">
-        <h2 id="alert-evidence-heading" className="text-sm font-semibold text-slate-900">
+        <h2 id="alert-evidence-heading" className="text-sm font-semibold text-text">
           Bằng chứng
         </h2>
         {evidenceQuery.isPending && (
-          <div className="flex items-center gap-2 text-sm text-slate-600">
+          <div className="flex items-center gap-2 text-sm text-text-muted">
             <Spinner /> Đang tải bằng chứng…
           </div>
         )}
@@ -137,11 +142,11 @@ export function AlertDetailPage() {
       </section>
 
       <section aria-labelledby="alert-timeline-heading" className="flex flex-col gap-3">
-        <h2 id="alert-timeline-heading" className="text-sm font-semibold text-slate-900">
+        <h2 id="alert-timeline-heading" className="text-sm font-semibold text-text">
           Dòng thời gian
         </h2>
         {timelineQuery.isPending && (
-          <div className="flex items-center gap-2 text-sm text-slate-600">
+          <div className="flex items-center gap-2 text-sm text-text-muted">
             <Spinner /> Đang tải dòng thời gian…
           </div>
         )}
@@ -179,20 +184,20 @@ function AlertOverview({ alert }: { alert: AlertItem }) {
       aria-labelledby="alert-overview-heading"
       className="flex flex-col gap-4"
     >
-      <h2 id="alert-overview-heading" className="text-sm font-semibold text-slate-900">
+      <h2 id="alert-overview-heading" className="text-sm font-semibold text-text">
         Tổng quan
       </h2>
 
       {alert.detection_reason && (
-        <div className="rounded-md border border-slate-200 bg-white p-4">
-          <p className="text-xs uppercase tracking-wide text-slate-500">
+        <div className="rounded-md border border-border bg-surface-raised p-4">
+          <p className="text-xs uppercase tracking-wide text-text-muted">
             Lý do phát hiện
           </p>
-          <p className="mt-1 text-sm text-slate-800">{alert.detection_reason}</p>
+          <p className="mt-1 text-sm text-text">{alert.detection_reason}</p>
         </div>
       )}
 
-      <dl className="grid grid-cols-1 gap-4 rounded-md border border-slate-200 bg-white p-4 sm:grid-cols-2 lg:grid-cols-3">
+      <dl className="grid grid-cols-1 gap-4 rounded-md border border-border bg-surface-raised p-4 sm:grid-cols-2 lg:grid-cols-3">
         <OverviewField label="Trạng thái">
           <StatusBadge status={alert.status} />
         </OverviewField>
@@ -212,51 +217,51 @@ function AlertOverview({ alert }: { alert: AlertItem }) {
           {alert.policy_id ? (
             <span className="font-mono text-xs">{alert.policy_id}</span>
           ) : (
-            <span className="text-slate-400">Không có dữ liệu</span>
+            <span className="text-degraded">Không có dữ liệu</span>
           )}
         </OverviewField>
         <OverviewField label="Người được giao">
           {alert.assigned_to_id ? (
             <span className="font-mono text-xs">{alert.assigned_to_id}</span>
           ) : (
-            <span className="text-slate-400">Chưa giao</span>
+            <span className="text-degraded">Chưa giao</span>
           )}
         </OverviewField>
         <OverviewField label="Kết quả xử lý">
           {alert.resolution ? (
             <Badge tone="neutral">{alert.resolution}</Badge>
           ) : (
-            <span className="text-slate-400">Chưa xử lý</span>
+            <span className="text-degraded">Chưa xử lý</span>
           )}
         </OverviewField>
         <OverviewField label="Người xử lý">
           {alert.resolved_by_id ? (
             <span className="font-mono text-xs">{alert.resolved_by_id}</span>
           ) : (
-            <span className="text-slate-400">Không có dữ liệu</span>
+            <span className="text-degraded">Không có dữ liệu</span>
           )}
         </OverviewField>
         <OverviewField label="Thời điểm xử lý">
           {alert.resolved_at ? (
             formatDateTime(alert.resolved_at)
           ) : (
-            <span className="text-slate-400">Không có dữ liệu</span>
+            <span className="text-degraded">Không có dữ liệu</span>
           )}
         </OverviewField>
       </dl>
 
       {alert.notes && (
-        <div className="rounded-md border border-slate-200 bg-white p-4">
-          <p className="text-xs uppercase tracking-wide text-slate-500">Ghi chú</p>
-          <p className="mt-1 whitespace-pre-wrap text-sm text-slate-800">
+        <div className="rounded-md border border-border bg-surface-raised p-4">
+          <p className="text-xs uppercase tracking-wide text-text-muted">Ghi chú</p>
+          <p className="mt-1 whitespace-pre-wrap text-sm text-text">
             {alert.notes}
           </p>
         </div>
       )}
 
       {alert.detection_scores && (
-        <div className="rounded-md border border-slate-200 bg-white p-4">
-          <p className="text-xs uppercase tracking-wide text-slate-500">
+        <div className="rounded-md border border-border bg-surface-raised p-4">
+          <p className="text-xs uppercase tracking-wide text-text-muted">
             Điểm phát hiện
           </p>
           <dl className="mt-2 grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
@@ -270,7 +275,7 @@ function AlertOverview({ alert }: { alert: AlertItem }) {
                   // "the engine produced no value here" — for example the
                   // `ml_score` of a rule-only fallback — so the row says
                   // so explicitly.
-                  <span className="text-slate-400">Không có dữ liệu</span>
+                  <span className="text-degraded">Không có dữ liệu</span>
                 ) : (
                   <span className="break-words font-mono text-xs">
                     {typeof value === 'object'
@@ -297,8 +302,8 @@ function OverviewField({
 }) {
   return (
     <div className="flex flex-col">
-      <dt className="text-xs uppercase tracking-wide text-slate-500">{label}</dt>
-      <dd className="mt-0.5 text-sm text-slate-800">{children}</dd>
+      <dt className="text-xs uppercase tracking-wide text-text-muted">{label}</dt>
+      <dd className="mt-0.5 text-sm text-text">{children}</dd>
     </div>
   )
 }

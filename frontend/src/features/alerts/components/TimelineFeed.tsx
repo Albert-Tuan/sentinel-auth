@@ -65,28 +65,28 @@ export function TimelineFeed({ events }: TimelineFeedProps) {
         return (
           <li
             key={event.id}
-            className="rounded-md border border-slate-200 bg-white p-3"
+            className="rounded-md border border-border bg-surface-raised p-3"
           >
             <div className="flex flex-wrap items-center gap-2">
               <Badge tone={tone}>{label}</Badge>
-              <span className="text-xs text-slate-500">
+              <span className="text-xs text-text-muted">
                 {formatDateTime(event.created_at)}
               </span>
-              <span className="text-xs text-slate-400">
+              <span className="text-xs text-degraded">
                 {event.actor_type || 'user'}
                 {event.actor_id ? ` · ${event.actor_id}` : ''}
               </span>
             </div>
 
             {(event.old_value !== null || event.new_value !== null) && (
-              <p className="mt-2 text-sm text-slate-700">
+              <p className="mt-2 text-sm text-text">
                 {event.old_value !== null && (
-                  <span className="text-slate-500 line-through">
+                  <span className="text-text-muted line-through">
                     {event.old_value}
                   </span>
                 )}
                 {event.old_value !== null && event.new_value !== null && (
-                  <span className="mx-1 text-slate-400">→</span>
+                  <span className="mx-1 text-degraded">→</span>
                 )}
                 {event.new_value !== null && (
                   <span className="font-medium">{event.new_value}</span>
@@ -95,13 +95,13 @@ export function TimelineFeed({ events }: TimelineFeedProps) {
             )}
 
             {event.comment && (
-              <p className="mt-2 whitespace-pre-wrap text-sm text-slate-600">
+              <p className="mt-2 whitespace-pre-wrap text-sm text-text-muted">
                 {event.comment}
               </p>
             )}
 
             {event.ip_address && (
-              <p className="mt-1 text-xs text-slate-400">
+              <p className="mt-1 text-xs text-degraded">
                 IP: {event.ip_address}
               </p>
             )}
