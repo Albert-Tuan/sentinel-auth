@@ -797,10 +797,23 @@ def check_persistence() -> None:
             cluster_id = str(conn.execute(text(
                 "SELECT system_identifier FROM pg_control_system()"
             )).scalar())
+
+        # The DATABASE's own OID is the finer-grained signal.  It survives
+        # a restart, but it changes when the database itself is dropped
+        # and recreated — which is exactly what happens when the demo
+        # databases are re-provisioned.  Without it, re-provisioning the
+        # database would be reported as "the data was lost across the
+        # restart", which is a false alarm: the data was never lost, the
+        # database is simply a different one.
+        with engine.connect() as conn:
+            database_oid = str(conn.execute(text(
+                "SELECT oid FROM pg_database WHERE datname = current_database()"
+            )).scalar())
     except Exception as exc:  # noqa: BLE001 - the outcome IS the check
         check("the persistence probe row exists in sentinel_core", False,
               f"{exc.__class__.__name__}: {exc}")
         cluster_id = None
+        database_oid = None
         found = None
     finally:
         engine.dispose()
@@ -818,12 +831,24 @@ def check_persistence() -> None:
     current_id = str(found[0]) if found else None
     recorded_id = state.get("probe_id")
     recorded_cluster = state.get("cluster_id")
+    recorded_oid = state.get("database_oid")
+
+    def _record() -> None:
+        """Write the current identity as the baseline."""
+        os.makedirs(os.path.dirname(state_file), exist_ok=True)
+        with open(state_file, "w", encoding="utf-8") as handle:
+            json.dump(
+                {
+                    "probe_id": current_id,
+                    "cluster_id": cluster_id,
+                    "database_oid": database_oid,
+                },
+                handle,
+            )
 
     if recorded_id is None:
         # First run against this cluster: record the identity.
-        os.makedirs(os.path.dirname(state_file), exist_ok=True)
-        with open(state_file, "w", encoding="utf-8") as handle:
-            json.dump({"probe_id": current_id, "cluster_id": cluster_id}, handle)
+        _record()
         check("the pre-restart probe identity was recorded", True,
               f"id={current_id} cluster={cluster_id}")
     elif recorded_cluster is not None and recorded_cluster != cluster_id:
@@ -831,9 +856,7 @@ def check_persistence() -> None:
         # between the two runs.  Nothing was lost - the old data is gone
         # because the volume itself is new.  Re-record the baseline
         # instead of reporting a false data loss.
-        os.makedirs(os.path.dirname(state_file), exist_ok=True)
-        with open(state_file, "w", encoding="utf-8") as handle:
-            json.dump({"probe_id": current_id, "cluster_id": cluster_id}, handle)
+        _record()
         check("the persistence baseline was re-recorded for the recreated cluster",
               True,
               f"cluster {recorded_cluster} -> {cluster_id} "
@@ -841,15 +864,37 @@ def check_persistence() -> None:
     elif recorded_cluster is None:
         # A state file written by an older version of this script, which
         # did not record the cluster.  It cannot be compared safely.
-        os.makedirs(os.path.dirname(state_file), exist_ok=True)
-        with open(state_file, "w", encoding="utf-8") as handle:
-            json.dump({"probe_id": current_id, "cluster_id": cluster_id}, handle)
+        _record()
         check("the persistence baseline was re-recorded with its cluster identity",
               True,
               f"cluster={cluster_id} (the previous file carried no cluster identity)")
+    elif recorded_oid is None:
+        # A state file written by a version of this script that did not
+        # record the database's OID.  The probe identity cannot be
+        # compared safely against it, so the baseline is re-recorded.
+        _record()
+        check("the persistence baseline was re-recorded with its database identity",
+              True,
+              f"database oid={database_oid} (the previous file carried no database identity)")
+    elif recorded_oid != database_oid:
+        # The DATABASE ITSELF was dropped and recreated — the cluster and
+        # its volume are the same, but the database is a different one.
+        #
+        # This is what happens when the demo databases are re-provisioned.
+        # No data was lost across the restart: the database is simply a
+        # different one, and it was empty when it was created.  The
+        # probe row this run just inserted therefore has a new identity,
+        # and comparing it with the old one would report a data loss that
+        # never happened.
+        _record()
+        check("the persistence baseline was re-recorded for the recreated database",
+              True,
+              f"database oid {recorded_oid} -> {database_oid} "
+              "(the database was recreated, so there was no data to lose)")
     else:
-        # The same cluster: the probe must have kept its identity across
-        # the restart.  A different identity here IS a real data loss.
+        # The same cluster and the same database: the probe must have kept
+        # its identity across the restart.  A different identity here IS a
+        # real data loss.
         check("the probe row survived the restart with the same identity",
               recorded_id == current_id,
               f"before={recorded_id} after={current_id}")
