@@ -19,8 +19,8 @@ Every "verified" entry below was run against the live demo stack on
 | B | The fixtures | 8 | 8 | `scripts/demo_seed_demo.py` |
 | C | The scenarios | 9 | 9 | `scripts/demo_scenarios.py` |
 | D | The safety | 9 | 9 | `tests/test_demo_fixtures.py` |
-| E | The regression | 8 | 8 | `pytest tests/` |
-| | **Total** | **44** | **44** | |
+| E | The regression | 12 | 12 | `pytest tests/` |
+| | **Total** | **48** | **48** | |
 
 The six demo scenarios contribute **55 individual checks**, all passing,
 twice in a row — the second run proves they are re-runnable.
@@ -160,11 +160,66 @@ The only change to `.gitignore` is one line:
 | E6 | The frontend type-checks | `tsc -b --noEmit` clean |
 | E7 | The frontend lints | `eslint .` clean |
 | E8 | The frontend unit tests pass | 18 files, 265 tests passed |
+| E9 | The frontend real-HTTP integration tests pass | 3 files, 50 tests passed |
+| E10 | The M10 HTTP smoke script passes | 79 passed, 0 failed |
+| E11 | The deployment verification passes | 67 passed, 0 failed |
+| E12 | The production frontend build succeeds | `vite build` ✓, 1.69s |
+
+### E9 in detail
+
+The integration suite talks to a LIVE backend over real HTTP, so it
+needs its own backend, its own SMTP sink and its own fixture users
+(`m12analyst`, `m12admin`, `m12manager`, `m12plain`). The demo stack
+uses the `demo_*` accounts, so the suite was pointed at a dedicated
+instance:
+
+```bash
+# the fixtures, in the disposable test databases
+CORE_DATABASE_URL=postgresql+psycopg2://…/sentinel_core_test \
+  python scripts/ci_seed_frontend_users.py
+DETECTION_DATABASE_URL=postgresql+psycopg2://…/sentinel_detection_test \
+  python scripts/ci_seed_frontend_alerts.py
+
+# the SMTP sink and the backend
+python scripts/ci_smtp_sink.py --host 127.0.0.1 --port 1025 --log /tmp/m13_otp_capture.log
+CORE_DATABASE_URL=… DETECTION_DATABASE_URL=… DETECTION_URL="" \
+  python -m uvicorn app.main:app --host 127.0.0.1 --port 58001
+
+# the suite
+cd frontend
+M12_API_ORIGIN=http://127.0.0.1:58001 \
+M12_API_ROOT=http://127.0.0.1:58001/api/v1 \
+M12_OTP_LOG=/tmp/m13_otp_capture.log \
+M12_DATABASE_URL=postgresql://…/sentinel_core_test \
+M12_PASSWORD=… M12_MFA_PASSWORD=… M12_MANAGER_PASSWORD=… \
+M12_ADMIN_PASSWORD=… M12_PLAIN_PASSWORD=… \
+  npm run test:integration
+```
+
+`M12_API_ORIGIN` and `M12_API_ROOT` MUST agree — the suite refuses to
+run when they disagree, so half the requests can never go to one
+backend and the other half to another.
+
+### The full evidence table
+
+| Suite | Baseline required | Result | Delta |
+|---|---|---|---|
+| Backend regression | ≥ 1199 passed | **1225 passed**, 0 failed, 0 skipped | +26 (the new fixture tests) |
+| HTTP smoke | ≥ 79 passed | **79 passed**, 0 failed | — |
+| Frontend unit/component | ≥ 265 passed | **265 passed**, 0 failed | — |
+| Frontend integration | ≥ 50 passed | **50 passed**, 0 failed | — |
+| Deployment verification | pass | **67 passed**, 0 failed | — |
+| TypeScript strict | pass | pass | — |
+| Lint | pass | pass | — |
+| Production build | pass | pass | — |
+| Demo scenarios | — | **55 checks**, 2 consecutive runs | — |
+| `git diff --check` | clean | clean | — |
+| Secret scan | clean | clean | — |
 
 ### E1 in detail
 
 ```
-1225 passed
+1225 passed in 91.95s
 ```
 
 (The suite needs its own disposable databases. `scripts/ci_bootstrap_postgres.sh`
