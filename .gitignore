@@ -40,6 +40,7 @@ docs/ml/INTERNAL_TEST_KEYS.txt
 .env
 .env.*
 !.env.example
+!.env.demo.example
 *.pem
 *.key
 

@@ -1,0 +1,43 @@
+# Sentinel Auth v3.3 — M13 demo stack compose override.
+#
+# This file is an OVERLAY on top of `docker-compose.yml`.  It changes
+# nothing about the topology: the same PostgreSQL image, the same three
+# logical databases, the same canonical schema files, the same Redis.
+#
+# It changes only two things:
+#
+#   1. the project name, so the demo stack owns its own containers and its
+#      own volumes and can never collide with the canonical deployment;
+#   2. the source of the bind-mounted init script and schema files.
+#
+# ---------------------------------------------------------------------------
+# WHY THE SCHEMA FILES ARE STAGED
+# ---------------------------------------------------------------------------
+# The canonical `docker-compose.yml` bind-mounts `./infra/postgres` into
+# the container.  That works on an ordinary filesystem, but it FAILS on
+# some hosts: a filesystem that cannot carry SELinux labels (a removable
+# or network mount such as `/run/media/...` on Fedora) makes the mount
+# unreadable inside the container, and the PostgreSQL entrypoint aborts
+# with "Permission denied" before it ever applies a schema.
+#
+# `scripts/demo_stack.sh` therefore STAGES the schema files into a
+# directory on the local filesystem (default: `~/.cache/sentinel-auth-demo`)
+# and this overlay mounts THAT directory instead.  The staged copy is
+# byte-identical to the repository's canonical files — the script verifies
+# the checksums — so the database the demo builds is the canonical
+# schema, not a variation of it.
+#
+# The staging directory is a CACHE, not a source of truth: it is
+# refreshed from the repository on every `start`, and it is safe to
+# delete at any time.
+
+services:
+  postgres:
+    volumes:
+      # The `:z` suffix asks the runtime to relabel the mounted files for
+      # SELinux.  It is a no-op on a runtime without SELinux, and it is
+      # what makes the mount readable inside a rootless, SELinux-enforcing
+      # container.  ``scripts/demo_stack.sh`` overrides the two source
+      # directories with the staged copies.
+      - ${DEMO_POSTGRES_INIT_DIR}:/docker-entrypoint-initdb.d:ro,z
+      - ${DEMO_POSTGRES_SCHEMA_DIR}:/schemas:ro,z
