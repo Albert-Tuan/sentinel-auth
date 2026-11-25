@@ -79,13 +79,31 @@ jobs:
       ML_DB: sentinel_ml_test
 
       # The three disposable DEMO databases, used by the M13 fixture tests.
-      # They carry the `_demo` marker, which is the opposite marker of the
-      # `*_test` databases above: the demo seed refuses to write to a
-      # database that lacks `_demo`, and the CI bootstrap refuses to touch
-      # a database that lacks `_test`.  The two vocabularies stay disjoint.
-      DEMO_CORE_DB: sentinel_core_demo
-      DEMO_DETECTION_DB: sentinel_detection_demo
-      DEMO_ML_DB: sentinel_ml_demo
+      #
+      # They carry the `_ci_demo` marker, which is DISTINCT from the
+      # `_demo` marker of the local demo stack's persistent databases and
+      # from the `_test` marker of the databases above.  Three disjoint
+      # vocabularies, three different safety boundaries:
+      #
+      #   *_test     the regression suite's disposable databases
+      #   *_demo     the local demo stack's PERSISTENT databases
+      #   *_ci_demo  the CI fixture tests' disposable demo databases
+      #
+      # The CI bootstrap DROPS and recreates its databases, so it must
+      # never be able to reach the persistent ones — hence the separate
+      # names, plus the script's own fail-closed guards.
+      DEMO_CORE_DB: sentinel_core_ci_demo
+      DEMO_DETECTION_DB: sentinel_detection_ci_demo
+      DEMO_ML_DB: sentinel_ml_ci_demo
+
+      # The acknowledgement that lets `scripts/ci_bootstrap_demo_databases.sh`
+      # run non-interactively.  It must name exactly the databases the
+      # script touches, so a stale acknowledgement cannot authorise a
+      # different set.  The CI environment is disposable by construction,
+      # so declaring it is accurate, not a bypass.
+      DEMO_CI_DISPOSABLE_SERVER: "true"
+      DEMO_CI_ACK: >-
+        sentinel_core_ci_demo sentinel_detection_ci_demo sentinel_ml_ci_demo
 
       # The legacy single-database layout used by the older PostgreSQL
       # modules.  It points at a *fourth* disposable database so those
@@ -503,13 +521,15 @@ jobs:
               echo "dropped ${db_name}"
             fi
           done
-          # The demo databases carry the OTHER marker, so they are dropped
-          # by their own rule.  The guard is inverted on purpose: this
-          # teardown only ever drops a database that carries `_demo`.
+          # The CI demo databases carry the OTHER marker, so they are
+          # dropped by their own rule.  The guard is inverted on purpose:
+          # this teardown only ever drops a database that carries
+          # `_ci_demo` — never the local demo stack's persistent `_demo`
+          # databases, and never the `*_test` ones above.
           for db_name in "${DEMO_CORE_DB}" "${DEMO_DETECTION_DB}" "${DEMO_ML_DB}"; do
             case "${db_name}" in
-              *_demo) ;;
-              *) echo "skipping ${db_name}: not a disposable demo database"; continue ;;
+              *_ci_demo) ;;
+              *) echo "skipping ${db_name}: not a disposable CI demo database"; continue ;;
             esac
             if ! psql -h "${POSTGRES_HOST}" -p "${POSTGRES_PORT}" -U "${POSTGRES_USER}" \
               -d postgres -c "DROP DATABASE IF EXISTS \"${db_name}\";" 2>&1; then
