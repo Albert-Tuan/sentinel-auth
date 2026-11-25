@@ -329,44 +329,130 @@ class TestTheAcknowledgement:
 # The full script, against a real disposable server
 # =============================================================================
 
-def _postgres_binaries() -> tuple[str, str, str]:
-    """Return the paths of the PostgreSQL binaries, or skip."""
+def _postgres_binaries() -> tuple[str, str, str] | None:
+    """Return the paths of the PostgreSQL binaries, or None.
+
+    The binaries are the preferred way to start a throwaway server, because
+    they need no container runtime.  When they are missing, the tests fall
+    back to a container — see `_start_container_postgres`.
+    """
     missing = [name for name in ("initdb", "pg_ctl", "psql") if shutil.which(name) is None]
     if missing:
-        pytest.skip(f"the PostgreSQL binaries are not available: {missing}")
+        return None
     return shutil.which("initdb"), shutil.which("pg_ctl"), shutil.which("psql")
+
+
+def _container_runtime() -> str | None:
+    """Return the available container runtime, or None."""
+    for runtime in ("docker", "podman"):
+        if shutil.which(runtime) is None:
+            continue
+        probe = subprocess.run(
+            [runtime, "info"], capture_output=True, text=True
+        )
+        if probe.returncode == 0:
+            return runtime
+    return None
 
 
 @pytest.fixture(scope="module")
 def disposable_postgres(tmp_path_factory):
-    """Start a throwaway PostgreSQL server and return its coordinates."""
-    initdb, pg_ctl, _ = _postgres_binaries()
+    """Start a throwaway PostgreSQL server and return its coordinates.
+
+    The server is started either from the local PostgreSQL binaries or from
+    a container, whichever is available.  The test is skipped ONLY when
+    neither is — the CI runner has a container runtime, so the suite
+    never turns into a silent coverage hole there.
+    """
+    binaries = _postgres_binaries()
+    runtime = _container_runtime()
+
+    if binaries is None and runtime is None:
+        pytest.skip(
+            "no throwaway PostgreSQL is available: neither the PostgreSQL "
+            "binaries (initdb, pg_ctl) nor a container runtime (docker, podman) "
+            "were found"
+        )
 
     root = tmp_path_factory.mktemp("pg")
-    data_dir = root / "data"
+    port = _free_port()
+
+    if binaries is not None:
+        initdb, pg_ctl, _ = binaries
+        data_dir = root / "data"
+        subprocess.run(
+            [initdb, "-D", str(data_dir), "-U", "sentinel", "--auth=trust"],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        result = subprocess.run(
+            [pg_ctl, "-D", str(data_dir), "-o", f"-p {port} -k {root}", "-l", str(root / "pg.log"), "start"],
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode != 0:
+            pytest.skip(f"the throwaway PostgreSQL server did not start: {result.stderr}")
+        try:
+            yield {"port": str(port), "root": str(root)}
+        finally:
+            subprocess.run([pg_ctl, "-D", str(data_dir), "stop"], capture_output=True, text=True)
+        return
+
+    # The container fallback.  The container is removed when the fixture
+    # ends, so it never leaves anything behind.
+    container = f"sentinel-m13-safety-{os.getpid()}"
     subprocess.run(
-        [initdb, "-D", str(data_dir), "-U", "sentinel", "--auth=trust"],
+        [
+            runtime,
+            "run",
+            "-d",
+            "--rm",
+            "--name",
+            container,
+            "-e",
+            "POSTGRES_HOST_AUTH_METHOD=trust",
+            "-e",
+            "POSTGRES_USER=sentinel",
+            "-p",
+            f"{port}:5432",
+            "postgres:16-alpine",
+        ],
         capture_output=True,
         text=True,
         check=True,
     )
-
-    port = _free_port()
-    result = subprocess.run(
-        [pg_ctl, "-D", str(data_dir), "-o", f"-p {port} -k {root}", "-l", str(root / "pg.log"), "start"],
-        capture_output=True,
-        text=True,
-    )
-    if result.returncode != 0:
-        pytest.skip(f"the throwaway PostgreSQL server did not start: {result.stderr}")
-
     try:
+        deadline = time.time() + 60
+        while time.time() < deadline:
+            probe = subprocess.run(
+                [
+                    "psql",
+                    "-h",
+                    "127.0.0.1",
+                    "-p",
+                    str(port),
+                    "-U",
+                    "sentinel",
+                    "-d",
+                    "postgres",
+                    "-Atc",
+                    "SELECT 1;",
+                ],
+                capture_output=True,
+                text=True,
+            )
+            if probe.returncode == 0:
+                break
+            time.sleep(1)
+        else:
+            pytest.skip("the throwaway PostgreSQL container did not become ready")
         yield {"port": str(port), "root": str(root)}
     finally:
-        subprocess.run([pg_ctl, "-D", str(data_dir), "stop"], capture_output=True, text=True)
+        subprocess.run([runtime, "rm", "-f", container], capture_output=True, text=True)
 
 
-@pytest.fixture(autouse=True)
+@pytest.fixture
 def clean_server(disposable_postgres):
     """Leave the throwaway server free of any leftover database.
 
@@ -374,6 +460,11 @@ def clean_server(disposable_postgres):
     would otherwise be visible to the next one.  Each test therefore starts
     from a server that holds nothing but the default databases, which
     makes the tests independent of their order.
+
+    The fixture is NOT autouse: it must not drag the pure unit tests into
+    the server's lifecycle.  A unit test that needs no server must never
+    be skipped because a server could not be started — that would turn a
+    coverage hole into a silent one.
     """
     port = disposable_postgres["port"]
     leftovers = _psql(
@@ -439,7 +530,7 @@ def _run_script(port: str, environment: dict | None = None, stdin: str = "") -> 
     )
 
 
-@pytest.mark.usefixtures("disposable_postgres")
+@pytest.mark.usefixtures("clean_server")
 class TestTheScriptAgainstARealServer:
     """The script as a whole, against a real PostgreSQL server."""
 
