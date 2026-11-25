@@ -132,6 +132,8 @@ OK: all 55 check(s) passed.
 | D13 | No single environment variable disables the protection | the declaration and the acknowledgement are separate inputs; the server state is checked regardless |
 | D14 | The CI run stays non-interactive | the CI environment supplies the declaration and the acknowledgement |
 | D15 | The local demo stack keeps its data across stop/restart | the row counts are identical before and after |
+| D16 | The safety suite never skips itself on a runner without the PostgreSQL binaries | the suite falls back to a throwaway container; 51 passed, 0 skipped |
+| D17 | The safety suite's own environment cannot authorise a run the test did not authorise | the harness strips `DEMO_CI_DISPOSABLE_SERVER` and `DEMO_CI_ACK` from every subprocess |
 
 ### D6 in detail
 
@@ -170,7 +172,7 @@ The only change to `.gitignore` is one line:
 | E10 | The M10 HTTP smoke script passes | 79 passed, 0 failed |
 | E11 | The deployment verification passes | 67 passed, 0 failed |
 | E12 | The production frontend build succeeds | `vite build` ✓, 1.53s |
-| E13 | The CI database safety tests pass | 51 passed |
+| E13 | The CI database safety tests pass | 51 passed, 0 skipped |
 
 ### E9 in detail
 
@@ -301,6 +303,21 @@ were actually dropped during the verification of this fix, and they had
 to be re-provisioned and re-seeded. The recovery is exactly what the
 new guards make impossible in the first place.
 
+And then two more that only the CI run itself surfaced — both of them
+holes in the *test harness*, not in the guards:
+
+| # | Problem | Symptom | Fix |
+|---|---|---|---|
+| 11 | The GitHub Actions runner has the `psql` client but neither `initdb` nor `pg_ctl`, so the throwaway server could not be started and the whole safety module skipped itself | the CI build went red with `skipped=51` — a skip is a silent hole in the coverage | the suite falls back to a throwaway `postgres:16-alpine` container, and the fixture that needs a server is no longer `autouse`, so the pure unit tests can never be skipped |
+| 12 | The CI workflow exports `DEMO_CI_DISPOSABLE_SERVER` and `DEMO_CI_ACK` for the whole job, so the subprocesses the safety suite started **inherited** the authorisation | three tests observed the script PROCEEDING while claiming to prove that it refuses — the ambient acknowledgement authorised runs the test never authorised | the harness strips both variables from the environment it hands to the script, so every authorisation is stated explicitly by the test that wants it |
+
+Defect 12 is worth stating plainly, because it is a subtle failure: a
+test that asserts "the script refuses" can silently become a test that
+asserts "the script proceeds", and it still passes as long as the
+script's *own* behaviour is unchanged. The suite proved the opposite of
+what it claimed. The fix makes the authorisation an explicit input of
+every test instead of an inherited ambient value.
+
 ---
 
 ## 8. The safety of the CI bootstrap
@@ -376,9 +393,27 @@ Type the three names above, separated by spaces, to proceed:
   schema, and is idempotent;
 * a manual run asks, and a wrong confirmation changes nothing.
 
+Two properties of the harness itself are proven too, because both of
+them were violated at some point during this work:
+
+* the suite never skips itself. The pure unit tests need no server at
+  all, and the server-backed tests start a throwaway PostgreSQL from
+  the local binaries **or** from a `postgres:16-alpine` container,
+  whichever the machine has. The GitHub Actions runner has only the
+  `psql` client, so the container is what it uses — and 51 passed, 0
+  skipped is the figure that proves it.
+* the suite never inherits its authorisation. The CI workflow exports
+  `DEMO_CI_DISPOSABLE_SERVER` and `DEMO_CI_ACK` for the whole job; the
+  harness strips both from the environment it hands to the script, so
+  a test can only observe a refusal it provoked itself.
+
 ---
 
 ## 9. The CI result
+
+Run: <https://github.com/Albert-Tuan/sentinel-auth/actions/runs/45614048186>
+(PR [#21](https://github.com/Albert-Tuan/sentinel-auth/pull/21), head
+`f6218cb07b24afcead0e0d2dd75067b46841e291`).
 
 ```
 Test & Smoke (py3.11)             pass
@@ -388,6 +423,10 @@ Frontend (real HTTP integration)  pass
 
 collected=1276 passed=1276 failed=0 skipped=0 error=0 xfailed=0
 ```
+
+The zero-skip figure is the point of the whole exercise: the safety
+suite contributed 51 of those 1276 tests, and every one of them ran on
+the runner — none of them skipped itself to make the build green.
 
 ---
 
