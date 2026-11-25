@@ -411,9 +411,9 @@ them were violated at some point during this work:
 
 ## 9. The CI result
 
-Run: <https://github.com/Albert-Tuan/sentinel-auth/actions/runs/45614048186>
+Run: <https://github.com/Albert-Tuan/sentinel-auth/actions/runs/45614884041>
 (PR [#21](https://github.com/Albert-Tuan/sentinel-auth/pull/21), head
-`f6218cb07b24afcead0e0d2dd75067b46841e291`).
+`56c24802d273d2313ac2a3e07479a404e02975e4`).
 
 ```
 Test & Smoke (py3.11)             pass
