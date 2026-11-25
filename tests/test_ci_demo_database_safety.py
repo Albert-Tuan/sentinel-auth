@@ -45,6 +45,29 @@ LOCAL_DEMO_DATABASES = (
 )
 
 
+#: The two variables the bootstrap script reads as ITS AUTHORISATION.
+#: They are stripped from every subprocess environment by default, because
+#: the CI job exports them at job level — and a test that inherits them
+#: would exercise the AUTHORISED path while claiming to exercise the
+#: REFUSAL path.  Each test therefore states the authorisation it wants
+#: explicitly, and the harness removes the ambient one.
+AUTHORISATION_VARIABLES = ("DEMO_CI_DISPOSABLE_SERVER", "DEMO_CI_ACK")
+
+
+def _clean_environment(environment: dict | None = None) -> dict:
+    """Return a copy of the environment without the authorisation variables.
+
+    The CI workflow exports ``DEMO_CI_DISPOSABLE_SERVER`` and
+    ``DEMO_CI_ACK`` for the whole job.  A subprocess would inherit them,
+    so a test that is meant to prove the script REFUSES would instead
+    observe it proceeding.  The authorisation is therefore always
+    explicit: absent by default, set by the test that wants it.
+    """
+    env = {key: value for key, value in os.environ.items() if key not in AUTHORISATION_VARIABLES}
+    env.update(environment or {})
+    return env
+
+
 def _source_script(environment: dict | None = None) -> dict:
     """Source the bootstrap script and return its shell state.
 
@@ -68,7 +91,7 @@ def _source_script(environment: dict | None = None) -> dict:
         cwd=REPO_ROOT,
         capture_output=True,
         text=True,
-        env={**os.environ, **(environment or {})},
+        env=_clean_environment(environment),
     )
     assert result.returncode == 0, result.stderr
     return result
@@ -90,7 +113,7 @@ def _run_guard(guard: str, argument: str, environment: dict | None = None) -> su
         cwd=REPO_ROOT,
         capture_output=True,
         text=True,
-        env={**os.environ, **(environment or {})},
+        env=_clean_environment(environment),
     )
 
 
@@ -511,7 +534,7 @@ def _psql(port: str, sql: str, database: str = "postgres") -> str:
 def _run_script(port: str, environment: dict | None = None, stdin: str = "") -> subprocess.CompletedProcess:
     """Run the bootstrap script against the throwaway server."""
     env = {
-        **os.environ,
+        **_clean_environment(),
         "POSTGRES_HOST": "127.0.0.1",
         "POSTGRES_PORT": port,
         "POSTGRES_USER": "sentinel",
