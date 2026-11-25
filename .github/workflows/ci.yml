@@ -78,6 +78,15 @@ jobs:
       DETECTION_DB: sentinel_detection_test
       ML_DB: sentinel_ml_test
 
+      # The three disposable DEMO databases, used by the M13 fixture tests.
+      # They carry the `_demo` marker, which is the opposite marker of the
+      # `*_test` databases above: the demo seed refuses to write to a
+      # database that lacks `_demo`, and the CI bootstrap refuses to touch
+      # a database that lacks `_test`.  The two vocabularies stay disjoint.
+      DEMO_CORE_DB: sentinel_core_demo
+      DEMO_DETECTION_DB: sentinel_detection_demo
+      DEMO_ML_DB: sentinel_ml_demo
+
       # The legacy single-database layout used by the older PostgreSQL
       # modules.  It points at a *fourth* disposable database so those
       # modules - which apply all three schemas into one database - cannot
@@ -329,6 +338,27 @@ jobs:
           bash scripts/ci_bootstrap_postgres.sh
 
       # -------------------------------------------------------------------
+      # 7b. Provision the three disposable DEMO databases
+      #
+      # The M13 fixture tests (`tests/test_demo_fixtures.py`) exercise the
+      # demo seed and the demo cleanup against the real demo databases.
+      # They skip themselves when those databases are absent, and the CI
+      # acceptance policy treats a skip as a failure - so the databases
+      # have to be provisioned here, or the suite fails for the wrong
+      # reason.
+      #
+      # The demo databases are provisioned by their OWN script, with their
+      # OWN guard: `scripts/ci_bootstrap_postgres.sh` refuses to touch
+      # anything whose name lacks the `_test` marker, while the demo seed
+      # refuses to write to anything whose name lacks the `_demo` marker.
+      # The two marker vocabularies stay disjoint on purpose.
+      # -------------------------------------------------------------------
+      - name: Provision the three disposable demo databases
+        run: |
+          set -euo pipefail
+          bash scripts/ci_bootstrap_demo_databases.sh
+
+      # -------------------------------------------------------------------
       # 8. Export the connection URLs the suite reads
       #
       # The URLs are assembled from the disposable container's own
@@ -339,6 +369,11 @@ jobs:
       # the unit tests override every session dependency, and exporting a
       # real database URL globally would let a test reach the disposable
       # PostgreSQL instead of its own SQLite session.
+      #
+      # The ``DEMO_*_DATABASE_URL`` variables point at the three demo
+      # databases provisioned above.  They are consumed ONLY by the M13
+      # fixture tests, which pass them to the seed script as the
+      # application's own ``*_DATABASE_URL`` variables.
       # -------------------------------------------------------------------
       - name: Export the disposable connection URLs
         run: |
@@ -348,6 +383,9 @@ jobs:
             echo "CORE_ANALYTICS_TEST_URL=postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@${POSTGRES_HOST}:${POSTGRES_PORT}/${CORE_DB}"
             echo "DETECTION_TEST_URL=postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@${POSTGRES_HOST}:${POSTGRES_PORT}/${DETECTION_DB}"
             echo "ML_TEST_URL=postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@${POSTGRES_HOST}:${POSTGRES_PORT}/${ML_DB}"
+            echo "DEMO_CORE_DATABASE_URL=postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@${POSTGRES_HOST}:${POSTGRES_PORT}/${DEMO_CORE_DB}"
+            echo "DEMO_DETECTION_DATABASE_URL=postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@${POSTGRES_HOST}:${POSTGRES_PORT}/${DEMO_DETECTION_DB}"
+            echo "DEMO_ML_DATABASE_URL=postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@${POSTGRES_HOST}:${POSTGRES_PORT}/${DEMO_ML_DB}"
           } >> "${GITHUB_ENV}"
           # Print the targets, never the credentials.
           echo "the disposable connection URLs were exported (credentials withheld)"
@@ -464,6 +502,22 @@ jobs:
             else
               echo "dropped ${db_name}"
             fi
+          done
+          # The demo databases carry the OTHER marker, so they are dropped
+          # by their own rule.  The guard is inverted on purpose: this
+          # teardown only ever drops a database that carries `_demo`.
+          for db_name in "${DEMO_CORE_DB}" "${DEMO_DETECTION_DB}" "${DEMO_ML_DB}"; do
+            case "${db_name}" in
+              *_demo) ;;
+              *) echo "skipping ${db_name}: not a disposable demo database"; continue ;;
+            esac
+            if ! psql -h "${POSTGRES_HOST}" -p "${POSTGRES_PORT}" -U "${POSTGRES_USER}" \
+              -d postgres -c "DROP DATABASE IF EXISTS \"${db_name}\";" 2>&1; then
+              echo "ERROR: could not drop ${db_name}" >&2
+              failed=1
+              continue
+            fi
+            echo "dropped ${db_name}"
           done
           if [ "${failed}" -ne 0 ]; then
             echo "the teardown did not drop every disposable database" >&2
