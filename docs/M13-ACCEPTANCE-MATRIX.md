@@ -18,9 +18,9 @@ Every "verified" entry below was run against the live demo stack on
 | A | The demo stack | 10 | 10 | `scripts/demo_stack.sh` |
 | B | The fixtures | 8 | 8 | `scripts/demo_seed_demo.py` |
 | C | The scenarios | 9 | 9 | `scripts/demo_scenarios.py` |
-| D | The safety | 9 | 9 | `tests/test_demo_fixtures.py` |
+| D | The safety | 15 | 15 | `tests/test_demo_fixtures.py`, `tests/test_ci_demo_database_safety.py` |
 | E | The regression | 12 | 12 | `pytest tests/` |
-| | **Total** | **48** | **48** | |
+| | **Total** | **54** | **54** | |
 
 The six demo scenarios contribute **55 individual checks**, all passing,
 twice in a row — the second run proves they are re-runnable.
@@ -126,6 +126,12 @@ OK: all 55 check(s) passed.
 | D7 | The internal secret is at least 32 characters and not a placeholder | `scripts/demo_stack.sh` refuses to start otherwise |
 | D8 | The frontend never reaches the demo database directly | the API owns every database; the browser only calls the API |
 | D9 | The wildcard proxy list is refused | `FORWARDED_ALLOW_IPS` is checked |
+| D10 | The CI bootstrap cannot drop the local demo stack's databases | the CI databases carry a separate `_ci_demo` marker |
+| D11 | The CI bootstrap refuses a server that holds the demo stack's data | `guard_disposable_server` verifies the real state |
+| D12 | The CI bootstrap refuses without a matching acknowledgement | `guard_acknowledged` compares against the hard-coded allowlist |
+| D13 | No single environment variable disables the protection | the declaration and the acknowledgement are separate inputs; the server state is checked regardless |
+| D14 | The CI run stays non-interactive | the CI environment supplies the declaration and the acknowledgement |
+| D15 | The local demo stack keeps its data across stop/restart | the row counts are identical before and after |
 
 ### D6 in detail
 
@@ -152,7 +158,7 @@ The only change to `.gitignore` is one line:
 
 | # | Criterion | Result |
 |---|---|---|
-| E1 | The full test suite passes | `1225 passed`, 0 failed, **0 skipped** |
+| E1 | The full test suite passes | `1276 passed`, 0 failed, **0 skipped** |
 | E2 | The M13 fixture tests pass | 26 passed |
 | E3 | `git diff --check` reports nothing | clean |
 | E4 | The new scripts compile | `python3 -m py_compile` clean, `bash -n` clean |
@@ -163,7 +169,8 @@ The only change to `.gitignore` is one line:
 | E9 | The frontend real-HTTP integration tests pass | 3 files, 50 tests passed |
 | E10 | The M10 HTTP smoke script passes | 79 passed, 0 failed |
 | E11 | The deployment verification passes | 67 passed, 0 failed |
-| E12 | The production frontend build succeeds | `vite build` ✓, 1.69s |
+| E12 | The production frontend build succeeds | `vite build` ✓, 1.53s |
+| E13 | The CI database safety tests pass | 51 passed |
 
 ### E9 in detail
 
@@ -204,7 +211,7 @@ backend and the other half to another.
 
 | Suite | Baseline required | Result | Delta |
 |---|---|---|---|
-| Backend regression | ≥ 1199 passed | **1225 passed**, 0 failed, 0 skipped | +26 (the new fixture tests) |
+| Backend regression | ≥ 1199 passed | **1276 passed**, 0 failed, 0 skipped | +77 (26 fixture + 51 safety tests) |
 | HTTP smoke | ≥ 79 passed | **79 passed**, 0 failed | — |
 | Frontend unit/component | ≥ 265 passed | **265 passed**, 0 failed | — |
 | Frontend integration | ≥ 50 passed | **50 passed**, 0 failed | — |
@@ -213,19 +220,20 @@ backend and the other half to another.
 | Lint | pass | pass | — |
 | Production build | pass | pass | — |
 | Demo scenarios | — | **55 checks**, 2 consecutive runs | — |
+| CI database safety | — | **51 passed** | new |
 | `git diff --check` | clean | clean | — |
 | Secret scan | clean | clean | — |
 
 ### E1 in detail
 
 ```
-collected=1225 passed=1225 failed=0 skipped=0 error=0 xfailed=0
+collected=1276 passed=1276 failed=0 skipped=0 error=0 xfailed=0
 ```
 
 (The suite needs its own disposable databases. `scripts/ci_bootstrap_postgres.sh`
 creates `sentinel_core_test`, `sentinel_detection_test`,
 `sentinel_ml_test` and `sentinel_legacy_test`; the M13 fixture tests
-need the three `*_demo` databases instead, which
+need the three `*_ci_demo` databases instead, which
 `scripts/ci_bootstrap_demo_databases.sh` creates.)
 
 The **zero-skip** policy matters here. The M13 fixture tests skip
@@ -235,16 +243,20 @@ what happened on the first CI run: 12 skips, therefore a red build. The
 fix was to provision the demo databases in CI, not to relax the
 policy.
 
-The two bootstrap scripts carry **opposite** guards on purpose:
+### The three database vocabularies
 
-| Script | Marker | Refuses to touch |
-|---|---|---|
-| `scripts/ci_bootstrap_postgres.sh` | `_test` | any database without `_test` |
-| `scripts/ci_bootstrap_demo_databases.sh` | `_demo` | any database without `_demo` |
+The repository now uses **three disjoint markers**, because three
+different operations need three different safety boundaries:
 
-The demo seed also refuses to write to a database without the `_demo`
-marker, and the CI bootstrap refuses to touch a database without the
-`_test` marker. Neither guard was weakened to accommodate the other.
+| Script | Marker | Databases | Refuses to touch |
+|---|---|---|---|
+| `scripts/ci_bootstrap_postgres.sh` | `_test` | `sentinel_core_test`, … | anything without `_test` |
+| `scripts/demo_stack.sh` (the local demo stack) | `_demo` | `sentinel_core_demo`, … | anything without `_demo` |
+| `scripts/ci_bootstrap_demo_databases.sh` | `_ci_demo` | `sentinel_core_ci_demo`, … | anything without `_ci_demo` |
+
+The third one is the most dangerous script in the repository — it DROPS
+and RECREATES its databases — so it carries five independent,
+fail-closed guards of its own. See section 7.
 
 ---
 
@@ -278,9 +290,95 @@ And one that only the CI run surfaced:
 Defect 9 was **not** fixed by relaxing the zero-skip policy. The policy
 stayed; the infrastructure was fixed.
 
+And one that the safety review surfaced — the most serious of them:
+
+| # | Problem | Symptom | Fix |
+|---|---|---|---|
+| 10 | The CI bootstrap used the **same database names** as the local demo stack (`sentinel_*_demo`) | running it by hand on a developer machine DROPPED the running demo stack's data | the CI databases were renamed to `sentinel_*_ci_demo`, and the script gained five fail-closed guards |
+
+Defect 10 was not theoretical: the local demo stack's three databases
+were actually dropped during the verification of this fix, and they had
+to be re-provisioned and re-seeded. The recovery is exactly what the
+new guards make impossible in the first place.
+
 ---
 
-## 8. The CI result
+## 8. The safety of the CI bootstrap
+
+`scripts/ci_bootstrap_demo_databases.sh` is the only script in the
+repository that DROPs databases. It therefore carries five independent,
+fail-closed guards. Each one refuses by default, and a bug in one does
+not open a hole in the next.
+
+| Layer | Guard | What it refuses |
+|---|---|---|
+| 1 | `guard_allowlisted` | a name outside the hard-coded allowlist — the allowlist **cannot** be widened from the environment |
+| 2 | `guard_marked` | a name that does not end with `_ci_demo` |
+| 3 | `guard_no_local_overlap` | a name that is one of the local demo stack's persistent databases |
+| 4 | `guard_disposable_server` | a server that **actually holds** the local demo stack's databases, whatever the environment claims |
+| 5 | `guard_acknowledged` | an acknowledgement that does not name exactly the three targets |
+
+### No single environment variable disables the protection
+
+This is the property the guards are designed around, and it is proved
+by a test:
+
+```bash
+# The declaration alone does NOT get past layer 4.
+DEMO_CI_DISPOSABLE_SERVER=true \
+DEMO_CI_ACK="sentinel_core_ci_demo sentinel_detection_ci_demo sentinel_ml_ci_demo" \
+bash scripts/ci_bootstrap_demo_databases.sh
+```
+
+against a server that holds `sentinel_core_demo`:
+
+```
+ERROR: refusing to run: the target server holds the local demo stack's
+persistent database 'sentinel_core_demo'. ... Nothing was changed.
+```
+
+The declaration and the acknowledgement are **separate** inputs, the
+acknowledgement must match the allowlist exactly, and layer 4 verifies
+the **real state** of the server regardless of what either of them says.
+
+### The CI run stays non-interactive
+
+The CI environment supplies both inputs, so the pipeline never waits
+for a human:
+
+```yaml
+DEMO_CI_DISPOSABLE_SERVER: "true"
+DEMO_CI_ACK: >-
+  sentinel_core_ci_demo sentinel_detection_ci_demo sentinel_ml_ci_demo
+```
+
+A manual run asks instead, and says exactly what it is about to do:
+
+```
+This script DROPS and RECREATES the following databases:
+  - sentinel_core_ci_demo
+  - sentinel_detection_ci_demo
+  - sentinel_ml_ci_demo
+
+Type the three names above, separated by spaces, to proceed:
+```
+
+### The regression tests
+
+`tests/test_ci_demo_database_safety.py` — 51 tests:
+
+* every layer refuses, proven by calling the guard directly (the script
+  is *sourced*, so no SQL runs);
+* an unauthorised run against a real PostgreSQL server creates nothing;
+* a wrong acknowledgement leaves an existing database untouched;
+* the declaration alone does not bypass the server check;
+* an authorised run provisions the three databases with the canonical
+  schema, and is idempotent;
+* a manual run asks, and a wrong confirmation changes nothing.
+
+---
+
+## 9. The CI result
 
 ```
 Test & Smoke (py3.11)             pass
@@ -288,12 +386,12 @@ Test & Smoke (py3.12)             pass
 Frontend (unit & build)           pass
 Frontend (real HTTP integration)  pass
 
-collected=1225 passed=1225 failed=0 skipped=0 error=0 xfailed=0
+collected=1276 passed=1276 failed=0 skipped=0 error=0 xfailed=0
 ```
 
 ---
 
-## 9. How to reproduce the whole matrix
+## 10. How to reproduce the whole matrix
 
 ```bash
 # 1. the stack
@@ -310,6 +408,7 @@ scripts/demo_scenarios.py --all
 
 # 4. the safety
 pytest tests/test_demo_fixtures.py -q
+pytest tests/test_ci_demo_database_safety.py -q
 
 # 5. the regression
 scripts/ci_bootstrap_postgres.sh
@@ -322,7 +421,7 @@ git diff --check
 
 ---
 
-## 10. Related documents
+## 11. Related documents
 
 * [M13-FULLSTACK-DEPLOYMENT.md](M13-FULLSTACK-DEPLOYMENT.md) — the demo stack
 * [M13-DEMO-FIXTURES.md](M13-DEMO-FIXTURES.md) — the reproducible fixtures
