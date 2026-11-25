@@ -152,7 +152,7 @@ The only change to `.gitignore` is one line:
 
 | # | Criterion | Result |
 |---|---|---|
-| E1 | The full test suite passes | `1225 passed in 91.95s` |
+| E1 | The full test suite passes | `1225 passed`, 0 failed, **0 skipped** |
 | E2 | The M13 fixture tests pass | 26 passed |
 | E3 | `git diff --check` reports nothing | clean |
 | E4 | The new scripts compile | `python3 -m py_compile` clean, `bash -n` clean |
@@ -219,14 +219,32 @@ backend and the other half to another.
 ### E1 in detail
 
 ```
-1225 passed in 91.95s
+collected=1225 passed=1225 failed=0 skipped=0 error=0 xfailed=0
 ```
 
 (The suite needs its own disposable databases. `scripts/ci_bootstrap_postgres.sh`
 creates `sentinel_core_test`, `sentinel_detection_test`,
 `sentinel_ml_test` and `sentinel_legacy_test`; the M13 fixture tests
-need the three `*_demo` databases instead, and skip themselves when
-they are absent.)
+need the three `*_demo` databases instead, which
+`scripts/ci_bootstrap_demo_databases.sh` creates.)
+
+The **zero-skip** policy matters here. The M13 fixture tests skip
+themselves when the demo databases are absent, and a skip is a silent
+hole in the coverage — so CI treats it as a failure. That is exactly
+what happened on the first CI run: 12 skips, therefore a red build. The
+fix was to provision the demo databases in CI, not to relax the
+policy.
+
+The two bootstrap scripts carry **opposite** guards on purpose:
+
+| Script | Marker | Refuses to touch |
+|---|---|---|
+| `scripts/ci_bootstrap_postgres.sh` | `_test` | any database without `_test` |
+| `scripts/ci_bootstrap_demo_databases.sh` | `_demo` | any database without `_demo` |
+
+The demo seed also refuses to write to a database without the `_demo`
+marker, and the CI bootstrap refuses to touch a database without the
+`_test` marker. Neither guard was weakened to accommodate the other.
 
 ---
 
@@ -251,9 +269,31 @@ And three more that the scenario work surfaced:
 | 7 | The OTP was read from the whole log, so a stale code could be used | `Invalid MFA code` | the reader is offset-based: the size is taken before the login |
 | 8 | The login rate limit (5 per minute) tripped the scenario | `429 Too many requests` | the scenario retries and says so |
 
+And one that only the CI run surfaced:
+
+| # | Problem | Symptom | Fix |
+|---|---|---|---|
+| 9 | The M13 fixture tests skipped themselves when the demo databases were absent | the CI build went red with `skipped=12` — a skip is a silent hole in the coverage | `scripts/ci_bootstrap_demo_databases.sh` provisions the three demo databases in CI, with its own `_demo` guard |
+
+Defect 9 was **not** fixed by relaxing the zero-skip policy. The policy
+stayed; the infrastructure was fixed.
+
 ---
 
-## 8. How to reproduce the whole matrix
+## 8. The CI result
+
+```
+Test & Smoke (py3.11)             pass
+Test & Smoke (py3.12)             pass
+Frontend (unit & build)           pass
+Frontend (real HTTP integration)  pass
+
+collected=1225 passed=1225 failed=0 skipped=0 error=0 xfailed=0
+```
+
+---
+
+## 9. How to reproduce the whole matrix
 
 ```bash
 # 1. the stack
@@ -273,6 +313,7 @@ pytest tests/test_demo_fixtures.py -q
 
 # 5. the regression
 scripts/ci_bootstrap_postgres.sh
+scripts/ci_bootstrap_demo_databases.sh
 pytest tests/ -q
 
 # 6. the diff
@@ -281,7 +322,7 @@ git diff --check
 
 ---
 
-## 9. Related documents
+## 10. Related documents
 
 * [M13-FULLSTACK-DEPLOYMENT.md](M13-FULLSTACK-DEPLOYMENT.md) — the demo stack
 * [M13-DEMO-FIXTURES.md](M13-DEMO-FIXTURES.md) — the reproducible fixtures
