@@ -152,12 +152,28 @@ export function AlertActionPanel({ alert }: AlertActionPanelProps) {
     mutationFn: () =>
       runAlertAction(alert.id, {
         action,
-        reason: actionReason.trim() ? actionReason.trim() : null,
+        reason: actionReason.trim(),
       }),
     onSuccess: async () => {
       setActionOpen(false)
       setActionReason('')
       await invalidateAlerts()
+    },
+    /**
+     * The dialog closes on a FAILURE too.
+     *
+     * The failure notice of a protective action lives BELOW the dialog in
+     * the document, and the dialog draws an 85% opaque curtain over the
+     * whole screen.  A notice hidden behind that curtain is not a notice:
+     * the analyst would see the dialog still open and the action form
+     * still filled, with the reason for the refusal unreadable.
+     *
+     * Closing the dialog hands the outcome back to the analyst — the
+     * "HÀNH ĐỘNG KHÔNG ĐƯỢC ÁP DỤNG" banner is then in full view, next
+     * to the timeline entry that records the failed attempt.
+     */
+    onError: () => {
+      setActionOpen(false)
     },
   })
 
@@ -410,17 +426,28 @@ export function AlertActionPanel({ alert }: AlertActionPanelProps) {
                 </option>
               ))}
             </select>
+            {/*
+              The backend REQUIRES a reason: `AlertActionRequest.reason` is
+              `Field(..., min_length=1)`, so an empty reason is refused with
+              a 422 — it never reaches Core, and it is therefore NOT a 502.
+              The dialog refuses to send a request the server is bound to
+              reject, and the analyst is told why instead of watching a
+              validation error arrive after the fact.
+            */}
             <Input
               id="alert-action-reason"
-              label="Lý do (không bắt buộc)"
+              label="Lý do"
               value={actionReason}
               onChange={(event) => setActionReason(event.target.value)}
+              hint="Bắt buộc — lý do được ghi vào dòng thời gian của cảnh báo."
+              required
             />
           </div>
         }
         confirmLabel="Chạy hành động"
         destructive={DESTRUCTIVE_ACTIONS.includes(action)}
         busy={actionMutation.isPending}
+        confirmDisabled={!actionReason.trim()}
         onCancel={() => setActionOpen(false)}
         onConfirm={() => actionMutation.mutate()}
       />

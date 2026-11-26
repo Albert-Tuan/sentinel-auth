@@ -440,7 +440,16 @@ export interface AlertAssignRequest {
 
 export interface AlertActionRequest {
   action: SecurityAction
-  reason?: string | null
+  /**
+   * The reason of the action.
+   *
+   * The backend REQUIRES it (`AlertActionRequest.reason` is
+   * `Field(..., min_length=1)`), so an empty reason is rejected with a
+   * 422 before the action is ever dispatched to Core.  The type says so,
+   * because a nullable reason here would only produce a request the
+   * server is bound to refuse.
+   */
+  reason: string
 }
 
 export interface AlertActionResponse {

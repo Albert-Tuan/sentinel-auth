@@ -932,3 +932,349 @@ jobs:
             kill "${SMTP_SINK_PID}" 2>/dev/null || true
           fi
           echo "the backend and the SMTP sink were stopped"
+
+  # ---------------------------------------------------------------------------
+  # Browser E2E — real Chromium against the real demo stack
+  # ---------------------------------------------------------------------------
+  # This job runs the M13.2 Playwright suite: a REAL Chromium drives the
+  # REAL FastAPI monolith, the REAL PostgreSQL databases and the REAL
+  # Redis.  No request is intercepted, no route is stubbed, no business
+  # response is mocked — the only synthetic input is the MFA OTP, which
+  # is captured from a real SMTP hop.
+  #
+  # It is a SEPARATE job on purpose:
+  #   - the unit/component job must never be presented as browser
+  #     coverage, and the browser coverage must never be presented as
+  #     unit coverage;
+  #   - the browser suite MUTATES shared state, so it needs its own
+  #     disposable databases and its own seed;
+  #   - a browser regression is then reported as a browser regression.
+  #
+  # The suite runs with ONE worker, because the scenarios acknowledge and
+  # resolve alerts, activate policies and revoke sessions.  Running them
+  # in parallel would make the outcome depend on the scheduling order.
+  browser-e2e:
+    name: Browser E2E (real Chromium)
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+
+    env:
+      TZ: UTC
+      PYTHONHASHSEED: "0"
+
+      # --- Disposable PostgreSQL ------------------------------------------
+      POSTGRES_HOST: 127.0.0.1
+      POSTGRES_PORT: "5432"
+      POSTGRES_USER: sentinel
+      POSTGRES_PASSWORD: sentinel_ci_disposable
+      PGPASSWORD: sentinel_ci_disposable
+
+      # The three disposable DEMO databases.
+      #
+      # They carry the `_ci_demo` marker, which is DISJOINT from the
+      # `_demo` marker of the local demo stack's persistent databases and
+      # from the `_test` marker of the regression suite's databases.  The
+      # demo seed refuses to write to anything that does not carry
+      # `_demo`, so the CI databases are named to satisfy that guard
+      # while never being reachable from a local run.
+      DEMO_CORE_DB: sentinel_core_ci_demo
+      DEMO_DETECTION_DB: sentinel_detection_ci_demo
+      DEMO_ML_DB: sentinel_ml_ci_demo
+
+      DEMO_CI_DISPOSABLE_SERVER: "true"
+      DEMO_CI_ACK: >-
+        sentinel_core_ci_demo sentinel_detection_ci_demo sentinel_ml_ci_demo
+
+      # --- The demo stack's own coordinates -------------------------------
+      # The demo stack owns its ports and its `.env.demo`; the browser
+      # suite reads both through the same script a developer uses, so the
+      # CI run and the local run exercise the SAME code path.
+      APP_HOST: 127.0.0.1
+      APP_PORT: "58000"
+      VITE_DEV_PORT: "55173"
+      REDIS_PORT: "56379"
+      MFA_SMTP_PORT: "52525"
+
+      # --- The demo environment file -------------------------------------
+      # The demo stack reads `.env.demo`.  The CI job writes its own, from
+      # the disposable container's coordinates, so the canonical
+      # deployment's `.env` is never touched.
+      DEMO_ENV_FILE: /tmp/e2e-demo.env
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: sentinel
+          POSTGRES_PASSWORD: sentinel_ci_disposable
+          POSTGRES_DB: postgres
+          TZ: UTC
+          POSTGRES_INITDB_ARGS: "--auth-host=scram-sha-256 --auth-local=scram-sha-256"
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U sentinel"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 56379:6379
+
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      - name: Install the dependencies
+        run: |
+          set -euo pipefail
+          npm --prefix frontend ci
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+
+      # -------------------------------------------------------------------
+      # The Chromium build.  Playwright downloads its own browser, so the
+      # runner's browsers are irrelevant.
+      # -------------------------------------------------------------------
+      - name: Install the Chromium build
+        working-directory: frontend
+        run: npx playwright install --with-deps chromium
+
+      # -------------------------------------------------------------------
+      # The strict typecheck of the browser suite.
+      #
+      # The suite has its own tsconfig, because it is checked against
+      # Node's types rather than the browser's, and because it must not
+      # be folded into the application's own project references.
+      # -------------------------------------------------------------------
+      - name: Typecheck the browser suite
+        working-directory: frontend
+        run: npx tsc -p tsconfig.e2e.json
+
+      # -------------------------------------------------------------------
+      # The disposable demo databases.
+      # -------------------------------------------------------------------
+      - name: Provision the disposable demo databases
+        run: bash scripts/ci_bootstrap_demo_databases.sh
+
+      # -------------------------------------------------------------------
+      # The demo environment file.
+      #
+      # It is written from the disposable container's coordinates and the
+      # runner-generated secret.  The secret is generated here, masked,
+      # and never stored in GitHub.
+      # -------------------------------------------------------------------
+      - name: Generate the throwaway internal secret
+        run: |
+          set -euo pipefail
+          secret="$(python -c 'import secrets; print(secrets.token_urlsafe(32))')"
+          echo "::add-mask::${secret}"
+          {
+            echo "CI_INTERNAL_SECRET=${secret}"
+          } >> "${GITHUB_ENV}"
+
+      - name: Write the demo environment file
+        env:
+          INTERNAL_SECRET: ${{ env.CI_INTERNAL_SECRET }}
+        run: |
+          set -euo pipefail
+          cat > "${DEMO_ENV_FILE}" <<EOF
+          POSTGRES_USER=${POSTGRES_USER}
+          POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+          POSTGRES_PORT=${POSTGRES_PORT}
+          CORE_DB=${DEMO_CORE_DB}
+          DETECTION_DB=${DEMO_DETECTION_DB}
+          ML_DB=${DEMO_ML_DB}
+          CORE_DATABASE_URL=postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@${POSTGRES_HOST}:${POSTGRES_PORT}/${DEMO_CORE_DB}
+          DETECTION_DATABASE_URL=postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@${POSTGRES_HOST}:${POSTGRES_PORT}/${DEMO_DETECTION_DB}
+          ML_DATABASE_URL=postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@${POSTGRES_HOST}:${POSTGRES_PORT}/${DEMO_ML_DB}
+          INTERNAL_SECRET=${INTERNAL_SECRET}
+          APP_HOST=${APP_HOST}
+          APP_PORT=${APP_PORT}
+          CORE_APP_URL=http://${APP_HOST}:${APP_PORT}
+          DETECTION_URL=http://${APP_HOST}:${APP_PORT}
+          REDIS_URL=redis://127.0.0.1:${REDIS_PORT}/0
+          VITE_DEV_PORT=${VITE_DEV_PORT}
+          POSTGRES_PORT=${POSTGRES_PORT}
+          REDIS_PORT=${REDIS_PORT}
+          MFA_SMTP_PORT=${MFA_SMTP_PORT}
+          MFA_SMTP_HOST=127.0.0.1
+          FORWARDED_ALLOW_IPS=127.0.0.1
+          CORS_ALLOWED_ORIGINS=http://127.0.0.1:${VITE_DEV_PORT}
+          EOF
+          # The credentials are never printed.
+          echo "the demo environment file was written (credentials withheld)"
+
+      # -------------------------------------------------------------------
+      # The demo stack.
+      #
+      # The stack starts its own infrastructure.  In CI the PostgreSQL and
+      # Redis are provided by the job's `services`, so the compose layer
+      # is bypassed: the API, the SMTP sink and the Vite dev server are
+      # started directly, against the disposable databases.
+      # -------------------------------------------------------------------
+      - name: Start the demo stack processes
+        run: |
+          set -euo pipefail
+          set -a
+          . "${DEMO_ENV_FILE}"
+          set +a
+          mkdir -p .ci/demo
+
+          # The SMTP sink.  The MFA handshake has to deliver a REAL OTP
+          # through a real SMTP hop — the suite reads it back from the
+          # capture file.
+          nohup python scripts/ci_smtp_sink.py \
+            --host 127.0.0.1 --port "${MFA_SMTP_PORT}" --log "${REPO_ROOT}/.ci/demo/demo-otp.log" \
+            > /tmp/smtp_sink.log 2>&1 &
+          echo "SMTP_SINK_PID=$!" >> "${GITHUB_ENV}"
+
+          # The API.  It is the real application: the real router, the
+          # real RBAC layer, the real token rotation.
+          nohup python -m uvicorn app.main:app \
+            --host "${APP_HOST}" --port "${APP_PORT}" --log-level warning \
+            > /tmp/api.log 2>&1 &
+          echo "API_PID=$!" >> "${GITHUB_ENV}"
+
+          for attempt in $(seq 1 60); do
+            if curl -fsS "http://${APP_HOST}:${APP_PORT}/health" > /dev/null 2>&1; then
+              echo "the API is answering"
+              break
+            fi
+            if [ "${attempt}" = "60" ]; then
+              echo "the API did not start" >&2
+              cat /tmp/api.log >&2 || true
+              exit 1
+            fi
+            sleep 1
+          done
+
+          # The frontend.  It runs in PROXY mode: the browser makes a
+          # same-origin request and Vite proxies /api to the API.
+          (
+            cd frontend
+            VITE_DEV_PORT="${VITE_DEV_PORT}" \
+            VITE_DEV_API_TARGET="http://${APP_HOST}:${APP_PORT}" \
+            VITE_API_BASE_URL="" \
+            setsid ./node_modules/.bin/vite \
+              --host 127.0.0.1 --port "${VITE_DEV_PORT}" \
+              > /tmp/frontend.log 2>&1 &
+            echo $! > /tmp/frontend.pid
+          )
+
+          for attempt in $(seq 1 60); do
+            if curl -fsS "http://127.0.0.1:${VITE_DEV_PORT}/" > /dev/null 2>&1; then
+              echo "the frontend is serving"
+              exit 0
+            fi
+            if [ "${attempt}" = "60" ]; then
+              echo "the frontend did not start" >&2
+              cat /tmp/frontend.log >&2 || true
+              exit 1
+            fi
+            sleep 1
+          done
+
+      # -------------------------------------------------------------------
+      # The demo fixtures.
+      #
+      # The seed is deterministic and idempotent: the suite reuses the
+      # same rows, so the run is reproducible and the fixtures never pile
+      # up.
+      # -------------------------------------------------------------------
+      - name: Seed the demo fixtures
+        run: |
+          set -euo pipefail
+          set -a
+          . "${DEMO_ENV_FILE}"
+          set +a
+          mkdir -p .ci/demo
+          python scripts/demo_seed_demo.py --seed \
+            --manifest-out .ci/demo/fixture-manifest.json
+
+      # -------------------------------------------------------------------
+      # The browser suite.
+      #
+      # `scripts/e2e_run.sh --no-start` is used because the stack is
+      # already up: the CI job started it above, with the disposable
+      # coordinates, and the script would otherwise start a second one
+      # against the compose layer.
+      # -------------------------------------------------------------------
+      - name: Run the browser E2E suite
+        run: |
+          set -euo pipefail
+          scripts/e2e_run.sh --no-start
+
+      # -------------------------------------------------------------------
+      # The report.
+      #
+      # The artefacts contain bearer tokens, passwords and OTP codes —
+      # they are NEVER published as a public artifact.  The JUnit XML is
+      # the exception: it holds test names and outcomes only, so it is
+      # safe to publish and is what a reviewer reads.
+      # -------------------------------------------------------------------
+      - name: Publish the JUnit report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: browser-e2e-junit
+          path: .ci/e2e/junit.xml
+          if-no-files-found: ignore
+          retention-days: 14
+
+      - name: Publish the failure diagnostics
+        if: failure()
+        run: |
+          set -uo pipefail
+          {
+            echo "### Browser E2E diagnostics"
+            echo
+            echo "#### API log"
+            tail -100 /tmp/api.log 2>/dev/null || true
+            echo
+            echo "#### frontend log"
+            tail -50 /tmp/frontend.log 2>/dev/null || true
+            echo
+            echo "#### SMTP sink log"
+            tail -30 /tmp/smtp_sink.log 2>/dev/null || true
+            echo
+            echo "#### suite summary"
+            if [ -f .ci/e2e/junit.xml ]; then
+              grep -oE '<testsuite [^>]*' .ci/e2e/junit.xml | head -5 || true
+            else
+              echo "no JUnit report was produced"
+            fi
+          } >> "${GITHUB_STEP_SUMMARY}" 2>&1 || true
+          echo "the diagnostics were written to the job summary"
+
+      - name: Stop the demo stack processes
+        if: always()
+        run: |
+          set -uo pipefail
+          for name in SMTP_SINK_PID API_PID; do
+            pid="${!name:-}"
+            if [ -n "${pid}" ]; then
+              kill "${pid}" 2>/dev/null || true
+            fi
+          done
+          if [ -f /tmp/frontend.pid ]; then
+            kill -- "-$(cat /tmp/frontend.pid)" 2>/dev/null || true
+            kill "$(cat /tmp/frontend.pid)" 2>/dev/null || true
+          fi
+          echo "the demo stack processes were stopped"
