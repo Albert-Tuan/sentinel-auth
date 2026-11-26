@@ -7,7 +7,8 @@ This matrix lists every criterion of the M13 milestone, the artefact
 that satisfies it and the command that proves it.
 
 Every "verified" entry below was run against the live demo stack on
-2026-11-25.
+2026-11-25 (Areas A to E) and on 2026-11-26 (Area F — the browser
+E2E).
 
 ---
 
@@ -20,10 +21,15 @@ Every "verified" entry below was run against the live demo stack on
 | C | The scenarios | 9 | 9 | `scripts/demo_scenarios.py` |
 | D | The safety | 15 | 15 | `tests/test_demo_fixtures.py`, `tests/test_ci_demo_database_safety.py` |
 | E | The regression | 12 | 12 | `pytest tests/` |
-| | **Total** | **54** | **54** | |
+| F | The browser E2E | 12 | 12 | `scripts/e2e_run.sh` |
+| | **Total** | **66** | **66** | |
 
 The six demo scenarios contribute **55 individual checks**, all passing,
 twice in a row — the second run proves they are re-runnable.
+
+The browser suite contributes **18 scenarios**, all passing, zero
+skipped, zero mocked. See
+[M13-BROWSER-E2E-REPORT.md](M13-BROWSER-E2E-REPORT.md).
 
 ---
 
@@ -222,6 +228,8 @@ backend and the other half to another.
 | Lint | pass | pass | — |
 | Production build | pass | pass | — |
 | Demo scenarios | — | **55 checks**, 2 consecutive runs | — |
+| Browser E2E | — | **18 scenarios**, 0 skipped, 0 mocked | new |
+| Browser E2E typecheck | pass | pass (`tsc -p tsconfig.e2e.json`) | new |
 | CI database safety | — | **51 passed** | new |
 | `git diff --check` | clean | clean | — |
 | Secret scan | clean | clean | — |
@@ -258,11 +266,70 @@ different operations need three different safety boundaries:
 
 The third one is the most dangerous script in the repository — it DROPS
 and RECREATES its databases — so it carries five independent,
-fail-closed guards of its own. See section 7.
+fail-closed guards of its own. See section 9.
 
 ---
 
-## 7. The problems that were found and fixed
+## 7. Area F — The browser E2E
+
+| # | Criterion | Result |
+|---|---|---|
+| F1 | A real Chromium drives the real application | Playwright 1.65.1, `workers: 1`, the demo stack — **18 passed**, 0 failed, 0 skipped |
+| F2 | Nothing is mocked | no `page.route()`, no fixture-swapped client; the OTP comes from the SMTP sink, the 502 from a real Core miss, the degraded payload from a renamed ML table |
+| F3 | The suite is re-runnable | the scenarios own their fixtures; two consecutive clean runs, 18/18 both times |
+| F4 | A skipped scenario fails the run | `scripts/e2e_run.sh` reads `results.json` and fails on any skip |
+| F5 | Every role's journey is covered | USER (2), SECURITY_ADMIN (1), SOC_ANALYST (1), SECURITY_MANAGER (3) |
+| F6 | The authorization is covered at both layers | the frontend route guards **and** the backend's 401/403 |
+| F7 | The concurrency control is covered | a stale `expected_updated_at` is refused with 409, a fresh token is accepted |
+| F8 | The session races are covered | the cross-role replacement, the expiry, the rotation, the stale-401 epoch guard |
+| F9 | The failure modes are honest | the UI reports "HÀNH ĐỘNG KHÔNG ĐƯỢC ÁP DỤNG" for a 502; a `null` metric renders as "không có dữ liệu", never as a `0` |
+| F10 | The artefacts never leak a secret | the traces stay under the gitignored `.ci/`; CI publishes only the JUnit XML |
+| F11 | The suite is typechecked | `tsconfig.e2e.json`, strict — `tsc -p tsconfig.e2e.json` clean |
+| F12 | The suite runs in CI | the `browser-e2e` job of `.github/workflows/ci.yml`, on the three disposable `_ci_demo` databases |
+
+### F1 in detail
+
+```
+Running 18 tests using 1 worker
+  18 passed (38.9s)
+```
+
+| Group | Scenarios | What it covers |
+|---|---|---|
+| E2E-01 | 2 | the USER journey — sessions, devices, revocation, logout |
+| E2E-02 | 1 | the SECURITY_ADMIN journey — a real MFA handshake over SMTP, the directory, the audit log |
+| E2E-03 | 1 | the SOC_ANALYST journey — the queue, the filters, the investigation, the acknowledgement, the resolution |
+| E2E-04 | 2 | the protective actions — the behavioural proof that Core changed, and the honest 502 |
+| E2E-05 | 2 | the policy lifecycle — the draft, the activation, the freeze, the 409 concurrency |
+| E2E-06 | 3 | the analytics — the five screens, `null` versus `0`, the 200/503 degradation |
+| E2E-07 | 3 | the RBAC — the route guards, the per-role access, the 401/403 |
+| E2E-08 | 4 | the races — the cross-role swap, the expiry, the rotation, the stale 401 |
+
+### The four defects the browser suite found
+
+Two of them are **product** defects and two are **harness** defects.
+They are listed as defects 13 to 16 in section 8, and the full account
+is in [M13-BROWSER-E2E-REPORT.md](M13-BROWSER-E2E-REPORT.md), section 5.
+
+| # | Kind | What it was |
+|---|---|---|
+| 13 | product | the action dialog stayed open when the action failed — the refusal was hidden behind the curtain |
+| 14 | product | the action was sent with an empty reason — a request the server was bound to refuse |
+| 15 | harness | a coordinate click on an alert row could land on the wrong row, because the queue reflows under the pointer |
+| 16 | harness | a re-armed fixture sank below the first page of the queue |
+
+Defects 13 and 14 are the reason the browser suite was worth writing:
+both are invisible to a component test, and both would have left a user
+misinformed about their own protection.
+
+Two more harness defects (17 and 18) appeared when the new suite was
+added to a repository that already had a unit-test runner and a linter:
+Vitest picked up the Playwright specs, and ESLint applied React's hook
+rules to them. Both are listed in section 8.
+
+---
+
+## 8. The problems that were found and fixed
 
 The milestone surfaced five defects. Each one was found by running the
 system, not by reading it.
@@ -318,9 +385,31 @@ script's *own* behaviour is unchanged. The suite proved the opposite of
 what it claimed. The fix makes the authorisation an explicit input of
 every test instead of an inherited ambient value.
 
+And finally the four that only the **browser** could find — two in the
+product and two in the harness:
+
+| # | Problem | Symptom | Fix |
+|---|---|---|---|
+| 13 | The action dialog stayed open when the action **failed** | the failure notice lives below the dialog, behind an 85% opaque curtain — the analyst saw the dialog still open and the refusal unreadable | `onError` closes the dialog, so the "HÀNH ĐỘNG KHÔNG ĐƯỢC ÁP DỤNG" banner is in full view |
+| 14 | The action was sent with an **empty reason** | `reason` is `Field(..., min_length=1)`, so the request was refused with a 422 before it ever reached Core | the reason is `required`, the button is disabled without one, and the type is `reason: string` |
+| 15 | A coordinate click on an alert row could land on the wrong row | the queue enriches its rows asynchronously, so the row height changes from 34px to 46px mid-click — the DOM event target became `<TBODY>` and React's synthetic `onClick` never fired | `activateRow(row)` focuses the row and presses `Enter` — zero coordinate dependency |
+| 16 | A re-armed fixture sank below the first page of the queue | the re-arm did not refresh `created_at`, so the scenario's own alert drifted past page 25 | the re-arm sets `created_at = now()`, so the alert is at the top of page 1 |
+| 17 | The **unit-test** runner picked up the Playwright specs | Vitest's default `include` glob matches `e2e/*.spec.ts`, and Playwright's `test.describe()` cannot be called from inside Vitest — eight spec files failed to load and the unit suite went red for an unrelated reason | `vitest.config.ts` excludes `e2e/**`; the browser suite has its own runner |
+| 18 | The **linter** applied React rules to the Playwright suite | `react-hooks/rules-of-hooks` complained about a fixture calling Playwright's `use()`, and `no-empty-pattern` complained about Playwright's documented `async ({}, use) => …` signature | `eslint.config.js` turns both rules off for `e2e/**` |
+
+Defects 13 and 14 are the reason the browser suite was worth writing:
+both are invisible to a component test, and both would have left a user
+misinformed about their own protection.
+
+Defect 15 is the clearest argument for a real browser at all. A
+component test renders a row and clicks it in a stable layout; the real
+queue reflows under the pointer, and the event is delivered to the
+wrong element. The diagnosis was made by capturing the live
+`mousedown` / `mouseup` / `click` targets inside the page.
+
 ---
 
-## 8. The safety of the CI bootstrap
+## 9. The safety of the CI bootstrap
 
 `scripts/ci_bootstrap_demo_databases.sh` is the only script in the
 repository that DROPs databases. It therefore carries five independent,
@@ -409,7 +498,7 @@ them were violated at some point during this work:
 
 ---
 
-## 9. The CI result
+## 10. The CI result
 
 Run: <https://github.com/Albert-Tuan/sentinel-auth/actions/runs/45614884041>
 (PR [#21](https://github.com/Albert-Tuan/sentinel-auth/pull/21), head
@@ -428,9 +517,36 @@ The zero-skip figure is the point of the whole exercise: the safety
 suite contributed 51 of those 1276 tests, and every one of them ran on
 the runner — none of them skipped itself to make the build green.
 
+### The browser E2E job
+
+The `browser-e2e` job was added in this milestone. It provisions the
+three disposable `_ci_demo` databases, starts the SMTP sink, the API
+and the Vite dev server, seeds the fixtures and runs the browser suite
+through the same `scripts/e2e_run.sh` a developer runs:
+
+```yaml
+- name: Run the browser suite
+  run: bash scripts/e2e_run.sh --no-start
+```
+
+The job enforces the same zero-skip policy on the browser suite: a
+skipped scenario fails the build, for the same reason a skipped backend
+test does — a scenario that does not run proves nothing.
+
+The local run that this section reports:
+
+```
+Running 18 tests using 1 worker
+  18 passed (38.9s)
+```
+
+The JUnit report is published as the artefact `browser-e2e-junit`. The
+HTML report and the traces are **not** published: they carry bearer
+tokens and OTP codes.
+
 ---
 
-## 10. How to reproduce the whole matrix
+## 11. How to reproduce the whole matrix
 
 ```bash
 # 1. the stack
@@ -454,14 +570,19 @@ scripts/ci_bootstrap_postgres.sh
 scripts/ci_bootstrap_demo_databases.sh
 pytest tests/ -q
 
-# 6. the diff
+# 6. the browser E2E
+scripts/e2e_run.sh
+cd frontend && npx tsc -p tsconfig.e2e.json && cd ..
+
+# 7. the diff
 git diff --check
 ```
 
 ---
 
-## 11. Related documents
+## 12. Related documents
 
 * [M13-FULLSTACK-DEPLOYMENT.md](M13-FULLSTACK-DEPLOYMENT.md) — the demo stack
 * [M13-DEMO-FIXTURES.md](M13-DEMO-FIXTURES.md) — the reproducible fixtures
 * [M13-DEMO-SCENARIOS.md](M13-DEMO-SCENARIOS.md) — the six demo scenarios
+* [M13-BROWSER-E2E-REPORT.md](M13-BROWSER-E2E-REPORT.md) — the browser E2E suite
