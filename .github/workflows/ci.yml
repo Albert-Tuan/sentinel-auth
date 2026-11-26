@@ -1223,11 +1223,15 @@ jobs:
       # already up: the CI job started it above, with the disposable
       # coordinates, and the script would otherwise start a second one
       # against the compose layer.
+      #
+      # The script is invoked through `bash` rather than directly: the
+      # repository does not track the executable bit, so a direct
+      # invocation would fail with "Permission denied".
       # -------------------------------------------------------------------
       - name: Run the browser E2E suite
         run: |
           set -euo pipefail
-          scripts/e2e_run.sh --no-start
+          bash scripts/e2e_run.sh --no-start
 
       # -------------------------------------------------------------------
       # The report.

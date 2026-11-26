@@ -100,8 +100,12 @@ ensure_stack() {
     fi
 
     log "starting the demo stack"
-    scripts/demo_stack.sh start
-    scripts/demo_stack.sh status
+    # The script is invoked through `bash` rather than directly: the
+    # repository does not track the executable bit (`core.fileMode` is
+    # false), so a direct invocation would fail with "Permission
+    # denied" on a fresh checkout.
+    bash scripts/demo_stack.sh start
+    bash scripts/demo_stack.sh status
 }
 
 # -----------------------------------------------------------------------------
