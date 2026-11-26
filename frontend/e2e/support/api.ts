@@ -24,9 +24,23 @@ import { resetRateLimits } from './fixtureBridge'
 /** The repository root. */
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..', '..')
 
-/** Read the demo environment file. */
+/**
+ * The demo environment file.
+ *
+ * The path can be overridden with `DEMO_ENV_FILE`, because the CI job
+ * writes its OWN environment file from the disposable container's
+ * coordinates: the canonical `.env.demo` of the repository describes a
+ * developer's local stack, and the CI run must never point at it.
+ */
+function demoEnvPath(): string {
+  const explicit = process.env.DEMO_ENV_FILE?.trim()
+  if (explicit) return resolve(explicit)
+  return resolve(REPO_ROOT, '.env.demo')
+}
+
+/** Read the demo environment file into an environment map. */
 function readDemoEnv(): Record<string, string> {
-  const envPath = resolve(REPO_ROOT, '.env.demo')
+  const envPath = demoEnvPath()
   if (!existsSync(envPath)) return {}
 
   const values: Record<string, string> = {}

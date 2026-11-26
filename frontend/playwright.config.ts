@@ -110,9 +110,14 @@ function resolveArtifactDir(): string {
  * The browser tests talk to the DEMO stack, so they read `.env.demo`.
  * The values are read here — and ONLY here — so that a test file never
  * has to know how the demo stack is configured.
+ *
+ * `DEMO_ENV_FILE` overrides the path: the CI job writes its OWN
+ * environment file from the disposable container's coordinates, and the
+ * suite must never point at the canonical one.
  */
 function readDemoEnv(): Record<string, string> {
-  const envPath = resolve(REPO_ROOT, '.env.demo')
+  const explicit = process.env.DEMO_ENV_FILE?.trim()
+  const envPath = explicit ? resolve(explicit) : resolve(REPO_ROOT, '.env.demo')
   if (!existsSync(envPath)) return {}
 
   const values: Record<string, string> = {}

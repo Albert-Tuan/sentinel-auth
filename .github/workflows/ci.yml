@@ -1123,6 +1123,7 @@ jobs:
           REDIS_PORT=${REDIS_PORT}
           MFA_SMTP_PORT=${MFA_SMTP_PORT}
           MFA_SMTP_HOST=127.0.0.1
+          MFA_SMTP_LOG=${GITHUB_WORKSPACE}/.ci/demo/demo-otp.log
           FORWARDED_ALLOW_IPS=127.0.0.1
           CORS_ALLOWED_ORIGINS=http://127.0.0.1:${VITE_DEV_PORT}
           EOF
@@ -1145,13 +1146,41 @@ jobs:
           set +a
           mkdir -p .ci/demo
 
+          # The OTP log path is made ABSOLUTE, for the same reason the
+          # local demo stack makes it absolute: the sink and the reader
+          # must never disagree about which file holds the codes.
+          #
+          # The path is also written to the pointer file the reader
+          # consults, so the reader does not have to guess it.
+          otp_log="${GITHUB_WORKSPACE}/.ci/demo/demo-otp.log"
+          printf '%s\n' "${otp_log}" > .ci/demo/otp-log.path
+
           # The SMTP sink.  The MFA handshake has to deliver a REAL OTP
           # through a real SMTP hop — the suite reads it back from the
           # capture file.
+          #
+          # The sink truncates the log at startup, so the directory has
+          # to exist BEFORE it is started.
           nohup python scripts/ci_smtp_sink.py \
-            --host 127.0.0.1 --port "${MFA_SMTP_PORT}" --log "${REPO_ROOT}/.ci/demo/demo-otp.log" \
+            --host 127.0.0.1 --port "${MFA_SMTP_PORT}" --log "${otp_log}" \
             > /tmp/smtp_sink.log 2>&1 &
           echo "SMTP_SINK_PID=$!" >> "${GITHUB_ENV}"
+
+          # The sink must be LISTENING before the API is started: a
+          # login that arrives before the sink is up would deliver its
+          # OTP into the void.
+          for attempt in $(seq 1 30); do
+            if python3 -c "import socket,sys; s=socket.socket(); s.settimeout(1); s.connect(('127.0.0.1',${MFA_SMTP_PORT})); s.close()" 2>/dev/null; then
+              echo "the SMTP sink is listening"
+              break
+            fi
+            if [ "${attempt}" = "30" ]; then
+              echo "the SMTP sink did not start" >&2
+              cat /tmp/smtp_sink.log >&2 || true
+              exit 1
+            fi
+            sleep 1
+          done
 
           # The API.  It is the real application: the real router, the
           # real RBAC layer, the real token rotation.
