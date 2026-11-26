@@ -6,7 +6,14 @@
 #
 # Triggers:
 #   - pull requests targeting `dev` or `main`
+#   - pull requests targeting a branch that another open pull request
+#     targets (a "stacked" pull request)
 #   - pushes to `dev`
+#
+# The stacked case exists because M13.2 is built on the M13.0-M13.1
+# branch, which is itself an open pull request.  Without this trigger
+# the browser E2E job would never run for that pull request, and a
+# job that never runs proves nothing.
 #
 # Every secret used here is generated *inside* the runner from a throwaway
 # value.  No production credential is stored in GitHub, and no credential is
@@ -19,6 +26,7 @@ on:
     branches:
       - dev
       - main
+      - feature/m13-demo-foundation
   push:
     branches:
       - dev
