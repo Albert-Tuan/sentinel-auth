@@ -350,10 +350,21 @@ class TestTheShellRuleAndTheApplicationAgree:
         )
 
     def test_the_demo_stack_allowlist_passes_the_shell_rule(self):
-        """The origins ``.env.demo`` configures must survive the check."""
-        demo_env = REPO_ROOT / ".env.demo"
+        """The origins the demo stack configures must survive the check.
+
+        The TRACKED example file is the source of truth here, not the
+        operator's ``.env.demo``: the example is committed, so this
+        assertion runs everywhere, and a skip would be a hole in the
+        coverage — which the CI acceptance policy treats as a failure.
+        The operator's own file may name other origins, and those are
+        validated by the demo stack itself when it starts.
+        """
+        demo_env = REPO_ROOT / ".env.demo.example"
         if not demo_env.exists():
-            pytest.skip("the demo environment file is not present")
+            pytest.fail(
+                "the tracked demo environment example is missing, so the "
+                "demo allow-list cannot be checked"
+            )
 
         raw = None
         for line in demo_env.read_text(encoding="utf-8").splitlines():
@@ -362,8 +373,9 @@ class TestTheShellRuleAndTheApplicationAgree:
                 raw = stripped.split("=", 1)[1].strip().strip('"').strip("'")
                 break
 
-        if not raw:
-            pytest.skip("the demo environment file configures no allow-list")
+        assert raw, (
+            "the tracked demo environment example configures no allow-list"
+        )
 
         accepted, reason = _check_allow_list(raw)
         assert accepted, (
