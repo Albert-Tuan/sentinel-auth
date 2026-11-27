@@ -14,6 +14,21 @@
  * The bridge runs it through the demo environment, which is why the
  * helper is a separate process rather than inline SQL: the test must
  * not have to know how the demo stack is configured.
+ *
+ * ---------------------------------------------------------------------------
+ * THE DATABASE GUARD
+ * ---------------------------------------------------------------------------
+ *
+ * The helper refuses to write to anything that is not a demo database
+ * its bounded context owns, and it refuses unless the run has declared
+ * — by name — that it may write to that exact database.
+ *
+ * The bridge therefore derives the declaration from the very URLs it is
+ * about to hand to the helper.  It cannot widen the guard: the helper
+ * still checks the name against a hard-coded allowlist, the host, and
+ * the fact that the URL came from the context's own variable.  The
+ * declaration only says "this run meant to write to this database" —
+ * it is not itself permission.
  */
 
 import { execFile } from 'node:child_process'
@@ -58,6 +73,42 @@ function demoEnvironment(): Record<string, string> {
   return values
 }
 
+/**
+ * The database name a connection URL points at.
+ *
+ * An empty string is returned when the URL names no database — which is
+ * itself a refusal, because the helper cannot prove such a URL
+ * disposable.
+ */
+function databaseNameOf(url: string): string {
+  const path = url.split('?')[0]
+  const segments = path.split('/')
+  return segments[segments.length - 1] ?? ''
+}
+
+/**
+ * The explicit write declarations the helper expects.
+ *
+ * The helper mutates exactly three databases — one per bounded context —
+ * so the bridge declares each of them BY NAME.  A declaration that
+ * names a database the helper is not about to touch authorises nothing:
+ * the helper compares the declaration against the target it resolved.
+ */
+function writeDeclarations(environment: Record<string, string>): string {
+  const names: string[] = []
+
+  for (const variable of [
+    'CORE_DATABASE_URL',
+    'DETECTION_DATABASE_URL',
+    'ML_DATABASE_URL',
+  ]) {
+    const name = databaseNameOf(environment[variable] ?? '')
+    if (name && !names.includes(name)) names.push(name)
+  }
+
+  return names.join(' ')
+}
+
 /** The fixture the helper created. */
 export interface E2EAlertFixture {
   alert_id: string
@@ -75,11 +126,23 @@ export interface E2EAlertFixture {
  * the browser suite, and it is a real process with the real demo
  * environment — so the write is exactly the one the M13 scenario
  * scripts perform.
+ *
+ * The write declaration is derived from the very URLs the helper is
+ * about to receive, so it can never name a database the run does not
+ * actually use.  It is a DECLARATION, not a permission: the helper
+ * still refuses anything that is not a demo database its bounded
+ * context owns.
  */
 async function runHelper(args: string[]): Promise<Record<string, unknown>> {
+  const environment = demoEnvironment()
+
   const { stdout } = await run('python3', [HELPER, ...args], {
     cwd: REPO_ROOT,
-    env: { ...process.env, ...demoEnvironment() },
+    env: {
+      ...process.env,
+      ...environment,
+      E2E_ALLOW_WRITE_TO: writeDeclarations(environment),
+    },
   })
 
   return JSON.parse(stdout.trim()) as Record<string, unknown>

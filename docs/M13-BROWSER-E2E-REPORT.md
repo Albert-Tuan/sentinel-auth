@@ -41,6 +41,11 @@ against the demo stack (two in the product, two in the harness — see
 section 5), and two more by running it in CI (one in the product, one in
 the persistence layer — see section 5.3).
 
+A final safety review of this branch found one more defect in the E2E
+**harness** rather than in the suite itself: the fixture helper had no
+database guard (defect 21, section 5.3). It is now fail-closed, and the
+proof is a 46-test regression suite.
+
 ---
 
 ## 2. The principle: nothing is mocked
@@ -511,6 +516,63 @@ The defence is layered on purpose:
 The third layer is a pin, not a fix, and it is there on purpose: the
 next driver change should be a **visible** event, not a silent one.
 
+#### P5 — The E2E fixture helper had no database guard
+
+**Defect 21.**
+
+| | |
+|---|---|
+| **Symptom** | `scripts/e2e_fixtures.py` — the ONLY component of the browser suite that writes to a database directly — built its three engines from whatever URL the environment happened to carry. There was no check of any kind |
+| **Cause** | the guard that protects `scripts/demo_seed_demo.py` was never applied to the E2E helper, and the helper's own docstring made a claim ("every fixture script refuses to write into a database without the `_demo` marker") that was true of the seed script and **false** of the helper |
+| **Why it matters** | the helper DELETES rows (the alerts, the policies). A mistyped `CORE_DATABASE_URL`, or an environment left over from another stack, would have made the browser suite delete rows in a database it was never meant to touch. No production database was harmed, but the safety net was absent |
+| **Fix** | `scripts/e2e_fixtures_guard.py` — a fail-closed, five-layer guard with a hard-coded per-context allowlist, a loopback-host rule and an explicit by-name declaration; every engine is built through it, and the guard runs BEFORE `create_engine`, so a refused URL never opens a connection |
+
+The five layers, each of which refuses by default:
+
+| Layer | The rule | A refused example |
+|---|---|---|
+| 1 | The database name must be EXACTLY one of the two names the context owns | `sentinel_core_demo_prod`, `sentinel_core_democracy` |
+| 2 | The `*_test` and the canonical production names are refused outright | `sentinel_core_test`, `sentinel_core`, `postgres` |
+| 3 | The server must be on the loopback interface | `db.internal`, `10.0.0.5`, `0.0.0.0` |
+| 4 | The run must have declared — BY NAME — that it may write to that exact database | `E2E_ALLOW_WRITE_TO=true`, or a declaration for another database |
+| 5 | The URL must come from the context's OWN variable | a `CORE_DATABASE_URL` pointing at the detection database |
+
+Layers 1 to 4 are decided by the URL alone and the allowlists are
+hard-coded module constants, so **no environment variable can widen
+them**. Layer 5 is a separate input, and it must name the very database
+the helper is about to write to, so a declaration made for one target
+cannot carry over to another.
+
+The declaration itself is derived from the very URLs the run is about to
+use — `scripts/e2e_run.sh` computes it, and
+`frontend/e2e/support/fixtureBridge.ts` computes it from the demo
+environment it hands to the helper — so it can never name a database the
+run does not actually reach.
+
+The guard is proved by `tests/test_e2e_fixture_guards.py` (46 tests).
+The claims that need a database are proved against a REAL PostgreSQL,
+not with a mock: a refused run leaves the row count of the `alerts`
+table unchanged, and no fixture row is created.
+
+##### The one deliberate exception
+
+`restore-active-policy` restores the demo stack's SEEDED active policy.
+Every other operation touches only rows the E2E suite created; that one
+deliberately touches a row it did NOT create.
+
+It is legitimate because it is the RESTORE of a state the behaviour under
+test changed: activating a policy deactivates the current one — that is
+the product behaviour, and the browser scenario has to prove it — so the
+seeded ACTIVE policy of the demo stack is no longer active and the demo
+would drift away from its own fixtures. Putting the demo back the way
+the scenario found it is a REQUIRED cleanup, not a way of hiding a
+defect.
+
+The exception is scoped as tightly as the principle it bends: it restores
+ONE named policy, it only ever moves the ACTIVE SLOT, it never deletes a
+policy, it never touches the E2E-owned policies, and it is still subject
+to every guard above.
+
 ---
 
 ## 6. The CI integration
@@ -579,6 +641,23 @@ passwords and OTP codes. The artefact directory therefore lives under
 JUnit XML. The HTML report, the traces and the videos are never
 published as public artefacts.
 
+### 6.5 The write declaration is part of the job
+
+The fixture helper refuses to write to a database the run has not
+declared **by name** (section 5.3, defect 21). The declaration is
+derived from the very URLs the run is about to use:
+
+* `scripts/e2e_run.sh` computes `E2E_ALLOW_WRITE_TO` from
+  `CORE_DATABASE_URL`, `DETECTION_DATABASE_URL` and `ML_DATABASE_URL`;
+* `frontend/e2e/support/fixtureBridge.ts` computes it from the demo
+  environment it hands to the helper.
+
+So the declaration can never name a database the run does not actually
+reach, and it cannot widen the guard: the helper still checks the name
+against a hard-coded allowlist, the host, and the fact that the URL came
+from the context's own variable. The declaration says "this run meant to
+write to this database" — it is not itself permission.
+
 ---
 
 ## 7. How to reproduce
@@ -641,7 +720,7 @@ finished.
 
 | Suite | Command | Result |
 |---|---|---|
-| Backend regression | `python scripts/ci_verify_tests.py` | **1276 passed**, 0 failed, **0 skipped** |
+| Backend regression | `python scripts/ci_verify_tests.py` | **1337 passed**, 0 failed, **0 skipped** |
 | HTTP smoke | `python scripts/m10_http_smoke.py` | **79 passed**, 0 failed |
 | Frontend unit/component | `npm run test` | **265 passed**, 0 failed, 18 files |
 | Frontend integration | `npm run test:integration` | **50 passed**, 0 failed, 3 files |
@@ -652,10 +731,12 @@ finished.
 | Production build | `npm run build` | ✓ 1.74s |
 | Demo scenarios | `python scripts/demo_scenarios.py --all` | **55 checks**, 2 consecutive runs |
 | Browser E2E | `scripts/e2e_run.sh` | **18 scenarios**, 0 skipped, 2 consecutive runs |
+| E2E database guard | `pytest tests/test_e2e_fixture_guards.py` | **46 passed**, 0 skipped |
+| INET driver parity | `pytest tests/test_inet_driver_parity.py` | **15 passed**, 0 skipped |
 | The diff | `git diff --check` | clean |
 
 ```
-collected=1276 passed=1276 failed=0 skipped=0 error=0 xfailed=0
+collected=1337 passed=1337 failed=0 skipped=0 error=0 xfailed=0
 [ci-verify] the suite passed with zero failures and zero skips
 ```
 

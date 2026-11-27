@@ -82,6 +82,52 @@ load_env
 : "${VITE_DEV_PORT:=55173}"
 
 # -----------------------------------------------------------------------------
+# The explicit write declaration
+# -----------------------------------------------------------------------------
+#
+# `scripts/e2e_fixtures.py` refuses to write to a database the run has not
+# declared by name.  The declaration is derived from the very URLs the
+# helper is about to use, so it can never name a database the run does
+# not actually reach.
+#
+# It is a DECLARATION, not a permission: the helper still refuses any
+# URL that is not a demo database its bounded context owns, on any host
+# but the loopback interface, under any environment variable that tries
+# to widen the allowlist.
+# -----------------------------------------------------------------------------
+declare_write_targets() {
+    local url name
+    local -a names=()
+
+    for url in "${CORE_DATABASE_URL:-}" "${DETECTION_DATABASE_URL:-}" "${ML_DATABASE_URL:-}"; do
+        [ -n "${url}" ] || continue
+
+        # The database name is the last path segment, without the query
+        # string.
+        name="${url%%\?*}"
+        name="${name##*/}"
+        [ -n "${name}" ] || continue
+
+        # A duplicate is harmless — the declaration is a SET of names.
+        local seen duplicate=0
+        for seen in ${names[@]+"${names[@]}"}; do
+            if [ "${seen}" = "${name}" ]; then
+                duplicate=1
+                break
+            fi
+        done
+        [ "${duplicate}" -eq 1 ] && continue
+
+        names+=("${name}")
+    done
+
+    E2E_ALLOW_WRITE_TO="${names[*]:-}"
+    export E2E_ALLOW_WRITE_TO
+}
+
+declare_write_targets
+
+# -----------------------------------------------------------------------------
 # The stack
 # -----------------------------------------------------------------------------
 stack_is_up() {

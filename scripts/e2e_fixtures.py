@@ -31,6 +31,38 @@ with it.
  The alert the SOC scenario investigates is therefore its OWN row, and
  the suite is re-runnable on the same demo stack for ever.
 
+ ---------------------------------------------------------------------------
+ THE ONE DELIBERATE EXCEPTION TO THE "E2E-OWNED ROWS" RULE
+ ---------------------------------------------------------------------------
+
+ ``restore-active-policy`` restores the demo stack's SEEDED active
+ policy.  Every other operation here touches only rows this suite
+ created; that one deliberately touches a row it did NOT create.
+
+ It is a legitimate exception, and it is deliberate rather than
+ accidental: activating a policy deactivates the current one — that is
+ the product behaviour, and the browser scenario has to prove it — so
+ the seeded ACTIVE policy of the demo stack is no longer active and
+ the demo would drift away from its own fixtures.  Putting the demo
+ back the way the scenario found it is a REQUIRED cleanup, not a way of
+ hiding a defect.
+
+ The exception is scoped as tightly as the principle it bends: it
+ restores ONE named policy, it only moves the ACTIVE SLOT, it never
+ deletes anything, and it is still subject to every database guard
+ below.
+
+ ---------------------------------------------------------------------------
+ THE DATABASE GUARD
+ ---------------------------------------------------------------------------
+
+ Every engine in this helper is created through ``_guarded_engine``,
+ which refuses to build the engine at all unless the URL is a demo
+ database the context owns.  The guard is in
+ ``scripts/e2e_fixtures_guard.py``, it is fail-closed, and it runs
+ BEFORE any connection is opened — so a refused URL never reaches a
+ database and no SQL is ever issued.
+
 Usage::
 
     scripts/e2e_fixtures.py create-alert --key e2e-03 --risk critical
@@ -49,6 +81,18 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
+
+# The guard lives in its own module so it can be imported and tested on
+# its own: it is the safety boundary of this script, and a safety
+# boundary that is only reachable by running the destructive code is a
+# safety boundary nobody can test.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from e2e_fixtures_guard import (  # noqa: E402
+    Context,
+    DemoDatabaseRefusal,
+    require_demo_database,
+)
 
 #: The namespace the seed script derives every fixture id from.  The E2E
 #: fixtures live in their OWN namespace, so an E2E id can never collide
@@ -87,13 +131,30 @@ def _detection_url() -> str:
     return url
 
 
-def _engine():
-    """A SQLAlchemy engine for the detection database."""
+def _guarded_engine(context: str, url: str):
+    """Create an engine for a demo database — after the guard said yes.
+
+    The guard runs BEFORE the engine is created, so a refused URL never
+    reaches a database and never opens a connection.  That is the point
+    of the guard: it is a decision about the URL, made before anything
+    can be written.
+    """
+    try:
+        name = require_demo_database(context, url)
+    except DemoDatabaseRefusal as refusal:
+        raise SystemExit(f"[e2e-fixtures] ERROR: refusing to write: {refusal}")
+
     try:
         from sqlalchemy import create_engine
     except ImportError:  # pragma: no cover - SQLAlchemy is a hard dependency
         raise SystemExit("SQLAlchemy is not installed")
-    return create_engine(_detection_url(), pool_pre_ping=True)
+
+    return create_engine(url, pool_pre_ping=True)
+
+
+def _engine():
+    """A SQLAlchemy engine for the detection database."""
+    return _guarded_engine(Context.DETECTION, _detection_url())
 
 
 def _resolve_alert_id(key: str) -> str:
@@ -335,6 +396,35 @@ def restore_active_policy() -> Dict[str, Any]:
     Only the ACTIVE SLOT is restored.  The E2E-owned policies are left
     alone — they carry the evidence of the scenario, and the helper
     removes them on its own.
+
+    ---------------------------------------------------------------------------
+    THE DELIBERATE EXCEPTION TO THE "E2E-OWNED ROWS ONLY" RULE
+    ---------------------------------------------------------------------------
+
+    Every other operation of this helper touches ONLY rows the E2E
+    suite created: the ids carry the ``m13-e2e-`` marker, and the
+    helper refuses to write to a row that does not carry it.  This
+    operation is the ONE exception, and it is deliberate rather than
+    accidental.
+
+    It is legitimate because it is the RESTORE of a state the behaviour
+    under test changed.  Activating a policy deactivates the current
+    one — that is what "only one policy may be in service" means, and
+    the scenario has to prove it.  The side effect is that the seeded
+    ACTIVE policy of the demo stack is no longer active, so the demo
+    would drift away from its own fixtures.  Putting the demo back the
+    way the scenario found it is therefore a REQUIRED cleanup, not a
+    way of hiding a defect.
+
+    The exception is scoped as tightly as the principle it bends:
+
+      * it restores ONE named policy — the seeded ``m13-demo-active``;
+      * it only ever moves the ACTIVE SLOT, so exactly one policy is
+        active afterwards, which is the invariant the demo stack keeps;
+      * it never DELETES a policy, and it never touches the E2E-owned
+        policies, which carry the evidence of the scenario;
+      * it is still subject to every database guard — a non-demo
+        database is refused just the same.
     """
     from sqlalchemy import text
 
@@ -384,11 +474,7 @@ def _ml_url() -> str:
 
 def _ml_engine():
     """A SQLAlchemy engine for the ML database."""
-    try:
-        from sqlalchemy import create_engine
-    except ImportError:  # pragma: no cover - SQLAlchemy is a hard dependency
-        raise SystemExit("SQLAlchemy is not installed")
-    return create_engine(_ml_url(), pool_pre_ping=True)
+    return _guarded_engine(Context.ML, _ml_url())
 
 
 #: The ML table the helper renames to simulate a source failure.
@@ -584,11 +670,7 @@ def _core_url() -> str:
 
 def _core_engine():
     """A SQLAlchemy engine for the core database."""
-    try:
-        from sqlalchemy import create_engine
-    except ImportError:  # pragma: no cover - SQLAlchemy is a hard dependency
-        raise SystemExit("SQLAlchemy is not installed")
-    return create_engine(_core_url(), pool_pre_ping=True)
+    return _guarded_engine(Context.CORE, _core_url())
 
 
 def set_detection_mfa_gate(username: str, armed: bool) -> Dict[str, Any]:

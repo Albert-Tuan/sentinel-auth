@@ -19,10 +19,10 @@ E2E).
 | A | The demo stack | 10 | 10 | `scripts/demo_stack.sh` |
 | B | The fixtures | 8 | 8 | `scripts/demo_seed_demo.py` |
 | C | The scenarios | 9 | 9 | `scripts/demo_scenarios.py` |
-| D | The safety | 15 | 15 | `tests/test_demo_fixtures.py`, `tests/test_ci_demo_database_safety.py` |
-| E | The regression | 12 | 12 | `pytest tests/` |
+| D | The safety | 24 | 24 | `tests/test_demo_fixtures.py`, `tests/test_ci_demo_database_safety.py`, `tests/test_e2e_fixture_guards.py` |
+| E | The regression | 15 | 15 | `pytest tests/` |
 | F | The browser E2E | 12 | 12 | `scripts/e2e_run.sh` |
-| | **Total** | **66** | **66** | |
+| | **Total** | **75** | **75** | |
 
 The six demo scenarios contribute **55 individual checks**, all passing,
 twice in a row — the second run proves they are re-runnable.
@@ -140,6 +140,88 @@ OK: all 55 check(s) passed.
 | D15 | The local demo stack keeps its data across stop/restart | the row counts are identical before and after |
 | D16 | The safety suite never skips itself on a runner without the PostgreSQL binaries | the suite falls back to a throwaway container; 51 passed, 0 skipped |
 | D17 | The safety suite's own environment cannot authorise a run the test did not authorise | the harness strips `DEMO_CI_DISPOSABLE_SERVER` and `DEMO_CI_ACK` from every subprocess |
+| D18 | The E2E fixture helper refuses any URL that is not a demo database its context owns | `scripts/e2e_fixtures_guard.py` — a hard-coded, per-context allowlist |
+| D19 | The E2E helper refuses before it writes anything | `tests/test_e2e_fixture_guards.py` — the refusal is proved against a real PostgreSQL |
+| D20 | The E2E helper refuses a `*_test` or a production database | the guard's overlap layer, tested with all eight protected names |
+| D21 | The E2E helper refuses a database on another host | the loopback layer; `db.internal`, `10.0.0.5`, `sentinel.example.com` and `0.0.0.0` are refused |
+| D22 | The E2E helper refuses without an explicit, by-name declaration | the opt-in layer; a generic "true" authorises nothing |
+| D23 | No single environment variable can widen the E2E guard | the allowlist is a module constant; a test asserts it cannot be overridden |
+| D24 | The E2E helper never deletes a row outside its own fixtures | `restore-active-policy` is the ONE documented exception, and it only moves the active slot |
+
+### The E2E database guard
+
+`scripts/e2e_fixtures.py` WRITES rows (the alerts, the policies, the
+sessions, the MFA gate, the rate-limit counters) and DELETES rows (the
+alerts, the policies). It is the only thing in the browser suite that
+writes to a database directly, so it is also the only place where a
+mistake could reach a database that must never be touched.
+
+The guard lives in `scripts/e2e_fixtures_guard.py` — its own module, so
+the safety boundary can be imported and tested WITHOUT running any
+destructive code. It is fail-closed and layered; every layer refuses by
+default, and the destructive SQL runs only when all of them are
+satisfied:
+
+| Layer | The rule | A refused example |
+|---|---|---|
+| 1 | The database name must be EXACTLY one of the two names the context owns | `sentinel_core_demo_prod`, `sentinel_core_democracy` |
+| 2 | The `*_test` and the canonical production names are refused outright | `sentinel_core_test`, `sentinel_core`, `postgres` |
+| 3 | The server must be on the loopback interface | `db.internal`, `10.0.0.5`, `0.0.0.0` |
+| 4 | The run must have declared — BY NAME — that it may write to that exact database | `E2E_ALLOW_WRITE_TO=true`, or a declaration for another database |
+| 5 | The URL must come from the context's OWN variable | a `CORE_DATABASE_URL` pointing at the detection database |
+
+Layers 1 to 4 are decided by the URL alone, and the allowlists are
+hard-coded module constants, so **no environment variable can widen
+them**. Layer 5 is a separate input and it must name the very database
+the helper is about to write to, so a declaration made for one target
+cannot carry over to another.
+
+The declaration is derived from the very URLs the run is about to use —
+`scripts/e2e_run.sh` computes it, and
+`frontend/e2e/support/fixtureBridge.ts` computes it from the demo
+environment it hands to the helper — so it can never name a database the
+run does not actually reach.
+
+#### The one deliberate exception
+
+`restore-active-policy` restores the demo stack's SEEDED active policy.
+Every other operation touches only rows the E2E suite created; that one
+deliberately touches a row it did NOT create.
+
+It is legitimate because it is the RESTORE of a state the behaviour under
+test changed: activating a policy deactivates the current one — that is
+the product behaviour, and the browser scenario has to prove it — so the
+seeded ACTIVE policy of the demo stack is no longer active and the demo
+would drift away from its own fixtures. Putting the demo back the way the
+scenario found it is a REQUIRED cleanup, not a way of hiding a defect.
+
+The exception is scoped as tightly as the principle it bends: it restores
+ONE named policy, it only ever moves the ACTIVE SLOT, it never deletes a
+policy, it never touches the E2E-owned policies, and it is still subject
+to every guard above.
+
+### D18 to D24 in detail
+
+```
+collected=46 passed=46 failed=0 skipped=0
+```
+
+The suite that proves the guard is `tests/test_e2e_fixture_guards.py` —
+46 tests across three groups:
+
+* `TestTheDemoDatabaseGuard` — the layers themselves: the accepted
+  names, the refused names, the wrong-context URLs, the non-loopback
+  hosts, the missing or generic declaration, and the proof that no
+  environment variable can widen the allowlist.
+* `TestTheFixtureHelperUsesTheGuard` — the helper itself: every engine is
+  built through the guarded helper, the guard is consulted BEFORE
+  `create_engine`, and a refusal becomes a clean exit.
+* `TestTheFixtureHelperRefusesBeforeItWrites` — the claim that matters,
+  proved against a REAL PostgreSQL: a refused run leaves the row count
+  of the `alerts` table unchanged, and no fixture row is created. The
+  claim is about the DATABASE, so it is not proved with a mock.
+
+---
 
 ### D6 in detail
 
@@ -179,6 +261,8 @@ The only change to `.gitignore` is one line:
 | E11 | The deployment verification passes | 67 passed, 0 failed |
 | E12 | The production frontend build succeeds | `vite build` ✓, 1.53s |
 | E13 | The CI database safety tests pass | 51 passed, 0 skipped |
+| E14 | The E2E database-guard tests pass | 46 passed, 0 skipped |
+| E15 | The INET cross-driver parity tests pass | 15 passed, 0 skipped |
 
 ### E9 in detail
 
@@ -219,7 +303,7 @@ backend and the other half to another.
 
 | Suite | Baseline required | Result | Delta |
 |---|---|---|---|
-| Backend regression | ≥ 1199 passed | **1276 passed**, 0 failed, 0 skipped | +77 (26 fixture + 51 safety tests) |
+| Backend regression | ≥ 1199 passed | **1337 passed**, 0 failed, 0 skipped | +138 (26 fixture + 51 safety + 46 guard + 15 parity) |
 | HTTP smoke | ≥ 79 passed | **79 passed**, 0 failed | — |
 | Frontend unit/component | ≥ 265 passed | **265 passed**, 0 failed | — |
 | Frontend integration | ≥ 50 passed | **50 passed**, 0 failed | — |
@@ -230,6 +314,8 @@ backend and the other half to another.
 | Demo scenarios | — | **55 checks**, 2 consecutive runs | — |
 | Browser E2E | — | **18 scenarios**, 0 skipped, 0 mocked | new |
 | Browser E2E typecheck | pass | pass (`tsc -p tsconfig.e2e.json`) | new |
+| E2E database guard | — | **46 passed**, 0 skipped | new |
+| INET driver parity | — | **15 passed**, 0 skipped | new |
 | CI database safety | — | **51 passed** | new |
 | `git diff --check` | clean | clean | — |
 | Secret scan | clean | clean | — |
@@ -237,7 +323,7 @@ backend and the other half to another.
 ### E1 in detail
 
 ```
-collected=1276 passed=1276 failed=0 skipped=0 error=0 xfailed=0
+collected=1337 passed=1337 failed=0 skipped=0 error=0 xfailed=0
 ```
 
 (The suite needs its own disposable databases. `scripts/ci_bootstrap_postgres.sh`
@@ -436,6 +522,32 @@ moment a dependency resolved to psycopg 3. The pin in
 than by luck, so the next driver change cannot silently break it
 again.
 
+### The final safety review
+
+The last review of this branch looked at the E2E fixture helper — the
+one place in the browser suite that writes to a database — and found
+that it had **no guard at all**: its engine constructors accepted any
+URL the environment happened to carry. That is defect 21.
+
+| # | Problem | Symptom | Fix |
+|---|---|---|---|
+| 21 | `scripts/e2e_fixtures.py` built its engines from **whatever URL the environment carried** | a mistyped `CORE_DATABASE_URL`, or an environment left over from another stack, would have made the browser suite DELETE rows in a database it was never meant to touch | `scripts/e2e_fixtures_guard.py` — a fail-closed, five-layer guard with a hard-coded per-context allowlist, a loopback-host rule and an explicit by-name declaration; every engine is built through it, and the guard runs BEFORE `create_engine` |
+
+Defect 21 was never exploited, and no production database was harmed.
+But the helper's own docstring claimed "every fixture script refuses to
+write into a database without the `_demo` marker", and that claim was
+TRUE for `scripts/demo_seed_demo.py` and **FALSE** for
+`scripts/e2e_fixtures.py`. The fix makes the claim true of both.
+
+The review also hardened the proof of the `INET` contract. The CI step
+that checked it ran a raw `SELECT '127.0.0.1'::inet` — which proves
+that the **database** returns a string, not that the **column type the
+application declares** returns one, and the column type is the thing
+that actually broke. The step now goes through the ORM under BOTH
+drivers, and it also proves that the two drivers really do read a PLAIN
+`INET` column differently — so the parity assertion cannot pass by
+accident on whichever driver happens to be the forgiving one.
+
 ---
 
 ## 9. The safety of the CI bootstrap
@@ -593,11 +705,13 @@ scripts/demo_scenarios.py --all
 # 4. the safety
 pytest tests/test_demo_fixtures.py -q
 pytest tests/test_ci_demo_database_safety.py -q
+pytest tests/test_e2e_fixture_guards.py -q
 
 # 5. the regression
 scripts/ci_bootstrap_postgres.sh
 scripts/ci_bootstrap_demo_databases.sh
 pytest tests/ -q
+pytest tests/test_inet_driver_parity.py -q
 
 # 6. the browser E2E
 scripts/e2e_run.sh

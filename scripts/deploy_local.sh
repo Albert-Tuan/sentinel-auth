@@ -178,8 +178,13 @@ validate_config() {
                 http://*|https://*) ;;
                 *) fail "CORS_ALLOWED_ORIGINS entry '${entry}' is not a full origin. Use scheme://host[:port]." ;;
             esac
+            # An origin must not carry a path.  The scheme separator is
+            # "://", so any further "/" is a path separator.  The pattern
+            # "*//*" matches a "/" that comes AFTER the "://" — a bare
+            # "*/*/*" would also match "http://host", because a glob
+            # segment may be empty.
             case "${entry}" in
-                */*/*) fail "CORS_ALLOWED_ORIGINS entry '${entry}' must be an origin without a path." ;;
+                *///*) fail "CORS_ALLOWED_ORIGINS entry '${entry}' must be an origin without a path." ;;
             esac
         done
     fi

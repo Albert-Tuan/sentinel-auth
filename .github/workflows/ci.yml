@@ -797,7 +797,7 @@ jobs:
       # contract under test is the Core/Auth API.  With Detection absent,
       # Core takes its documented fail-open path.
       # -------------------------------------------------------------------
-      - name: Verify the PostgreSQL driver returns the expected INET type
+      - name: Verify the INET column is a string under EVERY driver
         run: |
           set -euo pipefail
           # The backend's response models declare the ``INET`` columns as
@@ -806,32 +806,121 @@ jobs:
           # the endpoints that serialise those columns — ``GET /devices``
           # answers 500 — long after the backend has started successfully.
           #
-          # This step asserts the contract at the database boundary, so a
-          # driver change fails here with a clear message instead of
-          # surfacing as an opaque 500 inside the test suite.
+          # This step asserts the contract at the DATABASE boundary, under
+          # BOTH drivers, and it goes through the ORM rather than through
+          # a raw ``SELECT ...::inet``: a raw query would only prove that
+          # the database returns a string, not that the COLUMN TYPE the
+          # application declares returns one — and the column type is the
+          # thing that actually broke.
+          #
+          # It also proves the DRIVERS really do differ, so the assertion
+          # above cannot pass by accident on a driver that happens to be
+          # the forgiving one.
           python - <<'PY'
           import sys
-          from sqlalchemy import create_engine, text
+          import uuid
 
-          url = (
-              "postgresql+psycopg2://sentinel:sentinel_ci_disposable"
+          from sqlalchemy import Column, MetaData, String, Table, create_engine, select
+          from sqlalchemy.dialects.postgresql import INET
+          from sqlalchemy.orm import sessionmaker
+
+          from app.models import User, UserTrustedDevice
+
+          BASE = (
+              "postgresql://sentinel:sentinel_ci_disposable"
               "@127.0.0.1:5432/sentinel_core_test"
           )
-          engine = create_engine(url)
-          with engine.connect() as connection:
-              value = connection.execute(
-                  text("SELECT '127.0.0.1'::inet")
-              ).scalar()
-          engine.dispose()
 
-          if not isinstance(value, str):
+          def url_for(driver):
+              return f"postgresql+{driver}://" + BASE.split("://", 1)[1]
+
+          observed = {}
+
+          for driver in ("psycopg2", "psycopg"):
+              engine = create_engine(url_for(driver), pool_pre_ping=True)
+              maker = sessionmaker(bind=engine)
+              session = maker()
+              try:
+                  user = User(
+                      id=uuid.uuid4(),
+                      username=f"inet_{uuid.uuid4().hex[:12]}",
+                      password_hash="x",
+                      email=f"inet_{uuid.uuid4().hex[:12]}@example.com",
+                      status="active",
+                  )
+                  session.add(user)
+                  session.commit()
+
+                  device = UserTrustedDevice(
+                      id=uuid.uuid4(),
+                      user_id=user.id,
+                      device_fingerprint=f"fp_{uuid.uuid4().hex[:16]}",
+                      device_name="the CI INET probe",
+                      last_ip="203.0.113.77",
+                  )
+                  session.add(device)
+                  session.commit()
+
+                  # Expire so the value is re-read from the DATABASE
+                  # rather than served from the identity map.
+                  session.expire_all()
+                  value = session.get(UserTrustedDevice, device.id).last_ip
+
+                  if not isinstance(value, str):
+                      print(
+                          f"ERROR: under {driver} the INET column came back "
+                          f"as {type(value).__name__}, not str. The response "
+                          f"models require a string, and GET /devices would "
+                          f"answer 500.",
+                          file=sys.stderr,
+                      )
+                      sys.exit(1)
+
+                  observed[driver] = type(value).__name__
+                  print(f"OK: under {driver} the INET column is a string")
+              finally:
+                  session.close()
+                  engine.dispose()
+
+          # Prove the two drivers really differ, using a PLAIN INET
+          # column that does NOT use the application's normalising type.
+          # If this ever fails, the parity check above is no longer
+          # proving that the application's column type does anything.
+          metadata = MetaData()
+          table = Table(
+              "inet_driver_parity_probe",
+              metadata,
+              Column("id", String, primary_key=True),
+              Column("addr", INET),
+          )
+
+          plain = {}
+          for driver in ("psycopg2", "psycopg"):
+              engine = create_engine(url_for(driver), pool_pre_ping=True)
+              try:
+                  metadata.drop_all(engine)
+                  metadata.create_all(engine)
+                  with engine.begin() as connection:
+                      connection.execute(
+                          table.insert().values(id="1", addr="203.0.113.77")
+                      )
+                  with engine.connect() as connection:
+                      plain[driver] = type(
+                          connection.execute(select(table.c.addr)).scalar_one()
+                      ).__name__
+              finally:
+                  engine.dispose()
+
+          if plain["psycopg2"] != "str" or plain["psycopg"] == "str":
               print(
-                  f"ERROR: the INET column came back as {type(value).__name__}, "
-                  f"not str. The response models require a string.",
+                  f"ERROR: the two drivers no longer read a plain INET "
+                  f"column differently ({plain}). The parity assertion "
+                  f"above would then pass by accident.",
                   file=sys.stderr,
               )
               sys.exit(1)
-          print("OK: the INET column is returned as a string")
+
+          print(f"OK: the drivers differ on a plain INET column ({plain})")
           PY
 
       - name: Start the backend
@@ -1097,32 +1186,110 @@ jobs:
       # Asserting the contract at the database boundary turns that into
       # a failure with a clear message.
       # -------------------------------------------------------------------
-      - name: Verify the PostgreSQL driver returns the expected INET type
+      - name: Verify the INET column is a string under EVERY driver
         run: |
           set -euo pipefail
+          # The check goes through the ORM, under BOTH drivers, and it
+          # also proves the two drivers really do read a PLAIN INET
+          # column differently — so the assertion cannot pass by
+          # accident on whichever driver happens to be the forgiving one.
           python - <<'PY'
           import sys
-          from sqlalchemy import create_engine, text
+          import uuid
 
-          url = (
-              "postgresql+psycopg2://sentinel:sentinel_ci_disposable"
+          from sqlalchemy import Column, MetaData, String, Table, create_engine, select
+          from sqlalchemy.dialects.postgresql import INET
+          from sqlalchemy.orm import sessionmaker
+
+          from app.models import User, UserTrustedDevice
+
+          BASE = (
+              "postgresql://sentinel:sentinel_ci_disposable"
               "@127.0.0.1:5432/sentinel_core_ci_demo"
           )
-          engine = create_engine(url)
-          with engine.connect() as connection:
-              value = connection.execute(
-                  text("SELECT '127.0.0.1'::inet")
-              ).scalar()
-          engine.dispose()
 
-          if not isinstance(value, str):
+          def url_for(driver):
+              return f"postgresql+{driver}://" + BASE.split("://", 1)[1]
+
+          for driver in ("psycopg2", "psycopg"):
+              engine = create_engine(url_for(driver), pool_pre_ping=True)
+              maker = sessionmaker(bind=engine)
+              session = maker()
+              try:
+                  user = User(
+                      id=uuid.uuid4(),
+                      username=f"inet_{uuid.uuid4().hex[:12]}",
+                      password_hash="x",
+                      email=f"inet_{uuid.uuid4().hex[:12]}@example.com",
+                      status="active",
+                  )
+                  session.add(user)
+                  session.commit()
+
+                  device = UserTrustedDevice(
+                      id=uuid.uuid4(),
+                      user_id=user.id,
+                      device_fingerprint=f"fp_{uuid.uuid4().hex[:16]}",
+                      device_name="the CI INET probe",
+                      last_ip="203.0.113.77",
+                  )
+                  session.add(device)
+                  session.commit()
+
+                  # Expire so the value is re-read from the DATABASE.
+                  session.expire_all()
+                  value = session.get(UserTrustedDevice, device.id).last_ip
+
+                  if not isinstance(value, str):
+                      print(
+                          f"ERROR: under {driver} the INET column came back "
+                          f"as {type(value).__name__}, not str. The response "
+                          f"models require a string, and GET /devices would "
+                          f"answer 500.",
+                          file=sys.stderr,
+                      )
+                      sys.exit(1)
+
+                  print(f"OK: under {driver} the INET column is a string")
+              finally:
+                  session.close()
+                  engine.dispose()
+
+          metadata = MetaData()
+          table = Table(
+              "inet_driver_parity_probe",
+              metadata,
+              Column("id", String, primary_key=True),
+              Column("addr", INET),
+          )
+
+          plain = {}
+          for driver in ("psycopg2", "psycopg"):
+              engine = create_engine(url_for(driver), pool_pre_ping=True)
+              try:
+                  metadata.drop_all(engine)
+                  metadata.create_all(engine)
+                  with engine.begin() as connection:
+                      connection.execute(
+                          table.insert().values(id="1", addr="203.0.113.77")
+                      )
+                  with engine.connect() as connection:
+                      plain[driver] = type(
+                          connection.execute(select(table.c.addr)).scalar_one()
+                      ).__name__
+              finally:
+                  engine.dispose()
+
+          if plain["psycopg2"] != "str" or plain["psycopg"] == "str":
               print(
-                  f"ERROR: the INET column came back as {type(value).__name__}, "
-                  f"not str. The response models require a string.",
+                  f"ERROR: the two drivers no longer read a plain INET "
+                  f"column differently ({plain}). The parity assertion "
+                  f"above would then pass by accident.",
                   file=sys.stderr,
               )
               sys.exit(1)
-          print("OK: the INET column is returned as a string")
+
+          print(f"OK: the drivers differ on a plain INET column ({plain})")
           PY
 
       # -------------------------------------------------------------------
@@ -1173,7 +1340,6 @@ jobs:
           EOF
           # The credentials are never printed.
           echo "the demo environment file was written (credentials withheld)"
-
       # -------------------------------------------------------------------
       # The demo stack.
       #
