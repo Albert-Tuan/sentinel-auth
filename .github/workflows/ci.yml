@@ -1082,6 +1082,50 @@ jobs:
         run: bash scripts/ci_bootstrap_demo_databases.sh
 
       # -------------------------------------------------------------------
+      # The INET contract.
+      #
+      # The same check the `frontend-integration` job runs, for the same
+      # reason.  The response models declare the ``INET`` columns as
+      # strings; psycopg2 returns ``str`` and psycopg3 returns
+      # ``ipaddress.IPv4Address``.  A driver mismatch breaks the
+      # endpoints that serialise those columns - ``GET /devices`` answers
+      # 500 - long after the backend has started successfully, and the
+      # browser scenario that trips over it fails on a symptom
+      # ("the trusted device is not on the screen") that says nothing
+      # about the cause.
+      #
+      # Asserting the contract at the database boundary turns that into
+      # a failure with a clear message.
+      # -------------------------------------------------------------------
+      - name: Verify the PostgreSQL driver returns the expected INET type
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import sys
+          from sqlalchemy import create_engine, text
+
+          url = (
+              "postgresql+psycopg2://sentinel:sentinel_ci_disposable"
+              "@127.0.0.1:5432/sentinel_core_ci_demo"
+          )
+          engine = create_engine(url)
+          with engine.connect() as connection:
+              value = connection.execute(
+                  text("SELECT '127.0.0.1'::inet")
+              ).scalar()
+          engine.dispose()
+
+          if not isinstance(value, str):
+              print(
+                  f"ERROR: the INET column came back as {type(value).__name__}, "
+                  f"not str. The response models require a string.",
+                  file=sys.stderr,
+              )
+              sys.exit(1)
+          print("OK: the INET column is returned as a string")
+          PY
+
+      # -------------------------------------------------------------------
       # The demo environment file.
       #
       # It is written from the disposable container's coordinates and the
@@ -1109,9 +1153,9 @@ jobs:
           CORE_DB=${DEMO_CORE_DB}
           DETECTION_DB=${DEMO_DETECTION_DB}
           ML_DB=${DEMO_ML_DB}
-          CORE_DATABASE_URL=postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@${POSTGRES_HOST}:${POSTGRES_PORT}/${DEMO_CORE_DB}
-          DETECTION_DATABASE_URL=postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@${POSTGRES_HOST}:${POSTGRES_PORT}/${DEMO_DETECTION_DB}
-          ML_DATABASE_URL=postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@${POSTGRES_HOST}:${POSTGRES_PORT}/${DEMO_ML_DB}
+          CORE_DATABASE_URL=postgresql+psycopg2://${POSTGRES_USER}:${POSTGRES_PASSWORD}@${POSTGRES_HOST}:${POSTGRES_PORT}/${DEMO_CORE_DB}
+          DETECTION_DATABASE_URL=postgresql+psycopg2://${POSTGRES_USER}:${POSTGRES_PASSWORD}@${POSTGRES_HOST}:${POSTGRES_PORT}/${DEMO_DETECTION_DB}
+          ML_DATABASE_URL=postgresql+psycopg2://${POSTGRES_USER}:${POSTGRES_PASSWORD}@${POSTGRES_HOST}:${POSTGRES_PORT}/${DEMO_ML_DB}
           INTERNAL_SECRET=${INTERNAL_SECRET}
           APP_HOST=${APP_HOST}
           APP_PORT=${APP_PORT}
@@ -1184,8 +1228,15 @@ jobs:
 
           # The API.  It is the real application: the real router, the
           # real RBAC layer, the real token rotation.
+          #
+          # The access log is KEPT (`info`): it is the only record of
+          # which request the browser actually made and what the
+          # backend actually answered.  At `warning` the log holds only
+          # the application's own warnings, and a scenario that fails on
+          # a 403 leaves NO trace of the request that caused it - which
+          # is how a defect can survive a CI run unnoticed.
           nohup python -m uvicorn app.main:app \
-            --host "${APP_HOST}" --port "${APP_PORT}" --log-level warning \
+            --host "${APP_HOST}" --port "${APP_PORT}" --log-level info \
             > /tmp/api.log 2>&1 &
           echo "API_PID=$!" >> "${GITHUB_ENV}"
 

@@ -36,6 +36,11 @@ by the runner, not by convention: a skipped scenario proves nothing, so
 `scripts/e2e_run.sh` reads the JSON results and **fails the run** when a
 scenario was skipped.
 
+The suite has found **six** defects in total: four by running it locally
+against the demo stack (two in the product, two in the harness — see
+section 5), and two more by running it in CI (one in the product, one in
+the persistence layer — see section 5.3).
+
 ---
 
 ## 2. The principle: nothing is mocked
@@ -340,7 +345,8 @@ the race the fourth test proves.
 The suite was written against the running system, and the running system
 answered with four defects. Two of them are **product** defects; two
 are **harness** defects. All four were found by running the browser, not
-by reading the code.
+by reading the code. (Two more were later found by running the same
+suite in CI — they are in section 5.3.)
 
 ### 5.1 The product defects
 
@@ -411,6 +417,99 @@ of defect: a suite that owns its own runner and its own framework has
 to be **excluded** from the frameworks that own the other suites. A
 missing exclusion is not a cosmetic problem — it is a false signal in
 the unit-test result, and a false signal in the lint result.
+
+### 5.3 The defects the CI run surfaced
+
+The four defects above were all found by running the suite locally
+against the demo stack. The CI run of the same suite found two more,
+and neither could have been found locally — one needed the CI's
+dependency resolution, the other needed a production driver.
+
+#### P3 — The alert timeline was not invalidated when a protective action failed
+
+**Defect 19.**
+
+| | |
+|---|---|
+| **Symptom** | the backend recorded "Security action `<ACTION>` was NOT enforced by Core" in the alert's timeline, but the panel never re-fetched it. The scenario asserted on the timeline and found the refusal note missing |
+| **Cause** | `AlertActionPanel.tsx` invalidated the `['alerts']` query on **success** only. The `onError` path closed the dialog and set the banner, but left the query cache stale |
+| **Why it matters** | this is a truthfulness defect: the system knew the protection had **not** been applied, and the interface refused to say so. The analyst reads a refusal as an applied action |
+| **Fix** | `onError` awaits `invalidateAlerts()`, so the timeline re-fetches and the refusal note is rendered |
+
+The diff:
+
+```diff
+--- a/frontend/src/features/alerts/components/AlertActionPanel.tsx
++++ b/frontend/src/features/alerts/components/AlertActionPanel.tsx
+     onError: async () => {
+       setActionOpen(false)
++      await invalidateAlerts()
+     },
+```
+
+Note the ordering: the dialog is closed **first** (so the banner is in
+view), and the cache is invalidated **afterwards** (so the re-fetch
+cannot race the banner's render).
+
+#### P4 — PostgreSQL `INET` columns were not strings
+
+**Defect 20.**
+
+| | |
+|---|---|
+| **Symptom** | `GET /api/v1/devices` returned **500**. Pydantic raised a `ValidationError` on `TrustedDeviceItem.last_ip: Optional[str]` — the value was an `ipaddress.IPv4Address`, not a `str` |
+| **Cause** | SQLAlchemy 2.1 changed the default driver of a bare `postgresql://` URL from `psycopg2` to `psycopg` (psycopg 3). psycopg3 maps the PostgreSQL `INET` type to Python's `ipaddress` objects, where psycopg2 mapped it to `str` |
+| **Why CI only** | the local environment had `psycopg2` installed, so the code was correct locally and wrong in CI, where the fresh install resolved psycopg 3 |
+| **Fix** | three layers — a `StrINET` column type, a defensive cast in the response serialiser, and a pin on SQLAlchemy |
+
+The pin restores the previous behaviour, but the pin is not the fix —
+it is the *proof* that the behaviour had changed. The real fix is the
+column type, which makes the behaviour correct **by construction**:
+
+```python
+class StrINET(INET):
+    """An ``INET`` column that always yields ``str``.
+
+    SQLAlchemy 2.1 switched the default driver of a bare
+    ``postgresql://`` URL to psycopg 3, which maps PostgreSQL's
+    ``INET`` type to ``ipaddress`` objects instead of ``str``.
+    """
+
+    def result_processor(self, dialect, coltype):
+        super_processor = super().result_processor(dialect, coltype)
+
+        def process(value):
+            if value is None:
+                return None
+            if isinstance(value, str):
+                return value
+            try:
+                return str(value)
+            except Exception:
+                return None
+
+        if super_processor is None:
+            return process
+        return lambda value: process(super_processor(value))
+```
+
+and, on the model:
+
+```python
+def inet_type() -> INET:
+    return StrINET().with_variant(Text(), "sqlite")
+```
+
+The defence is layered on purpose:
+
+| Layer | Protects against |
+|---|---|
+| `StrINET` in `app/models.py` | the **column** returning a non-`str` under any driver or SQLAlchemy version |
+| the explicit `str()` cast in `app/devices.py` | a value that reached the response builder by some other path |
+| `sqlalchemy>=2.0.0,<2.1.0` in `requirements.txt` | the *known-bad* configuration, so CI fails loudly on a new driver instead of silently changing the semantics of every `INET` column in the schema |
+
+The third layer is a pin, not a fix, and it is there on purpose: the
+next driver change should be a **visible** event, not a silent one.
 
 ---
 

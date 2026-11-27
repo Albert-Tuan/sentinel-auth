@@ -327,6 +327,11 @@ added to a repository that already had a unit-test runner and a linter:
 Vitest picked up the Playwright specs, and ESLint applied React's hook
 rules to them. Both are listed in section 8.
 
+And two more that the **CI** run of the browser suite surfaced — one in
+the product (defect 19) and one in the persistence layer (defect 20).
+Both are listed in section 8 and accounted for in full in
+[M13-BROWSER-E2E-REPORT.md](M13-BROWSER-E2E-REPORT.md), section 5.
+
 ---
 
 ## 8. The problems that were found and fixed
@@ -406,6 +411,30 @@ component test renders a row and clicks it in a stable layout; the real
 queue reflows under the pointer, and the event is delivered to the
 wrong element. The diagnosis was made by capturing the live
 `mousedown` / `mouseup` / `click` targets inside the page.
+
+And finally the two that the **CI** run of the browser suite surfaced —
+one in the product and one in the persistence layer. Both appeared only
+in CI, because only CI runs the new dependency range and the
+production `psycopg3` driver:
+
+| # | Problem | Symptom | Fix |
+|---|---|---|---|
+| 19 | The alert timeline was not invalidated when a protective action **failed** | the backend recorded "Security action <ACTION> was NOT enforced by Core" in the timeline, but the panel's `onError` path never invalidated the `['alerts']` query, so the UI kept showing the stale timeline and the analyst never saw the refusal | `onError` awaits `invalidateAlerts()`, so the timeline re-fetches and the refusal note is rendered |
+| 20 | PostgreSQL `INET` columns were returned as `ipaddress.IPv4Address` objects, not `str` | `GET /api/v1/devices` failed with a 500: Pydantic raised a `ValidationError` on `TrustedDeviceItem.last_ip: Optional[str]`. SQLAlchemy 2.1 changed the default driver for a bare `postgresql://` URL from `psycopg2` to `psycopg` (psycopg 3), and psycopg3 maps `INET` to `ipaddress` objects | `app/models.py` defines a `StrINET(INET)` type whose `result_processor` normalises every value to `str` on every driver and every SQLAlchemy version; `app/devices.py` also casts defensively; `requirements.txt` pins `sqlalchemy>=2.0.0,<2.1.0` |
+
+Defect 19 is the smaller of the two, but it is a **truthfulness**
+defect of exactly the kind the milestone cares about: the system knew
+the action had not been enforced, and the interface refused to show
+it. The analyst would have read "the action was applied" when Core
+had, in fact, refused it.
+
+Defect 20 is a supply-chain defect rather than a logic defect. The
+code was always correct under `psycopg2`; it became incorrect the
+moment a dependency resolved to psycopg 3. The pin in
+`requirements.txt` restores the previous behaviour, and the
+`StrINET` type makes the behaviour **correct by construction** rather
+than by luck, so the next driver change cannot silently break it
+again.
 
 ---
 

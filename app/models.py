@@ -51,8 +51,67 @@ def uuid_type() -> UUID:
     return UUID(as_uuid=True)
 
 
+class StrINET(INET):
+    """An ``INET`` column that ALWAYS hands the application a ``str``.
+
+    ---------------------------------------------------------------------------
+    WHY THIS EXISTS
+    ---------------------------------------------------------------------------
+
+    PostgreSQL's ``INET`` type is read back differently by the two drivers
+    the project supports:
+
+      - ``psycopg2`` returns the address as a ``str``;
+      - ``psycopg`` (psycopg 3) returns an ``ipaddress.IPv4Address`` /
+        ``IPv6Address`` object.
+
+    Which driver is in play is NOT a property of this repository: it
+    depends on the SQLAlchemy version, because SQLAlchemy 2.1 changed the
+    default driver of a bare ``postgresql://`` URL from ``psycopg2`` to
+    ``psycopg``.  A deployment that pins SQLAlchemy therefore gets one
+    behaviour, and a deployment that lets it float gets the other — with
+    no error and no warning anywhere.
+
+    The difference is invisible until a value reaches a validator that
+    expects text.  ``TrustedDeviceItem.last_ip`` is declared
+    ``Optional[str]``, so under psycopg 3 the device list raised a
+    Pydantic ``ValidationError`` and the endpoint answered **500**:
+    the user could trust a device and the screen could not show it.
+
+    This type removes the difference at the SOURCE.  The value is
+    normalised to text on the way out of the database, so every consumer
+    - the Pydantic models, the ``str(...)`` wrappers, the audit trail -
+    sees the same ``str`` under every driver and every SQLAlchemy
+    version.
+
+    The normalisation is deliberately tolerant: a value that is already a
+    string is returned unchanged, and a value that cannot be interpreted
+    at all falls back to its own text form rather than raising.  A
+    column that holds a malformed address is a data problem; it must not
+    become an application-wide outage.
+    """
+
+    def result_processor(self, dialect, coltype):
+        super_processor = super().result_processor(dialect, coltype)
+
+        def process(value):
+            if value is None:
+                return None
+            if isinstance(value, str):
+                return value
+            # ``ipaddress`` objects and every other numeric/bytes form.
+            try:
+                return str(value)
+            except Exception:  # noqa: BLE001 - a bad value must not 500
+                return None
+
+        if super_processor is None:
+            return process
+        return lambda value: process(super_processor(value))
+
+
 def inet_type() -> INET:
-    return INET().with_variant(Text(), "sqlite")
+    return StrINET().with_variant(Text(), "sqlite")
 
 
 #: ``~`` is the Postgres regex-match operator. SQLite has no equivalent, so the

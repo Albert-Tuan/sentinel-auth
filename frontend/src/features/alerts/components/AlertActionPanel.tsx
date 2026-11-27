@@ -171,9 +171,19 @@ export function AlertActionPanel({ alert }: AlertActionPanelProps) {
      * Closing the dialog hands the outcome back to the analyst — the
      * "HÀNH ĐỘNG KHÔNG ĐƯỢC ÁP DỤNG" banner is then in full view, next
      * to the timeline entry that records the failed attempt.
+     *
+     * The alert queries are invalidated on the failure too, and that is
+     * NOT cosmetic.  The backend records the refused attempt in the
+     * timeline before it answers 502, so the timeline HAS changed — but
+     * the client only re-reads it when a mutation SUCCEEDS.  Without the
+     * invalidation the screen keeps showing the timeline as it was
+     * before the action: the analyst is told the action failed and, at
+     * the same time, that nothing was recorded.  The two statements
+     * contradict each other, and the contradiction is invisible.
      */
-    onError: () => {
+    onError: async () => {
       setActionOpen(false)
+      await invalidateAlerts()
     },
   })
 
