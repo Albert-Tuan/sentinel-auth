@@ -31,6 +31,10 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "${REPO_ROOT}"
 
+# The CORS origin rule — ONE definition, shared with the demo stack, so
+# the two can never drift apart.
+source "${REPO_ROOT}/scripts/cors_origins.sh"
+
 # -----------------------------------------------------------------------------
 # Configuration
 # -----------------------------------------------------------------------------
@@ -166,27 +170,13 @@ validate_config() {
     # A wildcard origin combined with credentialed requests lets any website
     # read authenticated responses, so it is refused here as well as in the
     # application.  Every entry must be a full origin.
+    #
+    # The rule lives in ONE place — scripts/cors_origins.sh — so the
+    # canonical deployment and the demo stack can never drift apart.
     if [ -n "${CORS_ALLOWED_ORIGINS:-}" ]; then
-        local entry
-        for entry in $(printf '%s' "${CORS_ALLOWED_ORIGINS}" | tr ',' ' '); do
-            entry="$(printf '%s' "${entry}" | tr -d '[:space:]')"
-            [ -n "${entry}" ] || continue
-            if [ "${entry}" = "*" ]; then
-                fail "CORS_ALLOWED_ORIGINS must not contain '*': a wildcard origin lets any website read authenticated responses. List the exact origins instead."
-            fi
-            case "${entry}" in
-                http://*|https://*) ;;
-                *) fail "CORS_ALLOWED_ORIGINS entry '${entry}' is not a full origin. Use scheme://host[:port]." ;;
-            esac
-            # An origin must not carry a path.  The scheme separator is
-            # "://", so any further "/" is a path separator.  The pattern
-            # "*//*" matches a "/" that comes AFTER the "://" — a bare
-            # "*/*/*" would also match "http://host", because a glob
-            # segment may be empty.
-            case "${entry}" in
-                *///*) fail "CORS_ALLOWED_ORIGINS entry '${entry}' must be an origin without a path." ;;
-            esac
-        done
+        if ! check_cors_allow_list "${CORS_ALLOWED_ORIGINS}"; then
+            fail "${CORS_ERROR_MESSAGE}"
+        fi
     fi
 
     # --- the ML artifact --------------------------------------------------

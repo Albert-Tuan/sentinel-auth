@@ -435,6 +435,24 @@ class TestTheFixtureHelperRefusesBeforeItWrites:
 
     This part needs a real PostgreSQL server, because the claim is about
     the DATABASE: a refused run must not have touched it.
+
+    ---------------------------------------------------------------------------
+    WHY THE ENVIRONMENT IS PATCHED, NOT MERELY BUILT
+    ---------------------------------------------------------------------------
+
+    The helper reads its target from ``os.environ`` at call time
+    (``_detection_url()`` calls ``os.environ.get(...)``), NOT from an
+    argument.  A test that builds a dictionary and hands it nowhere
+    therefore proves nothing: the helper would have used the REAL
+    environment, and the refusal it observed would have been caused by
+    whatever the ambient environment happened to say — most likely by
+    the very thing these tests are supposed to prove, namely that the
+    guard refuses.
+
+    Every test in this class therefore PATCHES the real environment with
+    ``monkeypatch.setenv``, and every test asserts WHICH refusal it
+    observed.  A refusal for the wrong reason — a missing variable, an
+    undeclared target — is a failure, not a pass.
     """
 
     @pytest.fixture(scope="class")
@@ -450,8 +468,58 @@ class TestTheFixtureHelperRefusesBeforeItWrites:
             return {}
         return {"core": core, "detection": detection, "ml": ml}
 
-    def test_a_refused_run_leaves_the_database_untouched(self, helper):
-        from sqlalchemy import create_engine, text
+    # --- the helpers that make the assertions meaningful -----------------
+
+    @staticmethod
+    def _assert_refused_for_the_database_guard(excinfo, database: str) -> None:
+        """Assert the refusal came from the DATABASE GUARD.
+
+        The guard's layers report themselves, so the reason can be read
+        out of the exception.  This assertion is the difference between
+        "the helper refused" and "the helper refused FOR THE REASON THIS
+        TEST IS ABOUT" — without it, a refusal caused by a missing
+        environment variable would satisfy the test just as well.
+        """
+        message = str(excinfo.value)
+
+        assert "refusing to write" in message, (
+            f"the helper did not refuse to write at all: {message}"
+        )
+
+        # The refusal must name the database the guard refused — and it
+        # must NOT be the "the run has not declared that it may write"
+        # message, which is a different layer entirely.
+        assert "has not declared that it may write" not in message, (
+            "the refusal came from the missing declaration, not from the "
+            f"database guard: {message}"
+        )
+        assert "does not match the" not in message, (
+            "the refusal came from the context/variable check, not from the "
+            f"database guard: {message}"
+        )
+        assert "is not a demo database of the" in message, (
+            f"the refusal did not come from the allowlist layer: {message}"
+        )
+        assert database in message, (
+            f"the refusal did not name the refused database '{database}': "
+            f"{message}"
+        )
+
+    @staticmethod
+    def _count(engine, sql: str, **parameters) -> int:
+        """Run one counting query and return the integer it produced."""
+        from sqlalchemy import text
+
+        with engine.connect() as connection:
+            value = connection.execute(text(sql), parameters).scalar()
+        return int(value or 0)
+
+    # --- the refused run leaves the database untouched -------------------
+
+    def test_a_refused_run_leaves_the_database_untouched(
+        self, helper, monkeypatch
+    ):
+        from sqlalchemy import create_engine
 
         urls = self._demo_urls()
         if not urls:
@@ -463,32 +531,45 @@ class TestTheFixtureHelperRefusesBeforeItWrites:
 
         engine = create_engine(urls["detection"], pool_pre_ping=True)
         try:
-            with engine.connect() as connection:
-                before = int(
-                    connection.execute(text("SELECT count(*) FROM alerts")).scalar()
-                )
+            before = self._count(engine, "SELECT count(*) FROM alerts")
+            attempts_before = self._count(
+                engine, "SELECT count(*) FROM login_attempts"
+            )
         finally:
             engine.dispose()
 
         # The URL names a PRODUCTION database, so the guard refuses it.
-        environment = dict(os.environ)
-        environment["DETECTION_DATABASE_URL"] = _url("sentinel_detection")
-        environment["E2E_ALLOW_WRITE_TO"] = "sentinel_detection"
+        #
+        # The environment is PATCHED, not merely built: the helper reads
+        # ``os.environ`` at call time, so a dictionary that is never
+        # applied would leave the helper running against the REAL demo
+        # database — and the "refusal" the test observed would then have
+        # been caused by the ambient environment rather than by the
+        # forbidden URL.
+        forbidden = "sentinel_detection"
+        monkeypatch.setenv("DETECTION_DATABASE_URL", _url(forbidden))
+        monkeypatch.setenv("E2E_ALLOW_WRITE_TO", forbidden)
 
-        with pytest.raises(SystemExit):
+        with pytest.raises(SystemExit) as excinfo:
             helper.create_alert("guard-probe", risk_level="critical", status="open")
+
+        self._assert_refused_for_the_database_guard(excinfo, forbidden)
 
         engine = create_engine(urls["detection"], pool_pre_ping=True)
         try:
-            with engine.connect() as connection:
-                after = int(
-                    connection.execute(text("SELECT count(*) FROM alerts")).scalar()
-                )
+            after = self._count(engine, "SELECT count(*) FROM alerts")
+            attempts_after = self._count(
+                engine, "SELECT count(*) FROM login_attempts"
+            )
         finally:
             engine.dispose()
 
         assert after == before, (
             "the refused run changed the row count of the alerts table"
+        )
+        assert attempts_after == attempts_before, (
+            "the refused run changed the row count of the login_attempts "
+            "table"
         )
 
     def test_the_refusal_reaches_the_command_line(self):
@@ -502,9 +583,10 @@ class TestTheFixtureHelperRefusesBeforeItWrites:
         if not all(urls.values()):
             pytest.skip("the demo databases are not provisioned")
 
+        forbidden = "sentinel_detection"
         environment = dict(os.environ)
-        environment["DETECTION_DATABASE_URL"] = _url("sentinel_detection")
-        environment["E2E_ALLOW_WRITE_TO"] = "sentinel_detection"
+        environment["DETECTION_DATABASE_URL"] = _url(forbidden)
+        environment["E2E_ALLOW_WRITE_TO"] = forbidden
 
         result = subprocess.run(
             [
@@ -522,8 +604,12 @@ class TestTheFixtureHelperRefusesBeforeItWrites:
 
         assert result.returncode != 0, result.stdout
         assert "refusing to write" in result.stderr, result.stderr
+        # The command-line path must refuse for the SAME reason, so a
+        # reviewer can tell an allowlist refusal from an unrelated one.
+        assert "is not a demo database of the" in result.stderr, result.stderr
+        assert forbidden in result.stderr, result.stderr
 
-    def test_a_refused_run_creates_no_fixture_row(self):
+    def test_a_refused_run_creates_no_fixture_row(self, helper, monkeypatch):
         # The row the helper owns must not exist after the refusal: the
         # refusal is not "the write was rolled back", it is "the write
         # never started".
@@ -535,28 +621,99 @@ class TestTheFixtureHelperRefusesBeforeItWrites:
         if not all(urls.values()):
             pytest.skip("the demo databases are not provisioned")
 
-        from sqlalchemy import create_engine, text
+        from sqlalchemy import create_engine
 
-        helper = _load_script("e2e_fixtures.py")
         alert_id = helper._resolve_alert_id("guard-probe")
 
-        environment = dict(os.environ)
-        environment["DETECTION_DATABASE_URL"] = _url("sentinel_detection")
-        environment["E2E_ALLOW_WRITE_TO"] = "sentinel_detection"
+        forbidden = "sentinel_detection"
+        monkeypatch.setenv("DETECTION_DATABASE_URL", _url(forbidden))
+        monkeypatch.setenv("E2E_ALLOW_WRITE_TO", forbidden)
 
-        with pytest.raises(SystemExit):
+        with pytest.raises(SystemExit) as excinfo:
             helper.create_alert("guard-probe", risk_level="critical", status="open")
+
+        self._assert_refused_for_the_database_guard(excinfo, forbidden)
 
         engine = create_engine(urls["detection"], pool_pre_ping=True)
         try:
-            with engine.connect() as connection:
-                found = connection.execute(
-                    text("SELECT count(*) FROM alerts WHERE id = :id"),
-                    {"id": alert_id},
-                ).scalar()
+            found = self._count(
+                engine,
+                "SELECT count(*) FROM alerts WHERE id = :id",
+                id=alert_id,
+            )
         finally:
             engine.dispose()
 
-        assert int(found or 0) == 0, (
+        assert found == 0, (
             "the refused run created the fixture row anyway"
         )
+
+    # --- the positive control --------------------------------------------
+
+    def test_a_valid_demo_url_is_accepted_and_the_row_is_written(
+        self, helper, monkeypatch
+    ):
+        """The PROOF that the two tests above prove something.
+
+        A refusal test can pass for the wrong reason — a missing
+        variable, a typo, a helper that simply does not work at all.
+        This test is the control: it points the helper at a REAL demo
+        database, with a REAL declaration, and asserts that the write
+        HAPPENS.
+
+        Without this control, "the helper refused" and "the helper is
+        broken" are indistinguishable.
+        """
+        from sqlalchemy import create_engine
+
+        urls = self._demo_urls()
+        if not urls:
+            pytest.skip(
+                "the demo databases are not provisioned. Export "
+                "DEMO_CORE_DATABASE_URL, DEMO_DETECTION_DATABASE_URL and "
+                "DEMO_ML_DATABASE_URL to run this check."
+            )
+
+        key = "guard-positive-control"
+        alert_id = helper._resolve_alert_id(key)
+
+        # The very same environment the refusal tests poison, but pointing
+        # at the REAL demo database this time.
+        monkeypatch.setenv("DETECTION_DATABASE_URL", urls["detection"])
+        monkeypatch.setenv("E2E_ALLOW_WRITE_TO", DEMO_DETECTION_DB)
+
+        result = helper.create_alert(key, risk_level="critical", status="open")
+
+        assert result["alert_id"] == alert_id
+
+        engine = create_engine(urls["detection"], pool_pre_ping=True)
+        try:
+            found = self._count(
+                engine,
+                "SELECT count(*) FROM alerts WHERE id = :id",
+                id=alert_id,
+            )
+        finally:
+            engine.dispose()
+
+        assert found == 1, (
+            "the helper did not write the row into the demo database, so "
+            "the refusal tests above would have passed even if the guard "
+            "had let every URL through"
+        )
+
+        # The control row is cleaned up, so the run leaves the demo
+        # database exactly as it found it.
+        helper.delete_alert(key)
+
+        engine = create_engine(urls["detection"], pool_pre_ping=True)
+        try:
+            remaining = self._count(
+                engine,
+                "SELECT count(*) FROM alerts WHERE id = :id",
+                id=alert_id,
+            )
+        finally:
+            engine.dispose()
+
+        assert remaining == 0, "the control row was not cleaned up"
