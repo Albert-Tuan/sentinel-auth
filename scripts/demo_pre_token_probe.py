@@ -50,6 +50,7 @@ It does NOT drop, truncate or delete any table, and it never touches a
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import subprocess
@@ -76,7 +77,12 @@ DEFAULT_DEMO_PASSWORD = "DemoPass!2026"
 
 #: The IP the risky history is written under.  A documentation range
 #: (RFC 5737), so it can never be a real client.
-PROBE_IP = "203.0.113.77"
+RISKY_IP = "203.0.113.77"
+
+#: The range the probe draws the login address from.  RFC 5737 reserves
+#: ``203.0.113.0/24`` for documentation, so no address in it can be a
+#: real client.
+PROBE_IP_RANGE = "203.0.113"
 
 #: The user agent the risky history is written under.
 PROBE_UA = "SentinelAuthPreTokenProbe/1.0"
@@ -157,6 +163,56 @@ def _require_demo_databases(env: Dict[str, str]) -> None:
 # The risky history
 # ---------------------------------------------------------------------------
 
+def _pick_probe_ip(detection_url: str, user_id: str) -> str:
+    """Choose an address the account has never logged in from.
+
+    ``ip_change_rate_7d`` is ``1 - (attempts from this IP) / (attempts
+    in the last 7 days)``.  An address that already appears in the
+    account's history LOWERS the novelty, and a novelty below 0.8 does
+    not trigger the ``impossible_travel`` rule — so the gate would issue
+    the token for the right reason and the wrong proof.
+
+    The probe therefore picks an address that is genuinely new.  It
+    draws from the RFC 5737 documentation range, so the address can
+    never be a real client, and it skips every address the account has
+    already used.  The candidate is drawn DETERMINISTICALLY from the
+    account's own history, so the same history always yields the same
+    address and two runs of the probe never collide with each other in
+    a way that would blur the comparison.
+    """
+    engine = create_engine(detection_url, pool_pre_ping=True)
+    try:
+        with engine.connect() as connection:
+            used = {
+                str(row[0])
+                for row in connection.execute(
+                    text(
+                        "SELECT DISTINCT ip_address FROM login_attempts "
+                        "WHERE user_id = :user_id AND ip_address IS NOT NULL"
+                    ),
+                    {"user_id": user_id},
+                ).fetchall()
+            }
+    finally:
+        engine.dispose()
+
+    # A stable starting point, so the same history always yields the
+    # same candidate.
+    seed = int(hashlib.sha256(user_id.encode("utf-8")).hexdigest()[:8], 16)
+    for offset in range(256):
+        candidate = f"{PROBE_IP_RANGE}.{(seed + offset) % 256}"
+        if candidate == RISKY_IP:
+            continue
+        if candidate not in used:
+            return candidate
+
+    fail(
+        "every address of the documentation range has already been used by "
+        "this account. The probe cannot find an address the "
+        "'impossible_travel' rule would score as new."
+    )
+
+
 def _seed_risky_history(detection_url: str, user_id: str, username: str) -> List[str]:
     """Write the failed attempts that make the next login risky.
 
@@ -192,7 +248,7 @@ def _seed_risky_history(detection_url: str, user_id: str, username: str) -> List
                         "event_id": event_id,
                         "user_id": user_id,
                         "username": username,
-                        "ip": PROBE_IP,
+                        "ip": RISKY_IP,
                         "ua": PROBE_UA,
                         "ts": now - timedelta(minutes=minutes),
                     },
@@ -528,9 +584,17 @@ def main() -> int:
         )
     user_id = str(row[0])
 
+    # --- the address the login comes from ------------------------------
+    #
+    # It has to be an address the account has never used, or the
+    # 'impossible_travel' rule does not trigger and the gate issues the
+    # token for the right reason and the wrong proof.
+    probe_ip = _pick_probe_ip(detection_url, user_id)
+
     # --- the risky history ----------------------------------------------
     event_ids = _seed_risky_history(detection_url, user_id, username)
-    log(f"seeded {len(event_ids)} risky attempt(s) under {PROBE_IP}")
+    log(f"seeded {len(event_ids)} risky attempt(s) under {RISKY_IP}")
+    log(f"the login under test comes from {probe_ip} (never used before)")
 
     # --- the policy in service ------------------------------------------
     #
@@ -563,14 +627,14 @@ def main() -> int:
         # leaves the counter of the login action well past its limit.  A
         # rate-limited probe would measure the limiter instead of the
         # gate.
-        cleared = _clear_login_rate_limit(core_url, PROBE_IP)
+        cleared = _clear_login_rate_limit(core_url, probe_ip)
         if cleared:
-            log(f"cleared {cleared} login rate-limit counter(s) for {PROBE_IP}")
+            log(f"cleared {cleared} login rate-limit counter(s) for {probe_ip}")
 
         # --- RUN 1: the gate ON (the demo stack) -------------------------
         previous_flag = _clear_one_time_mfa(core_url, username)
         status_gated, body_gated = _login(
-            base_url, username, password, PROBE_IP, PROBE_UA
+            base_url, username, password, probe_ip, PROBE_UA
         )
         gated_token = str(body_gated.get("access_token") or "")
         gated_mfa = bool(body_gated.get("mfa_required"))
@@ -593,7 +657,7 @@ def main() -> int:
             f"http://127.0.0.1:{comparison_port}",
             username,
             password,
-            PROBE_IP,
+            probe_ip,
             PROBE_UA,
         )
         ungated_token = str(body_ungated.get("access_token") or "")
