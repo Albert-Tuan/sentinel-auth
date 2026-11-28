@@ -9,7 +9,7 @@ that satisfies it and the command that proves it.
 Every "verified" entry below was run against the live demo stack on
 2026-11-25 (Areas A to E) and on 2026-11-26 (Area F — the browser
 E2E).  The entries added by the M13.2 hardening round (Area G) were run
-on 2026-11-28 against commit `7ec6409`; their evidence is in section 13.
+on 2026-11-28 against commit `2e3280d`; their evidence is in section 13.
 
 ---
 
@@ -705,12 +705,12 @@ them were violated at some point during this work:
 
 ## 10. The CI result
 
-### The current run — PR #22, head `7ec6409`
+### The current run — PR #22, head `2e3280d`
 
-Run: <https://github.com/Albert-Tuan/sentinel-auth/actions/runs/46143555230>
+Run: <https://github.com/Albert-Tuan/sentinel-auth/actions/runs/46149270445>
 (PR [#22](https://github.com/Albert-Tuan/sentinel-auth/pull/22), head
-`7ec6409`, started 2026-11-28
-12:13:10 UTC).
+`2e3280d`, started 2026-11-28
+13:22:09 UTC).
 
 ```
 Test & Smoke (py3.11)             success
@@ -729,7 +729,8 @@ What each job reported, read out of the job log:
 | Test & Smoke (py3.11 / py3.12) | `scripts/m10_http_smoke.py` | `HTTP SMOKE: 79 passed, 0 failed` |
 | Frontend (unit & build) | `npm run test` | `Test Files 18 passed (18)` · `Tests 265 passed (265)` |
 | Frontend (real HTTP integration) | `npm run test:integration` | `Test Files 3 passed (3)` · `Tests 50 passed (50)` |
-| Browser E2E (real Chromium) | `bash scripts/e2e_run.sh --no-start` | `18 passed (43.8s)` |
+| Browser E2E (real Chromium) | `python scripts/demo_pre_token_probe.py` | `PRE-TOKEN PROBE: 10 passed, 0 failed` |
+| Browser E2E (real Chromium) | `bash scripts/e2e_run.sh --no-start` | `18 passed (49.5s)` · *pre-token probe: 10 checks passed, 0 failed* |
 
 The zero-skip figure is the point of the whole exercise: the safety
 suite contributed 51 of those 1543 tests, and every one of them ran on
@@ -888,19 +889,19 @@ is in [M13-DEMO-FIXTURES.md](M13-DEMO-FIXTURES.md).
 ## 13. The evidence of the M13.2 hardening round
 
 Every figure in this section was produced on **2026-11-28** against
-commit **`7ec6409`** (branch
+commit **`2e3280d`** (branch
 `feature/m13-browser-e2e`, PR #22).
 
 ### 13.1 The destination guard
 
 | Item | Value |
 |---|---|
-| Source SHA | `7ec6409` |
+| Source SHA | `2e3280d` |
 | Date run | 2026-11-28 |
 | Command | `python -m pytest tests/test_e2e_fixture_target_guard.py -q` |
 | Profile | the fixture-guard unit suite; no database of its own, except the positive control |
 | Result | **111 passed**, 0 failed, 0 skipped |
-| Evidence | CI run `46143555230`, job `Test & Smoke (py3.11)` and `(py3.12)` — the suite is part of `pytest tests/`, which reported `collected=1543 passed=1543 skipped=0` |
+| Evidence | CI run `46149270445`, job `Test & Smoke (py3.11)` and `(py3.12)` — the suite is part of `pytest tests/`, which reported `collected=1543 passed=1543 skipped=0` |
 
 The five mutations of the guard were each checked to be caught:
 
@@ -1082,7 +1083,7 @@ address, the second run would have failed: the first run's own attempt
 had made the address known. The probe now runs over and over again,
 each run from a different fresh address.
 
-**Run `46143555230` — the gate held the token, in CI, on the stack the
+**Run `46149270445` — the gate held the token, in CI, on the stack the
 browser suite drives.**
 
 ```
@@ -1169,14 +1170,14 @@ defects follow from that, and both are now closed:
 
 | Suite | Command | Result | Where it ran | Evidence |
 |---|---|---|---|---|
-| Backend regression | `pytest tests/` | 1543 passed, 0 skipped | CI + local | CI run mới nhất |
-| Destination guard | `pytest tests/test_e2e_fixture_target_guard.py -q` | 111 passed | CI + local | CI run mới nhất |
+| Backend regression | `pytest tests/` | 1543 passed, 0 skipped | CI + local | CI `46149270445` |
+| Destination guard | `pytest tests/test_e2e_fixture_target_guard.py -q` | 111 passed | CI + local | CI `46149270445` |
 | Full-system E2E (pre-token ON) | `pytest tests/test_full_system_e2e.py -q` | 6 passed | local (needs the `*_test` databases) | part of `pytest tests/` in CI |
 | Risk gate unit tests | `pytest tests/test_risk_gate.py -q` | 22 passed | local | part of `pytest tests/` in CI |
-| Frontend unit | `npm run test` | 265 passed | CI | CI `46143555230` |
-| Frontend real-HTTP integration | `npm run test:integration` | 50 passed | CI | CI `46143555230` |
-| Browser E2E | `bash scripts/e2e_run.sh --no-start` | 18 passed | CI | CI `46143555230` |
-| HTTP smoke | `scripts/m10_http_smoke.py` | 79 passed | CI | CI `46143555230` |
+| Frontend unit | `npm run test` | 265 passed | CI | CI `46149270445` |
+| Frontend real-HTTP integration | `npm run test:integration` | 50 passed | CI | CI `46149270445` |
+| Browser E2E | `bash scripts/e2e_run.sh --no-start` | 18 passed | CI | CI `46149270445` |
+| HTTP smoke | `scripts/m10_http_smoke.py` | 79 passed | CI | CI `46149270445` |
 | Demo scenarios | `python scripts/demo_scenarios.py --all` | 55 checks | **local only** | the script drives the demo stack's own ports and database names |
 | Deployment verification | `python scripts/deploy_verify.py` | 67 passed | **local only** | it verifies the `docker compose` deployment scripts, which CI does not execute |
 | Pre-token probe | `python scripts/demo_pre_token_probe.py` | 10 checks | local + CI (`browser-e2e`) | see 13.2 |

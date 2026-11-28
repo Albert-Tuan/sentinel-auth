@@ -464,10 +464,10 @@ làm được.
 
 | Con số | Nguồn |
 |---|---|
-| 1543 test backend, 0 skip | CI run mới nhất |
-| 18 kịch bản Chromium, 0 mock | CI run mới nhất |
-| 111 test an toàn đích database | CI run mới nhất |
-| 56 test guard / khôi phục trạng thái / vòng đời tiến trình của probe | CI run mới nhất |
+| 1543 test backend, 0 skip | CI run 46149270445 |
+| 18 kịch bản Chromium, 0 mock | CI run 46149270445 |
+| 111 test an toàn đích database | CI run 46149270445 |
+| 56 test guard / khôi phục trạng thái / vòng đời tiến trình của probe | CI run 46149270445 |
 | 55 check demo scenario | chạy local |
 | 10 check probe pre-token | local + CI |
 
