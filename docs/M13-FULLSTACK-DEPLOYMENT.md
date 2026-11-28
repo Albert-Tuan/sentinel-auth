@@ -298,8 +298,8 @@ the demo foundation.
 | What you want | What you take |
 |---|---|
 | the **demo foundation only** | `feature/m13-demo-foundation` (PR #21, head `dd352791807bcd1b9586220269d6b369b24840a3`) |
-| the **complete M13**, which is what the demo and the browser E2E need | `feature/m13-browser-e2e` (PR #22, head `8ce6e6a8216fb2c172647b93aa0559e28638213c`) |
-| the exact state the acceptance matrix reports | commit `8ce6e6a8216fb2c172647b93aa0559e28638213c` |
+| the **complete M13**, which is what the demo and the browser E2E need | `feature/m13-browser-e2e` (PR #22, head `7ec6409ed5420451328b82a9a093fc3ec8fe4e42`) |
+| the exact state the acceptance matrix reports | commit `7ec6409ed5420451328b82a9a093fc3ec8fe4e42` |
 
 `feature/m13-browser-e2e` already contains everything
 `feature/m13-demo-foundation` has — its merge-base with that branch IS
@@ -309,14 +309,14 @@ its head — so **taking PR #22's branch alone is enough** for a demo.
 git clone https://github.com/Albert-Tuan/sentinel-auth.git
 cd sentinel-auth
 git checkout feature/m13-browser-e2e
-git log --oneline -1          # expect 8ce6e6a
+git log --oneline -1          # expect 7ec6409
 ```
 
 To reproduce the figures of the acceptance matrix exactly, check the
 commit out rather than the branch tip:
 
 ```bash
-git checkout 8ce6e6a8216fb2c172647b93aa0559e28638213c
+git checkout 7ec6409ed5420451328b82a9a093fc3ec8fe4e42
 ```
 
 ### 10.2 The dependencies that were verified
