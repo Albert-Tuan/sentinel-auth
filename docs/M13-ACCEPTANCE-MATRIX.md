@@ -8,7 +8,8 @@ that satisfies it and the command that proves it.
 
 Every "verified" entry below was run against the live demo stack on
 2026-11-25 (Areas A to E) and on 2026-11-26 (Area F — the browser
-E2E).
+E2E).  The entries added by the M13.2 hardening round (Area G) were run
+on 2026-11-28 against commit `898fef2`; their evidence is in section 13.
 
 ---
 
@@ -22,7 +23,8 @@ E2E).
 | D | The safety | 24 | 24 | `tests/test_demo_fixtures.py`, `tests/test_ci_demo_database_safety.py`, `tests/test_e2e_fixture_guards.py` |
 | E | The regression | 15 | 15 | `pytest tests/` |
 | F | The browser E2E | 12 | 12 | `scripts/e2e_run.sh` |
-| | **Total** | **75** | **75** | |
+| G | The destination guard | 12 | 12 | `tests/test_e2e_fixture_target_guard.py`, `scripts/demo_pre_token_probe.py` |
+| | **Total** | **91** | **91** | |
 
 The six demo scenarios contribute **55 individual checks**, all passing,
 twice in a row — the second run proves they are re-runnable.
@@ -30,6 +32,9 @@ twice in a row — the second run proves they are re-runnable.
 The browser suite contributes **18 scenarios**, all passing, zero
 skipped, zero mocked. See
 [M13-BROWSER-E2E-REPORT.md](M13-BROWSER-E2E-REPORT.md).
+
+The destination guard contributes **111 tests** and the pre-token probe
+contributes **7 checks**; both are accounted for in section 13.
 
 ---
 
@@ -160,7 +165,12 @@ The guard lives in `scripts/e2e_fixtures_guard.py` — its own module, so
 the safety boundary can be imported and tested WITHOUT running any
 destructive code. It is fail-closed and layered; every layer refuses by
 default, and the destructive SQL runs only when all of them are
-satisfied:
+satisfied.
+
+#### The five original layers — WHICH DATABASE
+
+These five layers decide **which database** the helper may touch. They
+were the whole guard when it was first written.
 
 | Layer | The rule | A refused example |
 |---|---|---|
@@ -181,6 +191,55 @@ The declaration is derived from the very URLs the run is about to use —
 `frontend/e2e/support/fixtureBridge.ts` computes it from the demo
 environment it hands to the helper — so it can never name a database the
 run does not actually reach.
+
+#### The destination hardening — WHICH DESTINATION THE DRIVER REACHES
+
+The five layers above decide about a URL. They did **not** prove that
+the URL they decided about is the URL the DRIVER would use, and a
+PostgreSQL URL can carry a query string that libpq lets **override** the
+parts of the URL:
+
+```
+postgresql://demo:example@127.0.0.1/sentinel_core_demo?dbname=sentinel_core_test
+
+    dialect.create_connect_args()  ->  {"host": "127.0.0.1",
+                                        "dbname": "sentinel_core_test"}
+```
+
+The path still says `sentinel_core_demo` and the authority still says
+`127.0.0.1`, so the five layers were satisfied — but the driver was
+told to open `sentinel_core_test`. The guard used to compare the URL
+with the context's own variable **after dropping everything after the
+`?`**, so it approved one destination and the driver reached another.
+
+The hardening that closes this is what Area G verifies. Its rules are
+now part of the same module:
+
+| Rule | What it does | A refused example |
+|---|---|---|
+| SQLAlchemy URL parsing | the URL is read with `make_url()` — the engine's own parser — so the guard reads the same URL the engine will read | a URL SQLAlchemy cannot parse |
+| Query allowlist | only `sslmode`, `connect_timeout`, `application_name` and `client_encoding` are accepted | `?options=-c%20statement_timeout%3D30000` |
+| Target-moving parameters | `host`, `hostaddr`, `dbname`, `database`, `service`, `port`, `user`, `password`, `passfile` and `target_session_attrs` are refused with a message of their own | `?dbname=sentinel_core_test` |
+| Unknown and repeated parameters | an unknown parameter is refused, never ignored; a repeated one is refused because the driver receives every value | `?search_path=public`, `?dbname=a&dbname=b` |
+| Encoded parameters | the raw query string is compared against SQLAlchemy's own parse, so a parameter SQLAlchemy would DROP cannot slip between the two | `?db%6eame=sentinel_core_test`, `?dbname%3Dsentinel_core_test` |
+| Driver scope | only the dialects the repository uses: `postgresql`, `postgresql+psycopg2`, `postgresql+psycopg` | `?postgresql+asyncpg://`, `mysql://`, `sqlite:///` |
+| libpq environment | `PGHOSTADDR`, `PGSERVICE` and `PGSERVICEFILE` are refused outright; `PGHOST`, `PGPORT`, `PGDATABASE` and `PGUSER` are refused when the URL does not pin the matching parameter | `PGHOSTADDR=192.0.2.123` in the environment |
+| Driver agreement | `dialect.create_connect_args()` must report the same `host` and `dbname` the guard validated, and must not carry `hostaddr` or `service` | a driver that would report another database |
+| The validated URL object | the guard RETURNS the `URL` object it validated, and the engine is built from **that object** — never a re-parsed string | — |
+| Context comparison | the comparison with the context's own variable is semantic (driver, host, port, database, user, query parameters) | a URL whose query differs from its variable |
+
+Two properties make this more than a list of refusals:
+
+* **The layers are independent.** A test disables the query check and
+  proves the driver-agreement check still catches the bypass, so no
+  single layer is load-bearing on its own.
+* **The engine is built from the validated object.**
+  `scripts/e2e_fixtures.py` passes the `URL` instance to
+  `create_engine()`, which closes the gap between "the URL that was
+  checked" and "the URL the driver receives".
+
+A refusal message never carries the URL, because a URL carries the
+password.
 
 #### The one deliberate exception
 
@@ -203,11 +262,11 @@ to every guard above.
 ### D18 to D24 in detail
 
 ```
-collected=46 passed=46 failed=0 skipped=0
+collected=47 passed=47 failed=0 skipped=0
 ```
 
 The suite that proves the guard is `tests/test_e2e_fixture_guards.py` —
-46 tests across three groups:
+47 tests across three groups:
 
 * `TestTheDemoDatabaseGuard` — the layers themselves: the accepted
   names, the refused names, the wrong-context URLs, the non-loopback
@@ -248,7 +307,7 @@ The only change to `.gitignore` is one line:
 
 | # | Criterion | Result |
 |---|---|---|
-| E1 | The full test suite passes | `1276 passed`, 0 failed, **0 skipped** |
+| E1 | The full test suite passes | `1487 passed`, 0 failed, **0 skipped** |
 | E2 | The M13 fixture tests pass | 26 passed |
 | E3 | `git diff --check` reports nothing | clean |
 | E4 | The new scripts compile | `python3 -m py_compile` clean, `bash -n` clean |
@@ -261,7 +320,8 @@ The only change to `.gitignore` is one line:
 | E11 | The deployment verification passes | 67 passed, 0 failed |
 | E12 | The production frontend build succeeds | `vite build` ✓, 1.53s |
 | E13 | The CI database safety tests pass | 51 passed, 0 skipped |
-| E14 | The E2E database-guard tests pass | 46 passed, 0 skipped |
+| E14 | The E2E database-guard tests pass | 47 passed, 0 skipped |
+| E16 | The E2E destination-guard tests pass | 111 passed, 0 skipped |
 | E15 | The INET cross-driver parity tests pass | 15 passed, 0 skipped |
 
 ### E9 in detail
@@ -303,7 +363,7 @@ backend and the other half to another.
 
 | Suite | Baseline required | Result | Delta |
 |---|---|---|---|
-| Backend regression | ≥ 1199 passed | **1337 passed**, 0 failed, 0 skipped | +138 (26 fixture + 51 safety + 46 guard + 15 parity) |
+| Backend regression | ≥ 1199 passed | **1487 passed**, 0 failed, 0 skipped | +288 (26 fixture + 51 safety + 47 guard + 15 parity + 111 destination guard + 38 the other M13 work) |
 | HTTP smoke | ≥ 79 passed | **79 passed**, 0 failed | — |
 | Frontend unit/component | ≥ 265 passed | **265 passed**, 0 failed | — |
 | Frontend integration | ≥ 50 passed | **50 passed**, 0 failed | — |
@@ -314,7 +374,9 @@ backend and the other half to another.
 | Demo scenarios | — | **55 checks**, 2 consecutive runs | — |
 | Browser E2E | — | **18 scenarios**, 0 skipped, 0 mocked | new |
 | Browser E2E typecheck | pass | pass (`tsc -p tsconfig.e2e.json`) | new |
-| E2E database guard | — | **46 passed**, 0 skipped | new |
+| E2E database guard | — | **47 passed**, 0 skipped | new |
+| E2E destination guard | — | **111 passed**, 0 skipped | new |
+| Pre-token detection probe | — | **7 checks passed**, 0 failed | new |
 | INET driver parity | — | **15 passed**, 0 skipped | new |
 | CI database safety | — | **51 passed** | new |
 | `git diff --check` | clean | clean | — |
@@ -323,7 +385,7 @@ backend and the other half to another.
 ### E1 in detail
 
 ```
-collected=1337 passed=1337 failed=0 skipped=0 error=0 xfailed=0
+collected=1487 passed=1487 failed=0 skipped=0 error=0 xfailed=0
 ```
 
 (The suite needs its own disposable databases. `scripts/ci_bootstrap_postgres.sh`
@@ -641,6 +703,51 @@ them were violated at some point during this work:
 
 ## 10. The CI result
 
+### The current run — PR #22, head `898fef2`
+
+Run: <https://github.com/Albert-Tuan/sentinel-auth/actions/runs/46099392584>
+(PR [#22](https://github.com/Albert-Tuan/sentinel-auth/pull/22), head
+`898fef2b5e9fd00c7512744c3fcd2c0d8867281d`, started 2026-11-28
+02:42:32 UTC).
+
+```
+Test & Smoke (py3.11)             success
+Test & Smoke (py3.12)             success
+Frontend (unit & build)           success
+Frontend (real HTTP integration)  success
+Browser E2E (real Chromium)       success
+```
+
+What each job reported, read out of the job log:
+
+| Job | Command | Result |
+|---|---|---|
+| Test & Smoke (py3.11) | `pytest tests/` | `collected=1487 passed=1487 failed=0 skipped=0 error=0 xfailed=0` |
+| Test & Smoke (py3.12) | `pytest tests/` | `collected=1487 passed=1487 failed=0 skipped=0 error=0 xfailed=0` |
+| Test & Smoke (py3.11 / py3.12) | `scripts/m10_http_smoke.py` | `HTTP SMOKE: 79 passed, 0 failed` |
+| Frontend (unit & build) | `npm run test` | `Test Files 18 passed (18)` · `Tests 265 passed (265)` |
+| Frontend (real HTTP integration) | `npm run test:integration` | `Test Files 3 passed (3)` · `Tests 50 passed (50)` |
+| Browser E2E (real Chromium) | `bash scripts/e2e_run.sh --no-start` | `18 passed (51.9s)` |
+
+The zero-skip figure is the point of the whole exercise: the safety
+suite contributed 51 of those 1487 tests, and every one of them ran on
+the runner — none of them skipped itself to make the build green.
+
+**What CI does NOT run.** Two of the numbers in this matrix are not CI
+numbers, and they are labelled as such everywhere they appear:
+
+| Suite | Where it runs | Why it is not in CI |
+|---|---|---|
+| `scripts/demo_scenarios.py` (55 checks) | locally, against the demo stack | it is a DEMONSTRATION script; it drives the demo stack's own ports and its own database names, which the CI jobs do not provide |
+| `scripts/deploy_verify.py` (67 checks) | locally, against a disposable stack | it verifies the DEPLOYMENT scripts (`docker compose`, the volume lifecycle), which the CI runner does not execute |
+| `scripts/demo_pre_token_probe.py` (7 checks) | **both** — locally and in the `browser-e2e` job | it was added to CI in the M13.2 hardening round; see section 13 |
+
+The `browser-e2e` job added the pre-token probe after the browser suite,
+so a regression in the gate fails the build even though no browser
+scenario depends on it.
+
+### The earlier run — PR #21
+
 Run: <https://github.com/Albert-Tuan/sentinel-auth/actions/runs/45614884041>
 (PR [#21](https://github.com/Albert-Tuan/sentinel-auth/pull/21), head
 `56c24802d273d2313ac2a3e07479a404e02975e4`).
@@ -654,9 +761,9 @@ Frontend (real HTTP integration)  pass
 collected=1276 passed=1276 failed=0 skipped=0 error=0 xfailed=0
 ```
 
-The zero-skip figure is the point of the whole exercise: the safety
-suite contributed 51 of those 1276 tests, and every one of them ran on
-the runner — none of them skipped itself to make the build green.
+This is the HISTORICAL figure of the M13.0/M13.1 foundation. It is
+kept because PR #21 is still open and its own head carries that number;
+it is not the current state of the branch.
 
 ### The browser E2E job
 
@@ -687,7 +794,35 @@ tokens and OTP codes.
 
 ---
 
-## 11. How to reproduce the whole matrix
+## 11. Area G — The destination guard and the pre-token gate
+
+| # | Criterion | Artefact | Verified by |
+|---|---|---|---|
+| G1 | A URL whose query string MOVES the destination is refused | `scripts/e2e_fixtures_guard.py` | `test_a_destination_changing_query_parameter_is_refused` (7 cases) |
+| G2 | The refusal names the offending parameter | the same | `test_the_refusal_names_the_offending_parameter` (4 cases) |
+| G3 | A repeated parameter is refused | the same | `test_a_repeated_parameter_is_refused` (3 cases) |
+| G4 | An encoded parameter is refused | the same | `test_an_encoded_parameter_is_refused` (3 cases) |
+| G5 | An unknown parameter is refused | the same | `test_an_unknown_parameter_is_refused` (7 cases) |
+| G6 | Only the allowlisted parameters are accepted | the same | `test_a_parameter_on_the_allowlist_is_accepted` (3 cases) |
+| G7 | Only the project's own drivers are in scope | the same | `test_an_unsupported_driver_is_refused` (5 cases), `test_the_projects_own_drivers_are_accepted` (3 cases) |
+| G8 | The libpq environment cannot move the destination | the same | `test_an_overriding_libpq_variable_is_refused` (3), `test_a_defaulting_libpq_variable_is_refused` (2), `test_a_default_the_url_pins_is_not_a_refusal` (2) |
+| G9 | A refusal never reaches `create_engine` | `scripts/e2e_fixtures.py` | `test_a_refused_url_never_reaches_create_engine`, `test_no_destination_changing_url_reaches_create_engine` (4 cases) |
+| G10 | The engine is built from the validated URL OBJECT | the same | `test_the_url_function_returns_the_parsed_url_object`, `test_the_engine_is_built_from_the_validated_url_object` |
+| G11 | The driver agrees with the guard about the destination | `scripts/e2e_fixtures_guard.py` | `test_the_agreement_check_catches_a_moved_database`, `..._a_moved_host`, `..._a_host_address`, `..._a_service` |
+| G12 | The pre-token gate really decides the login, on the real stack | `scripts/demo_pre_token_probe.py` | the A/B comparison: the same risky login, the same databases, the same policy, the gate on and the gate off |
+
+The suite that proves G1 to G11 is
+`tests/test_e2e_fixture_target_guard.py` — **111 tests**. It is
+independent of the five original layers in Area D: it proves that the
+layers agree with the DRIVER, not with each other.
+
+G12 is proved by `scripts/demo_pre_token_probe.py`. It is the only
+check that answers the question the demo actually needs answered —
+see section 13.2.
+
+---
+
+## 12. How to reproduce the whole matrix
 
 ```bash
 # 1. the stack
@@ -706,6 +841,7 @@ scripts/demo_scenarios.py --all
 pytest tests/test_demo_fixtures.py -q
 pytest tests/test_ci_demo_database_safety.py -q
 pytest tests/test_e2e_fixture_guards.py -q
+pytest tests/test_e2e_fixture_target_guard.py -q
 
 # 5. the regression
 scripts/ci_bootstrap_postgres.sh
@@ -717,13 +853,117 @@ pytest tests/test_inet_driver_parity.py -q
 scripts/e2e_run.sh
 cd frontend && npx tsc -p tsconfig.e2e.json && cd ..
 
-# 7. the diff
+# 7. the pre-token detection gate, on the real stack
+python scripts/demo_pre_token_probe.py
+
+# 8. the deployment verification
+python scripts/deploy_verify.py
+
+# 9. the diff
 git diff --check
 ```
 
+The scripts are invoked through `bash` or `python` because the
+repository does not track the executable bit on every file. The full
+setup guide — including the failure modes and how to recognise them —
+is in [M13-DEMO-FIXTURES.md](M13-DEMO-FIXTURES.md).
+
 ---
 
-## 12. Related documents
+## 13. The evidence of the M13.2 hardening round
+
+Every figure in this section was produced on **2026-11-28** against
+commit **`898fef2b5e9fd00c7512744c3fcd2c0d8867281d`** (branch
+`feature/m13-browser-e2e`, PR #22).
+
+### 13.1 The destination guard
+
+| Item | Value |
+|---|---|
+| Source SHA | `898fef2b5e9fd00c7512744c3fcd2c0d8867281d` |
+| Date run | 2026-11-28 |
+| Command | `python -m pytest tests/test_e2e_fixture_target_guard.py -q` |
+| Profile | the fixture-guard unit suite; no database of its own, except the positive control |
+| Result | **111 passed**, 0 failed, 0 skipped |
+| Evidence | CI run `46099392584`, job `Test & Smoke (py3.11)` and `(py3.12)` — the suite is part of `pytest tests/`, which reported `collected=1487 passed=1487 skipped=0` |
+
+The five mutations of the guard were each checked to be caught:
+
+| Mutation | Tests that fail |
+|---|---|
+| the query check is disabled | 29 |
+| the target-moving check is disabled | 3 |
+| the truncated comparison is restored | 1 |
+| the driver-agreement check is disabled | 1 |
+| the libpq environment check is disabled | 6 |
+
+### 13.2 The pre-token detection gate
+
+The question: **does the Detection Engine decide the login outcome, or
+does the token simply happen to be withheld?**
+
+The answer is proved by an A/B comparison on the running demo stack —
+same databases, same active policy, same seeded risky history, same
+account. The ONLY variable is `RUN_PRE_TOKEN_CHECK`.
+
+| Item | Value |
+|---|---|
+| Source SHA | `898fef2b5e9fd00c7512744c3fcd2c0d8867281d` |
+| Date run | 2026-11-28 |
+| Command | `python scripts/demo_pre_token_probe.py` |
+| Profile | the **local demo stack** (`.env.demo`, the `_demo` databases), the monolith with `DETECTION_URL` pointing at itself and `RUN_PRE_TOKEN_CHECK=1` |
+| Result | **7 checks passed**, 0 failed |
+| Evidence | the CI `browser-e2e` job runs the same probe against the `_ci_demo` databases, on the same stack the browser suite drives |
+
+What the two runs showed:
+
+```
+RUN 1 (the gate ON):  status=200 token=HELD   mfa_required=True
+RUN 2 (the gate OFF): status=200 token=ISSUED mfa_required=False
+```
+
+and the Core audit log recorded the protective action the Detection
+Engine asked for:
+
+```
+protective_action:REVOKE_SESSIONS | system
+   reason: detection risk_level=RiskLevel.CRITICAL decision=block
+```
+
+The probe refuses to run against anything but a `_demo` database, and
+it restores everything it changed: the risky attempts it wrote are
+removed and the one-time MFA flag is put back the way it found it.
+
+#### What this does and does not prove
+
+It proves that the **pre-token gate** — the synchronous
+`POST /api/v1/internal/pre-token-check` call that happens BEFORE a
+token is issued — withholds the token on the real stack, with the real
+policy and the real HTTP boundary.
+
+It does **not** prove that a browser scenario does the same: the
+browser suite never creates a risky login, so it exercises the UI and
+the session mechanics, not the gate.
+
+### 13.3 The other suites, and where they run
+
+| Suite | Command | Result | Where it ran | Evidence |
+|---|---|---|---|---|
+| Backend regression | `pytest tests/` | 1487 passed, 0 skipped | CI + local | CI `46099392584` |
+| Destination guard | `pytest tests/test_e2e_fixture_target_guard.py -q` | 111 passed | CI + local | CI `46099392584` |
+| Full-system E2E (pre-token ON) | `pytest tests/test_full_system_e2e.py -q` | 6 passed | local (needs the `*_test` databases) | part of `pytest tests/` in CI |
+| Risk gate unit tests | `pytest tests/test_risk_gate.py -q` | 22 passed | local | part of `pytest tests/` in CI |
+| Frontend unit | `npm run test` | 265 passed | CI | CI `46099392584` |
+| Frontend real-HTTP integration | `npm run test:integration` | 50 passed | CI | CI `46099392584` |
+| Browser E2E | `bash scripts/e2e_run.sh --no-start` | 18 passed | CI | CI `46099392584` |
+| HTTP smoke | `scripts/m10_http_smoke.py` | 79 passed | CI | CI `46099392584` |
+| Demo scenarios | `python scripts/demo_scenarios.py --all` | 55 checks | **local only** | the script drives the demo stack's own ports and database names |
+| Deployment verification | `python scripts/deploy_verify.py` | 67 passed | **local only** | it verifies the `docker compose` deployment scripts, which CI does not execute |
+| Pre-token probe | `python scripts/demo_pre_token_probe.py` | 7 checks | local + CI (`browser-e2e`) | see 13.2 |
+
+---
+
+## 14. Related documents
 
 * [M13-FULLSTACK-DEPLOYMENT.md](M13-FULLSTACK-DEPLOYMENT.md) — the demo stack
 * [M13-DEMO-FIXTURES.md](M13-DEMO-FIXTURES.md) — the reproducible fixtures

@@ -1480,6 +1480,29 @@ jobs:
           bash scripts/e2e_run.sh --no-start
 
       # -------------------------------------------------------------------
+      # The pre-token detection gate.
+      #
+      # The browser suite proves that the UI behaves; it does NOT prove
+      # that the Detection Engine decides the login outcome, because the
+      # browser scenarios never create a risky login.
+      #
+      # This probe proves it, on THIS stack, with THIS policy: it makes
+      # the SAME risky login twice — once with the gate ON and once with
+      # it OFF — and shows that only the gated run withholds the token.
+      # The two runs share the databases, the policy and the seeded
+      # history, so the gate is the only variable.
+      #
+      # The probe refuses to run against anything but a `_demo` database.
+      # -------------------------------------------------------------------
+      - name: Prove the pre-token detection gate decides the login
+        run: |
+          set -euo pipefail
+          set -a
+          . "${DEMO_ENV_FILE}"
+          set +a
+          python scripts/demo_pre_token_probe.py
+
+      # -------------------------------------------------------------------
       # The report.
       #
       # The artefacts contain bearer tokens, passwords and OTP codes —

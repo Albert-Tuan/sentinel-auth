@@ -284,7 +284,163 @@ frontend must show "no data" for the ML score there, never a zero.
 
 ---
 
-## 10. Troubleshooting
+## 10. Running the demo from a CLEAN CLONE
+
+This section is the whole handover: everything a second team member has
+to do, in order, on a machine that has never seen the project.
+
+### 10.1 Which branch or commit to take
+
+While PR #21 and PR #22 are both open, the two branches have to be
+taken **in order** — PR #22 is stacked on PR #21, so it does not contain
+the demo foundation.
+
+| What you want | What you take |
+|---|---|
+| the **demo foundation only** | `feature/m13-demo-foundation` (PR #21, head `dd352791807bcd1b9586220269d6b369b24840a3`) |
+| the **complete M13**, which is what the demo and the browser E2E need | `feature/m13-browser-e2e` (PR #22, head `898fef2b5e9fd00c7512744c3fcd2c0d8867281d`) |
+| the exact state the acceptance matrix reports | commit `898fef2b5e9fd00c7512744c3fcd2c0d8867281d` |
+
+`feature/m13-browser-e2e` already contains everything
+`feature/m13-demo-foundation` has — its merge-base with that branch IS
+its head — so **taking PR #22's branch alone is enough** for a demo.
+
+```bash
+git clone https://github.com/Albert-Tuan/sentinel-auth.git
+cd sentinel-auth
+git checkout feature/m13-browser-e2e
+git log --oneline -1          # expect 898fef2
+```
+
+To reproduce the figures of the acceptance matrix exactly, check the
+commit out rather than the branch tip:
+
+```bash
+git checkout 898fef2b5e9fd00c7512744c3fcd2c0d8867281d
+```
+
+### 10.2 The dependencies that were verified
+
+| Dependency | Verified version | Notes |
+|---|---|---|
+| Python | 3.11 and 3.12 | CI runs the backend suite on BOTH |
+| Node.js | 20 and 24 | CI runs the frontend on 24; the repository's `engines` allows 18+ |
+| PostgreSQL | 16 | the compose overlay; `postgres:16-alpine` is the CI image |
+| Redis | 7 | the compose overlay |
+| SQLAlchemy | `>=2.0.0,<2.1.0` | **pinned on purpose** — see defect 20 in the matrix |
+| psycopg2 | from `requirements.txt` | the driver the CI URLs spell explicitly |
+| Docker or Podman | any recent | rootless is supported |
+
+```bash
+python3 -m venv .venv && . .venv/bin/activate
+pip install -r requirements.txt
+
+cd frontend && npm ci && cd ..
+```
+
+The browser suite needs Chromium as well:
+
+```bash
+cd frontend && npx playwright install chromium && cd ..
+```
+
+### 10.3 The environment file
+
+```bash
+cp .env.demo.example .env.demo
+```
+
+Then generate **your own** secrets — never reuse a value from another
+machine, and never commit the file:
+
+```bash
+python3 -c "import secrets; print(secrets.token_urlsafe(32))"   # INTERNAL_SECRET
+python3 -c "import secrets; print(secrets.token_urlsafe(16))"   # POSTGRES_PASSWORD
+```
+
+`.env.demo` is gitignored; `.env.demo.example` holds placeholders only.
+The stack refuses to start if `INTERNAL_SECRET` is shorter than 32
+characters or still holds the placeholder.
+
+### 10.4 The whole sequence
+
+```bash
+# 1. bring the stack up (PostgreSQL, Redis, the SMTP sink, the API, Vite)
+bash scripts/demo_stack.sh start
+bash scripts/demo_stack.sh status
+
+# 2. seed the fixtures into the demo databases
+python scripts/demo_seed_demo.py --seed --manifest-out .ci/demo/fixture-manifest.json
+
+# 3. the six demonstration scenarios
+python scripts/demo_scenarios.py --all
+
+# 4. the pre-token detection gate, on the real stack
+python scripts/demo_pre_token_probe.py
+
+# 5. the browser acceptance suite
+bash scripts/e2e_run.sh
+
+# 6. the deployment verification (needs Docker)
+python scripts/deploy_verify.py
+```
+
+The scripts are invoked through `bash` and `python` because the
+repository does not track the executable bit on every file.
+
+### 10.5 Stopping, restarting, and the destructive reset
+
+| Command | Effect | Data |
+|---|---|---|
+| `bash scripts/demo_stack.sh stop` | stops every process | **kept** |
+| `bash scripts/demo_stack.sh restart` | stops and starts again | **kept** — the row counts must be identical before and after |
+| `bash scripts/demo_stack.sh status` | shows what runs and the real database state | — |
+| `bash scripts/demo_stack.sh reset` | **destroys the demo volumes** | **lost** |
+
+`reset` is the ONLY destructive command, and it asks for a typed
+confirmation first:
+
+```
+This script DROPS and RECREATES the following databases:
+  - sentinel_core_demo
+  - sentinel_detection_demo
+  - sentinel_ml_demo
+
+Type the three names above, separated by spaces, to proceed:
+```
+
+Use it only when the demo's state has drifted and a fresh start is
+wanted. It never touches the canonical deployment's `.env`, its ports
+or its databases — the demo has its own.
+
+### 10.6 The failure modes that were actually hit
+
+These are the failures that cost time during the M13.2 work. Each one
+has a symptom you can recognise and a fix that does not weaken the
+protection.
+
+| Symptom | Cause | Fix |
+|---|---|---|
+| the shell's `INTERNAL_SECRET` differs from the one in `.env.demo`, and the internal boundary answers `401` | an exported variable shadows the file | `scripts/demo_stack.sh` sources `.env.demo` with `set -a`, so the file wins **for the stack**. A script you run BY HAND reads the shell first — run it with the file's values, or `set -a; . ./.env.demo; set +a` before it |
+| "No captured OTP found for … in …" | the SMTP sink is not on the port the API sends to, or writes to another file | the port and the log path must agree with `MFA_SMTP_PORT` / `MFA_SMTP_LOG`. `scripts/demo_stack.sh` writes the absolute path into `.ci/demo/otp-log.path`; the API and the reader must both use it |
+| the scenario reports "the one-time MFA gate could not be changed" | `CORE_DATABASE_URL` is not exported into the scenario's shell | `set -a; . ./.env.demo; set +a` first |
+| the scenario finds no alerts | the fixtures were not seeded into the DETECTION database | `python scripts/demo_seed_demo.py --seed` — the seed writes to all three databases |
+| the login answers `429 Too many requests` | the login rate limit is 5 per minute and per IP; the accumulated login attempts of earlier runs fill the window | wait for the window to reopen. `scripts/demo_scenarios.py` retries by itself; a hand-written script has to |
+| the login answers `mfa_required: true` for an account that is NOT `demo_admin` | the DETECTION engine scored the login as risky and the pre-token gate held the token — this is the CORRECT behaviour, not a misconfiguration | see section 9. To get a clean run, re-seed the fixtures: `python scripts/demo_seed_demo.py --seed` resets the one-time MFA flag |
+| the alerts are seeded but the pipeline does not run | the seeded alerts are for the INTERFACE. A pipeline claim needs a REAL login event | run `python scripts/demo_pre_token_probe.py` — it makes a real risky login and shows the Detection verdict |
+| a test answers `401` right after a successful login | the shell is talking to a DIFFERENT backend than the one that issued the token | check the port: the demo API is `58000`, and `M12_API_ORIGIN` / `M12_API_ROOT` must AGREE with each other and with the backend that is actually running |
+| `psycopg2.errors.OperationalError: ... connection refused` | the shell's `CORE_DATABASE_URL` points at another stack's PostgreSQL | the demo's PostgreSQL is on `55432`; the canonical deployment uses a different port |
+| the run is green but the demo shows old data | the fixtures were seeded before the scenario that changed them | `python scripts/demo_seed_demo.py --seed` is idempotent and re-arms the one-time MFA flag |
+
+**Do not work around a failure by disabling the detection.** Turning
+`RUN_PRE_TOKEN_CHECK=0` makes the login succeed, and the demo then
+shows a system that does not do what it claims to do. The scenarios
+that need a quiet login can use an account the policy does not score as
+risky.
+
+---
+
+## 11. Troubleshooting
 
 | Symptom | Cause | Fix |
 |---|---|---|
@@ -297,7 +453,7 @@ frontend must show "no data" for the ML score there, never a zero.
 
 ---
 
-## 11. Related documents
+## 12. Related documents
 
 * [M13-DEMO-FIXTURES.md](M13-DEMO-FIXTURES.md) — the reproducible fixtures
 * [M13-DEMO-SCENARIOS.md](M13-DEMO-SCENARIOS.md) — the six demo scenarios
