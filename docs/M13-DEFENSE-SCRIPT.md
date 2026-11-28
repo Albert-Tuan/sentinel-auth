@@ -168,6 +168,16 @@ RUN 1 (the gate ON):  status=200 token=HELD   mfa_required=True
 RUN 2 (the gate OFF): status=200 token=ISSUED mfa_required=False
 ```
 
+**Lưu ý về policy:** probe tự đảm bảo policy của demo (`m13-demo-active`)
+đang là policy đang áp dụng trước khi chấm điểm, và trả lại policy cũ
+về sau. Lý do: chỉ được có **một** policy active tại một thời điểm, và
+kịch bản E2E-05 của browser suite đã kích hoạt policy của riêng nó —
+làm policy demo bị vô hiệu. Khi đó đăng nhập rủi ro bị chấm điểm thấp
+hơn ngưỡng `high`, và gate **đúng** là cấp token. Đó là sự thật về
+policy, nhưng vô dụng về gate. Nếu bạn thấy dòng log báo policy demo
+"không có trong dịch vụ", đó là thông báo bình thường — probe đã xử lý
+việc đó.
+
 **Vì sao đây là bằng chứng mạnh:** hai lần chạy dùng **cùng database,
 cùng policy đang active, cùng lịch sử rủi ro đã gieo, cùng tài khoản**.
 Biến duy nhất là `RUN_PRE_TOKEN_CHECK`. Nếu gate không quyết định, hai
@@ -181,24 +191,38 @@ grep "pre-token-check" .ci/demo/api.log | tail -3
 grep "internal/actions" .ci/demo/api.log | tail -3
 ```
 
-Trong log sẽ thấy đúng thứ tự này cho một lần đăng nhập bất thường:
+Trong log sẽ thấy một lần đăng nhập bất thường như sau:
 
 ```
 POST /api/v1/internal/pre-token-check   200 OK
-POST /api/v1/internal/actions           200 OK
 POST /api/v1/internal/login-events      202 Accepted
+POST /api/v1/internal/actions           200 OK
 POST /api/v1/auth/login                 200 OK
 ```
 
-Điểm cần nói: **pre-token-check gọi TRƯỚC**, và nó chỉ là một lần ĐỌC
-đánh giá rủi ro — nó không ghi gì. Lần ghi duy nhất là login-events, và
-đó cũng là lần ghi duy nhất tạo ra attempt, assessment và alert. Nếu
-gate ghi riêng, một lần đăng nhập sẽ sinh ra hai alert.
+**Điểm cần nói — vì sao `pre-token-check` đứng đầu:** nó là lần gọi
+đồng bộ, được `await` trước khi Core quyết định có cấp token hay không.
+Nó chỉ là một lần ĐỌC đánh giá rủi ro và **không ghi gì cả** — không
+attempt, không assessment, không alert.
+
+`login-events` là lần ghi duy nhất, và cũng là lần ghi duy nhất tạo ra
+attempt, assessment và alert. Nếu gate ghi riêng, một lần đăng nhập sẽ
+sinh ra hai alert.
+
+`internal/actions` là Detection gọi ngược lại Core để thi hành hành
+động bảo vệ — nó chạy SONG SONG với lúc Core đang giao response, nên
+vị trí của nó trong log có thể đổi. Điều bất biến là: **pre-token-check
+luôn đứng trước `auth/login`**, và `auth/login` trả `200` với
+`access_token` rỗng — tức là token đã bị giữ trước khi client nhận
+được bất cứ thứ gì.
+
+Dòng `auth/login` đứng cuối vì response chỉ được ghi ra sau khi handler
+trả về, còn handler đã chờ cả lần giao event.
 
 **Bằng chứng cần chụp:**
 
 1. Ảnh màn hình terminal chạy probe với 2 dòng RUN 1 / RUN 2.
-2. Ảnh màn hình log API cho thấy thứ tự 4 request.
+2. Ảnh màn hình log API cho thấy `pre-token-check` đứng trước `auth/login`.
 3. Nếu giảng viên hỏi về hành động bảo vệ, mở audit log của Core.
 
 **Khôi phục nếu hỏng:**

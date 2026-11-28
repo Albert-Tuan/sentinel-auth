@@ -81,6 +81,12 @@ PROBE_IP = "203.0.113.77"
 #: The user agent the risky history is written under.
 PROBE_UA = "SentinelAuthPreTokenProbe/1.0"
 
+#: The version of the demo's own policy — the one whose rules make a
+#: risky login score ``high``.  The browser scenario E2E-05 activates a
+#: policy of its own, which deactivates this one, so the probe has to
+#: put it back in service before it scores anything.
+DEMO_POLICY_VERSION = "m13-demo-active"
+
 
 def log(message: str) -> None:
     print(f"[pre-token-probe] {message}", flush=True)
@@ -261,6 +267,120 @@ def _login(
     return response.status_code, body if isinstance(body, dict) else {}
 
 
+def _ensure_demo_policy_active(detection_url: str) -> Optional[str]:
+    """Make the demo's own policy the one in service.
+
+    Returns the id of the policy that WAS in service, when the probe had
+    to change it — so the probe can put the stack back the way it found
+    it — and ``None`` when the demo policy was already in service.
+
+    The scoring reads the policy that carries ``is_active`` — there can
+    only ever be ONE of them.  The browser scenario E2E-05 activates a
+    policy of its own, and by the partial unique index that DEACTIVATES
+    the demo's policy.  Its rules are milder, so with it in service the
+    risky login is scored below the ``high`` threshold and the gate
+    issues the token — which is a true statement about the policy, and
+    a useless statement about the gate.
+
+    So the probe puts the demo policy back in service before it scores
+    anything.
+    """
+    engine = create_engine(detection_url, pool_pre_ping=True)
+    try:
+        with engine.begin() as connection:
+            demo = connection.execute(
+                text(
+                    "SELECT id FROM policies WHERE version = :v"
+                ),
+                {"v": DEMO_POLICY_VERSION},
+            ).fetchone()
+            if demo is None:
+                fail(
+                    f"the demo policy {DEMO_POLICY_VERSION!r} does not exist. "
+                    f"Seed the demo fixtures first: "
+                    f"python scripts/demo_seed_demo.py --seed"
+                )
+            current = connection.execute(
+                text("SELECT id FROM policies WHERE is_active IS TRUE")
+            ).fetchone()
+            if current is not None and str(current[0]) == str(demo[0]):
+                return None
+            previous_id = str(current[0]) if current is not None else None
+            if current is not None:
+                connection.execute(
+                    text(
+                        "UPDATE policies SET is_active = FALSE, "
+                        "deactivated_at = :now WHERE id = :id"
+                    ),
+                    {"now": datetime.now(timezone.utc), "id": current[0]},
+                )
+            connection.execute(
+                text(
+                    "UPDATE policies SET is_active = TRUE, "
+                    "activated_at = :now, deactivated_at = NULL WHERE id = :id"
+                ),
+                {"now": datetime.now(timezone.utc), "id": demo[0]},
+            )
+            return previous_id
+    finally:
+        engine.dispose()
+
+
+def _clear_login_rate_limit(core_url: str, ip: str) -> int:
+    """Clear the login rate-limit counter of the probe's client.
+
+    The counter is a RATE LIMIT, not business state: clearing it does not
+    hide a defect of the application — it removes the interference of the
+    test client with a control that is designed for real traffic.  The
+    risky attempts, the sessions and the one-time MFA flag are
+    untouched.
+
+    Only the rows of the probe's own address are removed; the limiter
+    itself stays exactly as it is.
+    """
+    engine = create_engine(core_url, pool_pre_ping=True)
+    try:
+        with engine.begin() as connection:
+            removed = connection.execute(
+                text(
+                    "DELETE FROM rate_limits "
+                    "WHERE ip_address = :ip AND action = 'login'"
+                ),
+                {"ip": ip},
+            ).rowcount
+            return int(removed or 0)
+    finally:
+        engine.dispose()
+
+
+def _restore_active_policy(
+    detection_url: str, previous_policy_id: Optional[str]
+) -> None:
+    """Put the previously in-service policy back, if the probe changed it.
+
+    The deactivate has to reach the database BEFORE the activate, because
+    the partial unique index allows exactly one active policy — the same
+    ordering the application's activation endpoint relies on.
+    """
+    if previous_policy_id is None:
+        return
+    engine = create_engine(detection_url, pool_pre_ping=True)
+    try:
+        with engine.begin() as connection:
+            connection.execute(
+                text("UPDATE policies SET is_active = FALSE WHERE is_active IS TRUE")
+            )
+            connection.execute(
+                text(
+                    "UPDATE policies SET is_active = TRUE, "
+                    "activated_at = :now, deactivated_at = NULL WHERE id = :id"
+                ),
+                {"now": datetime.now(timezone.utc), "id": previous_policy_id},
+            )
+    finally:
+        engine.dispose()
+
+
 def _clear_one_time_mfa(core_url: str, username: str) -> bool:
     """Return the one-time MFA flag to False and report its old value.
 
@@ -412,10 +532,41 @@ def main() -> int:
     event_ids = _seed_risky_history(detection_url, user_id, username)
     log(f"seeded {len(event_ids)} risky attempt(s) under {PROBE_IP}")
 
+    # --- the policy in service ------------------------------------------
+    #
+    # The probe has to score against the demo's OWN policy.  The browser
+    # scenario E2E-05 activates a policy of its own, and by the partial
+    # unique index that deactivates the demo policy — the probe would
+    # then measure the milder policy instead of the gate.
+    previous_policy_id: Optional[str] = None
     previous_flag = False
     comparison_port = 58999
     comparison = None
     try:
+        # --- the policy in service --------------------------------------
+        #
+        # The probe has to score against the demo's OWN policy.  The
+        # browser scenario E2E-05 activates a policy of its own, and by
+        # the partial unique index that deactivates the demo policy — the
+        # probe would then measure the milder policy instead of the
+        # gate.
+        previous_policy_id = _ensure_demo_policy_active(detection_url)
+        if previous_policy_id is not None:
+            log(
+                f"the demo policy {DEMO_POLICY_VERSION!r} was not in service; "
+                f"the probe put it back and will restore the stack afterwards"
+            )
+
+        # --- the rate-limit counter --------------------------------------
+        #
+        # The browser suite logs in from the same loopback address, so it
+        # leaves the counter of the login action well past its limit.  A
+        # rate-limited probe would measure the limiter instead of the
+        # gate.
+        cleared = _clear_login_rate_limit(core_url, PROBE_IP)
+        if cleared:
+            log(f"cleared {cleared} login rate-limit counter(s) for {PROBE_IP}")
+
         # --- RUN 1: the gate ON (the demo stack) -------------------------
         previous_flag = _clear_one_time_mfa(core_url, username)
         status_gated, body_gated = _login(
@@ -520,6 +671,9 @@ def main() -> int:
         log(f"removed {removed} risky attempt(s) the probe wrote")
         _restore_one_time_mfa(core_url, username, previous_flag)
         log("the one-time MFA flag was restored")
+        _restore_active_policy(detection_url, previous_policy_id)
+        if previous_policy_id is not None:
+            log("the policy in service was restored")
 
 
 if __name__ == "__main__":

@@ -908,12 +908,12 @@ account. The ONLY variable is `RUN_PRE_TOKEN_CHECK`.
 
 | Item | Value |
 |---|---|
-| Source SHA | `898fef2b5e9fd00c7512744c3fcd2c0d8867281d` |
+| Source SHA | `898fef2b5e9fd00c7512744c3fcd2c0d8867281d` (the fix is on the commit after it) |
 | Date run | 2026-11-28 |
 | Command | `python scripts/demo_pre_token_probe.py` |
 | Profile | the **local demo stack** (`.env.demo`, the `_demo` databases), the monolith with `DETECTION_URL` pointing at itself and `RUN_PRE_TOKEN_CHECK=1` |
 | Result | **7 checks passed**, 0 failed |
-| Evidence | the CI `browser-e2e` job runs the same probe against the `_ci_demo` databases, on the same stack the browser suite drives |
+| Evidence | the CI `browser-e2e` job runs the same probe against the `_ci_demo` databases, on the same stack the browser suite drives — the run `46140815516` found the defect described below |
 
 What the two runs showed:
 
@@ -932,7 +932,40 @@ protective_action:REVOKE_SESSIONS | system
 
 The probe refuses to run against anything but a `_demo` database, and
 it restores everything it changed: the risky attempts it wrote are
-removed and the one-time MFA flag is put back the way it found it.
+removed, the one-time MFA flag is put back the way it found it, and the
+policy in service is put back too.
+
+#### What the CI run found — the probe was measuring the wrong thing
+
+The first CI run of the probe **failed**, and the failure was real
+evidence rather than a flake. Run `46140815516` reported:
+
+```
+RUN 1 (the gate ON):  status=200 token=ISSUED mfa_required=False
+```
+
+The gate issued the token. Locally the same probe reported `HELD`. The
+difference was not the gate — it was **the policy in service**.
+
+Only one policy may be active at a time, by a partial unique index. The
+browser scenario **E2E-05 activates a policy of its own**, and by that
+index that DEACTIVATES the demo's policy. Its rules are milder, so the
+risky login scored below the `high` threshold, and the gate correctly
+issued the token — a true statement about that policy, and a useless
+statement about the gate.
+
+So the probe now does three things it did not do before:
+
+| Step | Why |
+|---|---|
+| it puts the demo's own policy back in service before scoring, and restores the previous one afterwards | the probe has to measure the GATE, not whichever policy happens to be in service |
+| it clears the login rate-limit counter of its own address | the browser suite leaves the counter past its limit, and a rate-limited probe measures the limiter |
+| it reports which policy it scored against | so a failure says WHICH policy was in service, not just that something was wrong |
+
+The ordering matters: the deactivate has to reach the database before
+the activate, because the partial unique index allows exactly one active
+policy. The probe now reproduces the local condition exactly — the demo
+policy deactivated, the probe run anyway, the stack restored.
 
 #### What this does and does not prove
 
