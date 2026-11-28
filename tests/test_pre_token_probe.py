@@ -134,12 +134,16 @@ def _url(database: str, host: str = "127.0.0.1", port: int = 5432, query: Option
 
 
 def _demo_environment(**overrides: str) -> Dict[str, str]:
-    """A demo environment the guard accepts."""
+    """A demo environment the guard accepts.
+
+    The write declaration is deliberately NOT part of it: the probe reads
+    that from the PROCESS environment, because the declaration belongs to
+    the RUN and not to the configuration file.
+    """
     environment = {
         "CORE_DATABASE_URL": _url(DEMO_CORE_DB),
         "DETECTION_DATABASE_URL": _url(DEMO_DETECTION_DB),
         "ML_DATABASE_URL": _url("sentinel_ml_demo"),
-        "E2E_ALLOW_WRITE_TO": f"{DEMO_CORE_DB} {DEMO_DETECTION_DB}",
     }
     environment.update(overrides)
     return environment
@@ -153,7 +157,7 @@ class TestTheProbeUsesTheHardenedGuard:
     """The probe must refuse a target the hardened guard refuses."""
 
     @pytest.fixture()
-    def environment(self, monkeypatch):
+    def environment(self, probe, monkeypatch):
         # The probe reads the write declaration from the process
         # environment, exactly like every other tool in this repository.
         # The test sets it explicitly, so the test does not depend on
@@ -161,6 +165,10 @@ class TestTheProbeUsesTheHardenedGuard:
         monkeypatch.setenv(
             "E2E_ALLOW_WRITE_TO", f"{DEMO_CORE_DB} {DEMO_DETECTION_DB}"
         )
+        # The libpq environment of the operator's shell must not decide
+        # the outcome of a test either.
+        for variable in probe.LIBPQ_ENVIRONMENT_VARIABLES:
+            monkeypatch.delenv(variable, raising=False)
         return _demo_environment()
 
     # --- the destination cannot be moved --------------------------------
@@ -325,12 +333,17 @@ class TestTheProbeUsesTheHardenedGuard:
         assert validated["core"].database == DEMO_CORE_DB
         assert validated["detection"].database == DEMO_DETECTION_DB
 
-    def test_the_ci_demo_databases_are_accepted(self, probe):
-        environment = _demo_environment(
-            CORE_DATABASE_URL=_url(DEMO_CORE_CI_DB),
-            DETECTION_DATABASE_URL=_url(DEMO_DETECTION_CI_DB),
-            E2E_ALLOW_WRITE_TO=f"{DEMO_CORE_CI_DB} {DEMO_DETECTION_CI_DB}",
+    def test_the_ci_demo_databases_are_accepted(self, probe, environment, monkeypatch):
+        # The write declaration belongs to the RUN, not to the
+        # configuration file, so the probe reads it from the PROCESS
+        # environment.  The declaration therefore has to be set there —
+        # putting it in the demo environment dictionary would not
+        # authorise anything.
+        monkeypatch.setenv(
+            "E2E_ALLOW_WRITE_TO", f"{DEMO_CORE_CI_DB} {DEMO_DETECTION_CI_DB}"
         )
+        environment["CORE_DATABASE_URL"] = _url(DEMO_CORE_CI_DB)
+        environment["DETECTION_DATABASE_URL"] = _url(DEMO_DETECTION_CI_DB)
         validated = probe._validated_urls(environment)
         assert validated["core"].database == DEMO_CORE_CI_DB
         assert validated["detection"].database == DEMO_DETECTION_CI_DB
