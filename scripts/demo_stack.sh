@@ -893,7 +893,21 @@ cmd_verify() {
     load_env
     validate_config
     log "running the demo acceptance checks"
-    python3 scripts/demo_verify.py
+
+    # The acceptance checks are the demo SCENARIOS: they drive the demo
+    # stack's own API over HTTP and read the demo stack's own databases.
+    #
+    # They are exported into the environment here, because the scenario
+    # script reads the shell — and a shell that still carries another
+    # stack's variables would otherwise send the checks to the WRONG
+    # stack.  `CORE_APP_URL` is the authority for the API address, so the
+    # checks can never drift onto a hard-coded port.
+    CORE_APP_URL="${CORE_APP_URL:-http://${APP_HOST}:${APP_PORT}}"
+    export CORE_APP_URL
+    export CORE_DATABASE_URL DETECTION_DATABASE_URL ML_DATABASE_URL
+    export DEMO_API_BASE_URL="${CORE_APP_URL}"
+
+    python3 scripts/demo_scenarios.py --all
 }
 
 usage() {
@@ -904,7 +918,7 @@ usage: scripts/demo_stack.sh <command>
   stop      stop everything (the demo volumes are KEPT)
   restart   stop and start again (the data must survive)
   status    show what is running and the real state of Core, Detection and ML
-  verify    run the demo acceptance checks
+  verify    run the demo acceptance checks (the demo scenarios)
   logs      tail the API log
   logs-all  show the tail of every component log
   reset     stop and DESTROY the demo volumes (deletes all demo data - asks first)

@@ -1384,8 +1384,85 @@ confirmed for that earlier failure — see section 14.7.
 
 ---
 
-## 15. Related documents
+## 15. The integration rehearsal — the clean-checkout round
 
+The integration rehearsal ran on **2026-11-28**, after the four probe
+defects were closed.  It exists to answer one question: does the
+handover work from a checkout that was never touched by the working
+environment?
+
+The full plan and the evidence are in
+[M13-INTEGRATION-HANDOFF.md](M13-INTEGRATION-HANDOFF.md).  This section
+records only what the acceptance matrix owns: the figures, and the three
+defects the rehearsal found.
+
+### 15.1 The rehearsal setup
+
+| Item | Value |
+|---|---|
+| Checkout | a separate `git worktree`, detached at the integration candidate `2e56ecb` |
+| Configuration | generated from `.env.demo.example`, with fresh `POSTGRES_PASSWORD` and `INTERNAL_SECRET` |
+| Copied in from the working environment | **nothing** — no `.env`, no virtualenv, no `node_modules`, no configuration |
+| Compose project | `sentinel-auth-m13-rehearsal` (its own) |
+| Ports | PostgreSQL `55460`, Redis `56390`, API `58010`, frontend `55185`, SMTP `51035` — all its own |
+| Databases | `sentinel_core_demo`, `sentinel_detection_demo`, `sentinel_ml_demo` — the allowlist of `scripts/e2e_fixtures_guard.py` |
+| The operator's stack | **not** stopped, **not** modified, **not** reset |
+
+### 15.2 The figures
+
+| Command | Result |
+|---|---|
+| `scripts/demo_stack.sh start` | three-database topology verified (13 / 7 / 3 tables), SMTP sink listening, API ready, frontend serving |
+| `scripts/demo_seed_demo.py --seed` | 4 users, 3 sessions, 3 device records; 5 alerts, 2 policies; 7 inference logs, 6 feature statistics |
+| `scripts/demo_scenarios.py --all` | **55 of 55 checks passed** |
+| `scripts/e2e_run.sh --no-start` | **18 of 18 scenarios passed**, 0 skipped |
+| `scripts/demo_pre_token_probe.py` | **13 of 13 checks passed** |
+| `scripts/demo_stack.sh restart` | the stack came back; the row counts were unchanged (`users=4 sessions=44 devices=4 alerts=14 attempts=70`) |
+| `scripts/demo_stack.sh verify` | **55 of 55 checks passed** |
+
+### 15.3 The three defects the rehearsal found
+
+None of them is a product-logic defect; all three are in the **operating
+instructions**, which is exactly the kind of thing only a rehearsal from
+a clean checkout can expose.
+
+| # | Defect | How it showed up | The fix |
+|---|---|---|---|
+| D1 | `scripts/demo_stack.sh verify` called `scripts/demo_verify.py`, **a script that was never committed** | `python3: can't open file '.../scripts/demo_verify.py': No such file or directory` | `verify` now runs the demo scenarios, which are the demo's acceptance checks, and exports the environment they need |
+| D2 | `scripts/demo_scenarios.py` hard-coded the API port `58000`, and read `CORE_DATABASE_URL`, `DETECTION_DATABASE_URL` and `INTERNAL_SECRET` from the **shell** | on the rehearsal's own ports the scenarios talked to **another stack's API** (every login answered `500`), and the internal boundary answered `401` for a missing secret | the scenario script reads `.env.demo` itself, and **the file wins over the shell**; the API address comes from `CORE_APP_URL` / `APP_HOST` / `APP_PORT` |
+| D3 | `scripts/demo_seed_demo.py` read the three database URLs from the **shell** | with a stale `CORE_DATABASE_URL` still exported, the seed wrote its fixtures into **another stack's** databases than the one being served. The line the seed prints — `the targets are '…'` — is what exposed it | the seed reads `.env.demo` itself, and the file wins over the shell |
+
+The documentation was corrected alongside the code: §2.1 of
+[M13-FULLSTACK-DEPLOYMENT.md](M13-FULLSTACK-DEPLOYMENT.md) now installs
+the frontend dependencies **before** the first start (without them the
+start fails with `setsid: failed to execute ./node_modules/.bin/vite: No
+such file or directory`), §2.2 states that the environment file is the
+authority, and §2.4, §2.5 and the new §2.6 say the same for the seed,
+the scenarios and `verify`.
+
+The test harness was updated with the contract: `tests/test_demo_fixtures.py`
+now writes the three URLs into a throw-away environment file and points
+the seed at it, rather than relying on exported variables alone.
+
+### 15.4 What this round did NOT prove
+
+  * The rehearsal ran on **Podman**; the CI ran on **Docker**.  Both
+    runtimes are supported and the compose overlay handles both, but the
+    rehearsal is not evidence that the Docker path behaves identically.
+  * The defence script (`docs/M13-DEFENSE-SCRIPT.md`) was **not**
+    performed as a live, narrated presentation.  The individual checks it
+    depends on were run and passed; the walk-through itself was read,
+    not executed end to end.
+  * The rehearsal proves the handover works **from a clean checkout on
+    this machine**.  It says nothing about a machine with a different
+    container runtime, a different CPU architecture or a different
+    SELinux policy.
+
+---
+
+## 16. Related documents
+
+* [M13-INTEGRATION-HANDOFF.md](M13-INTEGRATION-HANDOFF.md) — the integration plan and the handoff
 * [M13-FULLSTACK-DEPLOYMENT.md](M13-FULLSTACK-DEPLOYMENT.md) — the demo stack
 * [M13-DEMO-FIXTURES.md](M13-DEMO-FIXTURES.md) — the reproducible fixtures
 * [M13-DEMO-SCENARIOS.md](M13-DEMO-SCENARIOS.md) — the six demo scenarios

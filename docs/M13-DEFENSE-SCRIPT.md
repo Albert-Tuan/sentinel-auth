@@ -20,6 +20,12 @@ curl -fsS http://127.0.0.1:58000/health && echo " <- API OK"
 ls -l .ci/demo/demo-otp.log && cat .ci/demo/otp-log.path
 ```
 
+> **Không cần `export` hay `source`.** Các script (`demo_seed_demo.py`,
+> `demo_scenarios.py`, `demo_pre_token_probe.py`) tự đọc `.env.demo`, và
+> **file thắng shell**. Một shell còn sót biến của stack khác không thể
+> ghi fixture, chạy scenario hay probe vào nhầm stack. Xem
+> [M13-FULLSTACK-DEPLOYMENT.md](M13-FULLSTACK-DEPLOYMENT.md) §2.2.
+
 **Cổng cố định của demo stack:**
 
 | Thành phần | Địa chỉ |
@@ -29,6 +35,13 @@ ls -l .ci/demo/demo-otp.log && cat .ci/demo/otp-log.path
 | PostgreSQL | 127.0.0.1:55432 |
 | Redis | 127.0.0.1:56379 |
 | SMTP sink | 127.0.0.1:51025 |
+
+> Nếu `.env.demo` của bạn đổi cổng, đọc cổng thật từ file thay vì dùng
+> bảng trên:
+>
+> ```bash
+> grep -E '^(CORE_APP_URL|VITE_DEV_PORT|POSTGRES_PORT|REDIS_PORT|MFA_SMTP_PORT)=' .env.demo
+> ```
 
 **Tài khoản demo** (mật khẩu mặc định `DemoPass!2026`):
 

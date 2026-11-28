@@ -67,6 +67,27 @@ three-database topology".
 | Node.js 18+ | the frontend |
 | `psql` | optional; the stack reports the database state without it |
 
+Install the dependencies **before** the first start. The stack starts the
+Vite dev server from `frontend/node_modules/.bin/vite`; without the
+frontend dependencies the start fails with
+
+```
+setsid: failed to execute ./node_modules/.bin/vite: No such file or directory
+```
+
+```bash
+python3 -m venv .venv && . .venv/bin/activate
+pip install -r requirements.txt
+
+cd frontend && npm ci && cd ..
+```
+
+The browser suite needs Chromium as well:
+
+```bash
+cd frontend && npx playwright install chromium && cd ..
+```
+
 ### 2.2 Create the environment file
 
 ```bash
@@ -82,6 +103,16 @@ python3 -c "import secrets; print(secrets.token_urlsafe(16))"   # POSTGRES_PASSW
 ```
 
 `.env.demo` is gitignored. `.env.demo.example` holds placeholders only.
+
+> **The environment FILE is the authority.** `scripts/demo_seed_demo.py`,
+> `scripts/demo_scenarios.py` and `scripts/demo_pre_token_probe.py` read
+> `.env.demo` themselves, and the file **wins** over the shell. A shell
+> that still carries another stack's `CORE_DATABASE_URL`,
+> `DETECTION_DATABASE_URL`, `ML_DATABASE_URL`, `INTERNAL_SECRET` or
+> `CORE_APP_URL` therefore cannot redirect the fixtures, the scenarios or
+> the probe into a different stack — and it cannot send the scenarios to
+> a hard-coded port either. The scripts fall back to the shell only for
+> a variable the file does not answer.
 
 ### 2.3 Start the stack
 
@@ -110,6 +141,14 @@ scripts/demo_seed_demo.py --seed
 
 See [M13-DEMO-FIXTURES.md](M13-DEMO-FIXTURES.md) for the details.
 
+The seed reads `.env.demo` by itself, so **no `export` and no `source`
+is needed**. The line it prints names the three databases it is about to
+write to — read it before you go on:
+
+```
+[demo-seed] the targets are 'sentinel_core_demo', 'sentinel_detection_demo', 'sentinel_ml_demo'
+```
+
 ### 2.5 Run the scenarios
 
 ```bash
@@ -117,6 +156,20 @@ scripts/demo_scenarios.py --all
 ```
 
 See [M13-DEMO-SCENARIOS.md](M13-DEMO-SCENARIOS.md) for the details.
+
+The scenario script reads the API address from `.env.demo`
+(`CORE_APP_URL`) by itself, so it talks to the stack that `.env.demo`
+describes — never to a hard-coded port.
+
+### 2.6 Run the acceptance checks
+
+```bash
+scripts/demo_stack.sh verify
+```
+
+`verify` runs the demo scenarios against the running stack and reports
+the same 55 checks. It reads the environment file, so it needs no
+`export` either.
 
 ---
 
@@ -128,7 +181,7 @@ See [M13-DEMO-SCENARIOS.md](M13-DEMO-SCENARIOS.md) for the details.
 | `stop` | stop everything — **the demo volumes are kept** |
 | `restart` | stop and start again; the data must survive |
 | `status` | show what is running and the real state of Core, Detection and ML |
-| `verify` | run the demo acceptance checks |
+| `verify` | run the demo acceptance checks (the 55 demo scenarios) |
 | `logs` | tail the API log |
 | `logs-all` | show the tail of every component log |
 | `reset` | stop and **destroy** the demo volumes — it asks for a typed confirmation first |
@@ -480,9 +533,11 @@ protection.
 
 | Symptom | Cause | Fix |
 |---|---|---|
-| the shell's `INTERNAL_SECRET` differs from the one in `.env.demo`, and the internal boundary answers `401` | an exported variable shadows the file | `scripts/demo_stack.sh` sources `.env.demo` with `set -a`, so the file wins **for the stack**. A script you run BY HAND reads the shell first — run it with the file's values, or `set -a; . ./.env.demo; set +a` before it |
+| `setsid: failed to execute ./node_modules/.bin/vite: No such file or directory` | the frontend dependencies were never installed in this checkout | `cd frontend && npm ci && cd ..` — see section 2.1 |
+| `python3: can't open file '.../scripts/demo_verify.py': No such file or directory` | **fixed in M13.3** — the command pointed at a script that never existed | `scripts/demo_stack.sh verify` now runs the demo scenarios, which are the demo's acceptance checks |
+| the shell's `INTERNAL_SECRET` differs from the one in `.env.demo`, and the internal boundary answers `401` | an exported variable shadows the file | **fixed in M13.3**: the scenario script reads the secret from `.env.demo` itself, and the file wins. Nothing to export |
 | "No captured OTP found for … in …" | the SMTP sink is not on the port the API sends to, or writes to another file | the port and the log path must agree with `MFA_SMTP_PORT` / `MFA_SMTP_LOG`. `scripts/demo_stack.sh` writes the absolute path into `.ci/demo/otp-log.path`; the API and the reader must both use it |
-| the scenario reports "the one-time MFA gate could not be changed" | `CORE_DATABASE_URL` is not exported into the scenario's shell | `set -a; . ./.env.demo; set +a` first |
+| the scenario reports "the one-time MFA gate could not be changed" | `CORE_DATABASE_URL` is not set in `.env.demo` | **fixed in M13.3**: the scenario script reads the URL from `.env.demo` itself. Check that the file names the demo databases |
 | the scenario finds no alerts | the fixtures were not seeded into the DETECTION database | `python scripts/demo_seed_demo.py --seed` — the seed writes to all three databases |
 | the login answers `429 Too many requests` | the login rate limit is 5 per minute and per IP; the accumulated login attempts of earlier runs fill the window | wait for the window to reopen. `scripts/demo_scenarios.py` retries by itself; a hand-written script has to |
 | the login answers `mfa_required: true` for an account that is NOT `demo_admin` | the DETECTION engine scored the login as risky and the pre-token gate held the token — this is the CORRECT behaviour, not a misconfiguration | see section 9. To get a clean run, re-seed the fixtures: `python scripts/demo_seed_demo.py --seed` resets the one-time MFA flag |
@@ -515,6 +570,7 @@ risky.
 | `port 58000 is already in use` | another process holds the port | stop it, or change `APP_PORT` |
 | `the SMTP sink did not start` | the sink could not bind | check `smtp.log` and `MFA_SMTP_PORT` |
 | `the API did not become ready` | the monolith failed to boot | check `api.log` |
+| `setsid: failed to execute ./node_modules/.bin/vite: No such file or directory` | the frontend dependencies were never installed in this checkout | `cd frontend && npm ci && cd ..` — see section 2.1 |
 | `Permission denied` during the PostgreSQL init | a SELinux labelling problem | see section 5; the staging handles it |
 
 ---
