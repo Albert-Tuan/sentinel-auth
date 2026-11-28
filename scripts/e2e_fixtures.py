@@ -92,6 +92,7 @@ from e2e_fixtures_guard import (  # noqa: E402
     Context,
     DemoDatabaseRefusal,
     require_demo_database,
+    require_demo_database_url,
 )
 
 #: The namespace the seed script derives every fixture id from.  The E2E
@@ -138,9 +139,17 @@ def _guarded_engine(context: str, url: str):
     reaches a database and never opens a connection.  That is the point
     of the guard: it is a decision about the URL, made before anything
     can be written.
+
+    The engine is built from the URL OBJECT the guard validated — not
+    from the raw string.  That closes the gap between "the URL that was
+    checked" and "the URL the driver receives": the guard parses the
+    URL with SQLAlchemy's own parser, checks the destination the driver
+    will really use, and hands back the very object it checked.  A
+    string that was parsed, checked and then re-assembled could differ
+    from the one the driver would read.
     """
     try:
-        name = require_demo_database(context, url)
+        validated = require_demo_database_url(context, url)
     except DemoDatabaseRefusal as refusal:
         raise SystemExit(f"[e2e-fixtures] ERROR: refusing to write: {refusal}")
 
@@ -149,7 +158,7 @@ def _guarded_engine(context: str, url: str):
     except ImportError:  # pragma: no cover - SQLAlchemy is a hard dependency
         raise SystemExit("SQLAlchemy is not installed")
 
-    return create_engine(url, pool_pre_ping=True)
+    return create_engine(validated, pool_pre_ping=True)
 
 
 def _engine():
