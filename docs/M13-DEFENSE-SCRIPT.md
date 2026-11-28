@@ -178,6 +178,16 @@ policy, nhưng vô dụng về gate. Nếu bạn thấy dòng log báo policy de
 "không có trong dịch vụ", đó là thông báo bình thường — probe đã xử lý
 việc đó.
 
+**Lưu ý về địa chỉ IP:** probe đăng nhập từ một địa chỉ mà tài khoản
+**chưa từng dùng**, và tự chọn địa chỉ đó từ lịch sử của chính tài
+khoản. Lý do: rule `impossible_travel` đo **mức độ mới** của địa chỉ
+(`1 - số lần đăng nhập từ IP này / tổng số lần trong 7 ngày`). Nếu đăng
+nhập từ một IP đã quen, mức độ mới giảm xuống dưới ngưỡng 0.8, rule
+không kích hoạt, và gate **đúng** là cấp token — sự thật về rule, nhưng
+vô dụng về gate. Do đó mỗi lần chạy probe sẽ in ra một địa chỉ khác
+nhau, ví dụ `the login under test comes from 203.0.113.19 (never used
+before)`. Đây là hành vi đúng, không phải lỗi.
+
 **Vì sao đây là bằng chứng mạnh:** hai lần chạy dùng **cùng database,
 cùng policy đang active, cùng lịch sử rủi ro đã gieo, cùng tài khoản**.
 Biến duy nhất là `RUN_PRE_TOKEN_CHECK`. Nếu gate không quyết định, hai

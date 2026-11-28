@@ -9,7 +9,7 @@ that satisfies it and the command that proves it.
 Every "verified" entry below was run against the live demo stack on
 2026-11-25 (Areas A to E) and on 2026-11-26 (Area F — the browser
 E2E).  The entries added by the M13.2 hardening round (Area G) were run
-on 2026-11-28 against commit `898fef2`; their evidence is in section 13.
+on 2026-11-28 against commit `59a99d2`; their evidence is in section 13.
 
 ---
 
@@ -703,12 +703,12 @@ them were violated at some point during this work:
 
 ## 10. The CI result
 
-### The current run — PR #22, head `898fef2`
+### The current run — PR #22, head `59a99d2`
 
-Run: <https://github.com/Albert-Tuan/sentinel-auth/actions/runs/46099392584>
+Run: <https://github.com/Albert-Tuan/sentinel-auth/actions/runs/46142093656>
 (PR [#22](https://github.com/Albert-Tuan/sentinel-auth/pull/22), head
-`898fef2b5e9fd00c7512744c3fcd2c0d8867281d`, started 2026-11-28
-02:42:32 UTC).
+`59a99d2`, started 2026-11-28
+11:54:51 UTC).
 
 ```
 Test & Smoke (py3.11)             success
@@ -727,7 +727,7 @@ What each job reported, read out of the job log:
 | Test & Smoke (py3.11 / py3.12) | `scripts/m10_http_smoke.py` | `HTTP SMOKE: 79 passed, 0 failed` |
 | Frontend (unit & build) | `npm run test` | `Test Files 18 passed (18)` · `Tests 265 passed (265)` |
 | Frontend (real HTTP integration) | `npm run test:integration` | `Test Files 3 passed (3)` · `Tests 50 passed (50)` |
-| Browser E2E (real Chromium) | `bash scripts/e2e_run.sh --no-start` | `18 passed (51.9s)` |
+| Browser E2E (real Chromium) | `bash scripts/e2e_run.sh --no-start` | `18 passed (44.4s)` |
 
 The zero-skip figure is the point of the whole exercise: the safety
 suite contributed 51 of those 1487 tests, and every one of them ran on
@@ -873,19 +873,19 @@ is in [M13-DEMO-FIXTURES.md](M13-DEMO-FIXTURES.md).
 ## 13. The evidence of the M13.2 hardening round
 
 Every figure in this section was produced on **2026-11-28** against
-commit **`898fef2b5e9fd00c7512744c3fcd2c0d8867281d`** (branch
+commit **`59a99d2`** (branch
 `feature/m13-browser-e2e`, PR #22).
 
 ### 13.1 The destination guard
 
 | Item | Value |
 |---|---|
-| Source SHA | `898fef2b5e9fd00c7512744c3fcd2c0d8867281d` |
+| Source SHA | `59a99d2` |
 | Date run | 2026-11-28 |
 | Command | `python -m pytest tests/test_e2e_fixture_target_guard.py -q` |
 | Profile | the fixture-guard unit suite; no database of its own, except the positive control |
 | Result | **111 passed**, 0 failed, 0 skipped |
-| Evidence | CI run `46099392584`, job `Test & Smoke (py3.11)` and `(py3.12)` — the suite is part of `pytest tests/`, which reported `collected=1487 passed=1487 skipped=0` |
+| Evidence | CI run `46142093656`, job `Test & Smoke (py3.11)` and `(py3.12)` — the suite is part of `pytest tests/`, which reported `collected=1487 passed=1487 skipped=0` |
 
 The five mutations of the guard were each checked to be caught:
 
@@ -908,12 +908,12 @@ account. The ONLY variable is `RUN_PRE_TOKEN_CHECK`.
 
 | Item | Value |
 |---|---|
-| Source SHA | `898fef2b5e9fd00c7512744c3fcd2c0d8867281d` (the fix is on the commit after it) |
+| Source SHA | `59a99d2` (the head of the branch at the time of the run) |
 | Date run | 2026-11-28 |
 | Command | `python scripts/demo_pre_token_probe.py` |
 | Profile | the **local demo stack** (`.env.demo`, the `_demo` databases), the monolith with `DETECTION_URL` pointing at itself and `RUN_PRE_TOKEN_CHECK=1` |
 | Result | **7 checks passed**, 0 failed |
-| Evidence | the CI `browser-e2e` job runs the same probe against the `_ci_demo` databases, on the same stack the browser suite drives — the run `46140815516` found the defect described below |
+| Evidence | the CI `browser-e2e` job runs the same probe against the `_ci_demo` databases, on the same stack the browser suite drives — run **`46142093656`**, 5 of 5 jobs green |
 
 What the two runs showed:
 
@@ -937,35 +937,71 @@ policy in service is put back too.
 
 #### What the CI run found — the probe was measuring the wrong thing
 
-The first CI run of the probe **failed**, and the failure was real
-evidence rather than a flake. Run `46140815516` reported:
+The probe's first two CI runs **failed**, and the failures were real
+evidence rather than flakes. Neither failure was a defect of the
+application: both were the probe measuring something other than the
+gate. The local run had passed in both cases, and the local run was
+simply not the CI condition.
+
+**Run `46140815516` — the gate issued the token.**
 
 ```
 RUN 1 (the gate ON):  status=200 token=ISSUED mfa_required=False
 ```
 
-The gate issued the token. Locally the same probe reported `HELD`. The
-difference was not the gate — it was **the policy in service**.
-
 Only one policy may be active at a time, by a partial unique index. The
 browser scenario **E2E-05 activates a policy of its own**, and by that
 index that DEACTIVATES the demo's policy. Its rules are milder, so the
-risky login scored below the `high` threshold, and the gate correctly
+risky login scored below the `high` threshold and the gate correctly
 issued the token — a true statement about that policy, and a useless
-statement about the gate.
+statement about the gate. The probe now puts the demo's own policy back
+in service before it scores anything, and restores the previous one
+afterwards.
 
-So the probe now does three things it did not do before:
+**Run `46141561690` — the gate still issued the token.**
 
-| Step | Why |
-|---|---|
-| it puts the demo's own policy back in service before scoring, and restores the previous one afterwards | the probe has to measure the GATE, not whichever policy happens to be in service |
-| it clears the login rate-limit counter of its own address | the browser suite leaves the counter past its limit, and a rate-limited probe measures the limiter |
-| it reports which policy it scored against | so a failure says WHICH policy was in service, not just that something was wrong |
+The policy was already the demo's own. The remaining cause was the
+FEATURE. `impossible_travel` reads `ip_change_rate_7d`, which is
 
-The ordering matters: the deactivate has to reach the database before
-the activate, because the partial unique index allows exactly one active
-policy. The probe now reproduces the local condition exactly — the demo
-policy deactivated, the probe run anyway, the stack restored.
+```
+1 - (attempts from this IP) / (attempts in the last 7 days)
+```
+
+so it measures the **novelty** of the address. The probe was logging in
+from `203.0.113.77` — the same address the E2E fixtures write their
+attempts under, and the address the probe itself writes its risky
+history under. Every attempt the probe added therefore LOWERED the
+novelty of the address it was trying to prove was new. With the browser
+suite's loopback traffic in the history, the value landed below 0.8, the
+rule did not trigger, and the gate issued the token.
+
+The probe now writes its risky history under `203.0.113.77` — the
+attacker — and logs in from an address it **picks from the account's own
+history**: one the account has never used, drawn from the RFC 5737
+documentation range so it can never be a real client. The pick is
+deterministic — it is seeded from the account's id — so the same
+history always yields the same candidate, and it skips every address the
+account has already used.
+
+That last property is what makes the probe **repeatable**. With a fixed
+address, the second run would have failed: the first run's own attempt
+had made the address known. The probe now runs over and over again,
+each run from a different fresh address.
+
+**Run `46142093656` — the gate held the token, in CI, on the stack the
+browser suite drives.**
+
+```
+[pre-token-probe] the login under test comes from 203.0.113.19 (never used before)
+[pre-token-probe] RUN 1 (the gate ON):  status=200 token=HELD   mfa_required=True
+[pre-token-probe] RUN 2 (the gate OFF): status=200 token=ISSUED mfa_required=False
+PRE-TOKEN PROBE: 7 passed, 0 failed
+```
+
+The probe also clears the login rate-limit counter of its own address.
+The browser suite logs in from the same loopback address and leaves the
+counter past its limit; a rate-limited probe would measure the limiter
+instead of the gate.
 
 #### What this does and does not prove
 
@@ -982,14 +1018,14 @@ the session mechanics, not the gate.
 
 | Suite | Command | Result | Where it ran | Evidence |
 |---|---|---|---|---|
-| Backend regression | `pytest tests/` | 1487 passed, 0 skipped | CI + local | CI `46099392584` |
-| Destination guard | `pytest tests/test_e2e_fixture_target_guard.py -q` | 111 passed | CI + local | CI `46099392584` |
+| Backend regression | `pytest tests/` | 1487 passed, 0 skipped | CI + local | CI `46142093656` |
+| Destination guard | `pytest tests/test_e2e_fixture_target_guard.py -q` | 111 passed | CI + local | CI `46142093656` |
 | Full-system E2E (pre-token ON) | `pytest tests/test_full_system_e2e.py -q` | 6 passed | local (needs the `*_test` databases) | part of `pytest tests/` in CI |
 | Risk gate unit tests | `pytest tests/test_risk_gate.py -q` | 22 passed | local | part of `pytest tests/` in CI |
-| Frontend unit | `npm run test` | 265 passed | CI | CI `46099392584` |
-| Frontend real-HTTP integration | `npm run test:integration` | 50 passed | CI | CI `46099392584` |
-| Browser E2E | `bash scripts/e2e_run.sh --no-start` | 18 passed | CI | CI `46099392584` |
-| HTTP smoke | `scripts/m10_http_smoke.py` | 79 passed | CI | CI `46099392584` |
+| Frontend unit | `npm run test` | 265 passed | CI | CI `46142093656` |
+| Frontend real-HTTP integration | `npm run test:integration` | 50 passed | CI | CI `46142093656` |
+| Browser E2E | `bash scripts/e2e_run.sh --no-start` | 18 passed | CI | CI `46142093656` |
+| HTTP smoke | `scripts/m10_http_smoke.py` | 79 passed | CI | CI `46142093656` |
 | Demo scenarios | `python scripts/demo_scenarios.py --all` | 55 checks | **local only** | the script drives the demo stack's own ports and database names |
 | Deployment verification | `python scripts/deploy_verify.py` | 67 passed | **local only** | it verifies the `docker compose` deployment scripts, which CI does not execute |
 | Pre-token probe | `python scripts/demo_pre_token_probe.py` | 7 checks | local + CI (`browser-e2e`) | see 13.2 |
