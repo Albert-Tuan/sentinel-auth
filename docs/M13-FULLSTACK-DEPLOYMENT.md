@@ -400,6 +400,53 @@ python scripts/deploy_verify.py
 The scripts are invoked through `bash` and `python` because the
 repository does not track the executable bit on every file.
 
+#### The order the probe and the browser suite run in
+
+The order above is **browser suite first, probe second**, and the order
+is not cosmetic: the browser suite activates a policy of its own in
+E2E-05, which — by the partial unique index — deactivates the demo's
+policy.  The probe puts the demo policy back in service by itself, so
+either order measures the gate correctly.  What the order does change
+is the state each step inherits:
+
+| Order | What the next step inherits |
+|---|---|
+| browser → probe | the browser suite's loopback traffic in the account's login history, and a policy of the browser suite's own in the active slot |
+| probe → browser | the probe's two real logins, and the demo policy back in the active slot (the probe restores it) |
+
+Both orders have been **run and verified**, on one disposable stack
+with no database reset in between:
+
+| Sequence | Result |
+|---|---|
+| browser → probe → browser → probe | 18 passed · 13 checks · 18 passed · 13 checks, **0 flaky / 0 retry** |
+| probe → full browser suite | 18 passed, 0 skipped |
+
+Two properties make the repeat cycle stable, and both are properties of
+the **probe**, not of the operator's habits:
+
+  * the probe picks a login address the account has **never used** —
+    `impossible_travel` measures the NOVELTY of the address, so a
+    fixed address would fail on the second run because the first run's
+    own attempt had made it known;
+  * the probe restores the one-time MFA flag to the value it FOUND, so
+    the next login is not held for an MFA challenge that nothing asked
+    for.  The measurement on the disposable stack after the fix:
+    `demo_user|f`.
+
+The probe does **not** undo everything — that is deliberate and it is
+reported in the run's own output.  The two logins are real traffic, so
+the account's sessions, its MFA transactions, its `login_attempts` rows
+and the DETECTION alerts remain.  At `critical`, the application's own
+risk-action map sends `REVOKE_SESSIONS`, so the demo account's active
+sessions are revoked — a **legitimate protective action**, not a leak.
+
+If you want the two suites to share NOTHING, point them at different
+databases instead of resetting: the `_demo` stack for the browser suite
+and the `_ci_demo` stack for the probe.  Do **not** reset the database
+between the runs — a reset would hide exactly the state leak the repeat
+cycle is there to catch.
+
 ### 10.5 Stopping, restarting, and the destructive reset
 
 | Command | Effect | Data |
@@ -447,6 +494,9 @@ protection.
 | the pre-token probe exits with "the probe refuses to run against this target — [libpq]" | a libpq variable in the shell (`PGHOSTADDR`, `PGSERVICE`, `PGDATABASE`, ...) could move the destination of a connection the guard approved | `unset PGHOSTADDR PGSERVICE PGSERVICEFILE PGHOST PGPORT PGDATABASE PGUSER` before the run. The probe shows the guard the REAL libpq environment on purpose — hiding it would hide it from the driver too |
 | the pre-token probe reports `token=ISSUED` for the gated run, while a manual risky login is held | the policy in service is not the demo's own. Only ONE policy may be active, and the browser scenario E2E-05 activates one of its own, which deactivates the demo's | the probe puts the demo policy back in service by itself and restores the previous one afterwards. If you run the scoring by hand, check `SELECT version FROM policies WHERE is_active IS TRUE` |
 | the pre-token probe reports `token=ISSUED` for the gated run, and the policy is the demo's own | the login address is not NEW. `impossible_travel` measures the NOVELTY of the address — `1 - (attempts from this IP) / (attempts in the last 7 days)` — so an address the account has used before scores below the threshold | the probe picks a fresh address out of the account's own history and prints it: `the login under test comes from 203.0.113.19 (never used before)`. A different address on every run is the correct behaviour, not a defect |
+| the pre-token probe exits with "no scored login attempt of … appeared within 30 seconds" | the DETECTION side of a login is ASYNCHRONOUS, and the attempt was never scored — the login event was not delivered, or the scoring failed | the probe now WAITS for the evidence with a deadline instead of reading whatever row happens to be newest. Check that the API's `DETECTION_URL` points at a running Detection service and that `/api/v1/internal/login-events` returns `202`. Do NOT raise the deadline to hide it — the deadline is what makes the failure legible |
+| the pre-token probe exits with "the one-time MFA flag of … could not be cleared before the second run" | the flag could not be read or written before RUN 2, so the second run would have been held by the FLAG rather than by the gate | the probe stops there on purpose: it refuses to measure something it cannot attribute. The cleanup restores the ORIGINAL snapshot. Re-seed the fixtures (`python scripts/demo_seed_demo.py --seed`) and run again |
+| the browser suite asks for an MFA challenge right after a probe run | the probe left the one-time MFA flag set. On the FIXED code this cannot happen — the snapshot is restored to the value the probe found | on the OLD code (`9c7456f`) it did happen: the snapshot was overwritten. If you see it, check `SELECT detection_mfa_once FROM users WHERE username='demo_user'` — the fixed probe leaves it `false`. See `docs/M13-ACCEPTANCE-MATRIX.md` section 14.4 |
 
 **Do not work around a failure by disabling the detection.** Turning
 `RUN_PRE_TOKEN_CHECK=0` makes the login succeed, and the demo then

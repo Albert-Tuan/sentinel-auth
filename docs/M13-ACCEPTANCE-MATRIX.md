@@ -10,6 +10,9 @@ Every "verified" entry below was run against the live demo stack on
 2026-11-25 (Areas A to E) and on 2026-11-26 (Area F — the browser
 E2E).  The entries added by the M13.2 hardening round (Area G) were run
 on 2026-11-28 against commit `2e3280d`; their evidence is in section 13.
+The entries added by the FINAL hardening round (section 14) were run
+on 2026-11-28 against the head of `feature/m13-browser-e2e` — the SHA
+that section 14.2 names.
 
 ---
 
@@ -33,9 +36,10 @@ The browser suite contributes **18 scenarios**, all passing, zero
 skipped, zero mocked. See
 [M13-BROWSER-E2E-REPORT.md](M13-BROWSER-E2E-REPORT.md).
 
-The destination guard contributes **111 tests** and the pre-token probe
-contributes **56 guard, restoration and lifecycle tests** plus its **10
-runtime checks**; both are accounted for in section 13.
+The destination guard contributes **111 tests**; the pre-token probe
+contributes **56 guard, restoration and lifecycle tests** plus **43
+hardening tests** and its **13 runtime checks**; both are accounted for
+in section 13.
 
 ---
 
@@ -308,7 +312,7 @@ The only change to `.gitignore` is one line:
 
 | # | Criterion | Result |
 |---|---|---|
-| E1 | The full test suite passes | `1543 passed`, 0 failed, **0 skipped** |
+| E1 | The full test suite passes | `1586 passed`, 0 failed, **0 skipped** (the `1543` baseline plus the 43 final-hardening tests) |
 | E2 | The M13 fixture tests pass | 26 passed |
 | E3 | `git diff --check` reports nothing | clean |
 | E4 | The new scripts compile | `python3 -m py_compile` clean, `bash -n` clean |
@@ -364,7 +368,7 @@ backend and the other half to another.
 
 | Suite | Baseline required | Result | Delta |
 |---|---|---|---|
-| Backend regression | ≥ 1199 passed | **1543 passed**, 0 failed, 0 skipped | +344 (26 fixture + 51 safety + 47 guard + 15 parity + 111 destination guard + 56 probe guard/restore/lifecycle + 38 the other M13 work) |
+| Backend regression | ≥ 1199 passed | **1586 passed**, 0 failed, 0 skipped | +387 (26 fixture + 51 safety + 47 guard + 15 parity + 111 destination guard + 56 probe guard/restore/lifecycle + 43 probe final hardening + 38 the other M13 work) |
 | HTTP smoke | ≥ 79 passed | **79 passed**, 0 failed | — |
 | Frontend unit/component | ≥ 265 passed | **265 passed**, 0 failed | — |
 | Frontend integration | ≥ 50 passed | **50 passed**, 0 failed | — |
@@ -378,7 +382,8 @@ backend and the other half to another.
 | E2E database guard | — | **47 passed**, 0 skipped | new |
 | E2E destination guard | — | **111 passed**, 0 skipped | new |
 | Pre-token probe guard, restoration and lifecycle | — | **56 passed**, 0 skipped | new |
-| Pre-token detection probe | — | **10 checks passed**, 0 failed | new |
+| Pre-token probe final hardening (snapshot, redaction, evidence binding, child lifecycle) | — | **43 passed**, 0 skipped | new |
+| Pre-token detection probe | — | **13 checks passed**, 0 failed | new |
 | INET driver parity | — | **15 passed**, 0 skipped | new |
 | CI database safety | — | **51 passed** | new |
 | `git diff --check` | clean | clean | — |
@@ -387,7 +392,7 @@ backend and the other half to another.
 ### E1 in detail
 
 ```
-collected=1543 passed=1543 failed=0 skipped=0 error=0 xfailed=0
+collected=1586 passed=1586 failed=0 skipped=0 error=0 xfailed=0
 ```
 
 (The suite needs its own disposable databases. `scripts/ci_bootstrap_postgres.sh`
@@ -732,6 +737,13 @@ What each job reported, read out of the job log:
 | Browser E2E (real Chromium) | `python scripts/demo_pre_token_probe.py` | `PRE-TOKEN PROBE: 10 passed, 0 failed` |
 | Browser E2E (real Chromium) | `bash scripts/e2e_run.sh --no-start` | `18 passed (49.5s)` · *pre-token probe: 10 checks passed, 0 failed* |
 
+Those are the figures of **CI run `46149270445`**, the run of the
+`2e3280d` commit.  They are the HISTORICAL figures and they are left
+here unchanged on purpose: the final hardening round adds 43 tests and
+3 runtime checks, and its own figures are in section 14.  The two
+tables must not be read as one — a later run does not retroactively
+change what an earlier run reported.
+
 The zero-skip figure is the point of the whole exercise: the safety
 suite contributed 51 of those 1543 tests, and every one of them ran on
 the runner — none of them skipped itself to make the build green.
@@ -743,7 +755,7 @@ numbers, and they are labelled as such everywhere they appear:
 |---|---|---|
 | `scripts/demo_scenarios.py` (55 checks) | locally, against the demo stack | it is a DEMONSTRATION script; it drives the demo stack's own ports and its own database names, which the CI jobs do not provide |
 | `scripts/deploy_verify.py` (67 checks) | locally, against a disposable stack | it verifies the DEPLOYMENT scripts (`docker compose`, the volume lifecycle), which the CI runner does not execute |
-| `scripts/demo_pre_token_probe.py` (10 checks) | **both** — locally and in the `browser-e2e` job | it was added to CI in the M13.2 hardening round; see section 13 |
+| `scripts/demo_pre_token_probe.py` (13 checks) | **both** — locally and in the `browser-e2e` job | it was added to CI in the M13.2 hardening round; see sections 13 and 14 |
 
 The `browser-e2e` job added the pre-token probe after the browser suite,
 so a regression in the gate fails the build even though no browser
@@ -821,6 +833,10 @@ tokens and OTP codes.
 | G18 | The comparison backend's environment is assembled, not inherited | the same | `test_a_stray_variable_of_the_shell_is_not_inherited`, `test_only_the_allowlisted_variables_are_present` |
 | G19 | The comparison backend owns its port and its process | the same | `test_the_backend_is_started_on_an_ephemeral_port`, `test_the_backend_stops_only_its_own_process`, `test_the_probe_never_looks_a_process_up_by_port` |
 | G20 | The gated attempt really was scored by the demo policy | the same | the probe's own runtime checks: the policy version, the rules `impossible_travel` and `multiple_failures`, and the recorded decision |
+| G21 | The MFA snapshot the probe restores is the one it FOUND, not the one it created | `tests/test_pre_token_probe_hardening.py` | `TestTheMfaSnapshotThroughBothRuns` — 4 orchestration tests over both runs |
+| G22 | No output of the probe carries a credential | the same | `TestNoCredentialReachesAnyOutput` — 6 tests over the main, the cleanup and the child-startup paths |
+| G23 | Each of the two runs is bound to its OWN attempt | the same | `TestTheEvidenceIsBoundToItsAttempt` — 9 tests |
+| G24 | A silent child cannot hang the probe | the same | `TestTheChildNeverHangsTheProbe` — 9 tests |
 
 The suite that proves G1 to G11 is
 `tests/test_e2e_fixture_target_guard.py` — **111 tests**. It is
@@ -831,6 +847,12 @@ The suite that proves G13 to G19 is
 `tests/test_pre_token_probe.py` — **56 tests**. It calls the REAL probe
 module and the REAL guard; it never mocks either, and it never opens a
 connection to a database it is not allowed to touch.
+
+The suite that proves G21 to G24 is
+`tests/test_pre_token_probe_hardening.py` — **43 tests**. It was
+written against the OLD code first: on `9c7456f` it reported **35
+failed, 8 passed**, and on the fixed code it reports **43 passed**.
+See section 14.
 
 G12 and G20 are proved by `scripts/demo_pre_token_probe.py` itself. G12
 is the only check that answers the question the demo actually needs
@@ -858,6 +880,8 @@ pytest tests/test_demo_fixtures.py -q
 pytest tests/test_ci_demo_database_safety.py -q
 pytest tests/test_e2e_fixture_guards.py -q
 pytest tests/test_e2e_fixture_target_guard.py -q
+pytest tests/test_pre_token_probe.py -q
+pytest tests/test_pre_token_probe_hardening.py -q
 
 # 5. the regression
 scripts/ci_bootstrap_postgres.sh
@@ -928,7 +952,7 @@ account. The ONLY variable is `RUN_PRE_TOKEN_CHECK`.
 | Date run | 2026-11-28 |
 | Command | `python scripts/demo_pre_token_probe.py` |
 | Profile | the **local demo stack** (`.env.demo`, the `_demo` databases), the monolith with `DETECTION_URL` pointing at itself and `RUN_PRE_TOKEN_CHECK=1` |
-| Result | **10 checks passed**, 0 failed |
+| Result | **10 checks passed**, 0 failed (the count of the `2e3280d` run; the final round raised it to 13 — section 14) |
 | Evidence | the CI `browser-e2e` job runs the same probe against the `_ci_demo` databases, on the same stack the browser suite drives |
 
 What the two runs showed:
@@ -995,7 +1019,10 @@ Two details matter:
 
 Every cleanup step runs in its own `try`, so a step that fails does not
 skip the steps that follow it. A cleanup failure is reported — with the
-credential redacted — and it makes the **overall run fail**.
+credential redacted — and it makes the **overall run fail**.  Since the
+final hardening round the **sanitized** message is the one that is
+printed: the step that failed still names itself, but the credential
+never reaches stdout or stderr (section 14.1, F2).
 
 #### What the probe does NOT restore
 
@@ -1005,6 +1032,14 @@ account's sessions, its MFA transactions, the `login_attempts` rows and
 the DETECTION alerts the two attempts raised all **remain**. The probe
 reports what it leaves behind, so the claim is never wider than the
 evidence.
+
+One of those side effects is a **protective action**, and it is worth
+naming precisely, because it is not a leak: the two attempts score
+`critical`, and the application's own risk-action map sends
+`REVOKE_SESSIONS` for that level, so the DETECTION service marks the
+demo account's active sessions as revoked.  That is the product doing
+what a risky login is supposed to make it do.  The probe does **not**
+undo it, and section 14.4 measures what it does undo.
 
 #### The scope of the A/B evidence
 
@@ -1018,7 +1053,10 @@ not by the difference of the two responses alone: the probe checks that
 the gated attempt was scored by the demo policy, that the rules
 `impossible_travel` and `multiple_failures` fired, that a decision was
 recorded — and that the ungated attempt was scored by the **same**
-policy.
+policy.  Since the final hardening round the evidence is also bound to
+**its own attempt** — the two runs are two different attempt ids, and
+each attempt's verdict is checked against the application's own
+contract (section 14.3).
 
 Two limits are stated precisely:
 
@@ -1146,6 +1184,10 @@ The four aspects it covers:
 | the cleanup independence | every cleanup step is tried even when an earlier one fails, a cleanup failure fails the **overall** run, and the credential in the error is redacted |
 | the comparison backend's isolation | the environment is assembled from an allowlist rather than inherited, the backend owns an ephemeral port, and only the probe's **own** PID is ever stopped |
 
+(The final hardening round added a **second** probe suite — 43 tests —
+for the snapshot, the redaction, the evidence binding and the child's
+lifecycle.  Section 14 describes it.)
+
 The last one deserves a word, because it was the sharpest of the four.
 The old probe compared the gate against a second backend started on a
 **hard-coded port**, with `dict(os.environ)` as its environment. Two
@@ -1180,11 +1222,168 @@ defects follow from that, and both are now closed:
 | HTTP smoke | `scripts/m10_http_smoke.py` | 79 passed | CI | CI `46149270445` |
 | Demo scenarios | `python scripts/demo_scenarios.py --all` | 55 checks | **local only** | the script drives the demo stack's own ports and database names |
 | Deployment verification | `python scripts/deploy_verify.py` | 67 passed | **local only** | it verifies the `docker compose` deployment scripts, which CI does not execute |
-| Pre-token probe | `python scripts/demo_pre_token_probe.py` | 10 checks | local + CI (`browser-e2e`) | see 13.2 |
+| Pre-token probe | `python scripts/demo_pre_token_probe.py` | 10 checks (13 after the final round) | local + CI (`browser-e2e`) | see 13.2 and 14 |
 
 ---
 
-## 14. Related documents
+## 14. The final hardening round — the probe's four remaining defects
+
+A source review of `scripts/demo_pre_token_probe.py` at commit `9c7456f`
+found four defects that the M13.2 round had not closed.  All four are
+closed now, and the closing is proved by a suite that was written
+against the OLD code first.
+
+### 14.1 The four findings
+
+| # | Finding | What was wrong | The fix | The test that proves it |
+|---|---|---|---|---|
+| F1 | The MFA snapshot was **overwritten** | `state.mfa = _clear_one_time_mfa(...)` ran before BOTH runs, so the second assignment replaced the snapshot the cleanup restores with the state the probe itself had produced | the snapshot is taken **once**, before RUN 1.  The clear in front of RUN 2 is a local `preparation` variable that never touches `state.mfa`; if it fails, the probe raises and the ORIGINAL snapshot is what the cleanup restores | `TestTheMfaSnapshotThroughBothRuns` — 4 orchestration tests over both runs |
+| F2 | A cleanup error was logged **unredacted** | `record_cleanup_error()` redacted the message, but the very next line printed the raw `{error}` — so the credential reached stdout | `record_cleanup_error()` now **returns** the sanitized string and `_cleanup()` prints THAT.  The same sanitized string is what the summary prints | `TestNoCredentialReachesAnyOutput` — 6 tests over the main, the cleanup and the child-startup paths |
+| F3 | The A/B evidence was **not bound** to its attempt | the evidence was found by IP + user agent + a 5-second lookback, so the second run could re-read the FIRST run's row.  The gated run's decision was only checked for "not None" | each run polls for an attempt that is **new** — the earlier run's attempt id is excluded — and the attempt must belong to the account under test.  The decision is checked against the contract: a gated risk level (`high`, `critical`) and the decision the matrix gives for it | `TestTheEvidenceIsBoundToItsAttempt` — 9 tests |
+| F4 | A silent child could **hang** the probe | the port-wait loop called the **blocking** `stdout.readline()` under a deadline that the blocking read could never reach, and the error path called `stdout.read()` — another blocking read — before stopping the child | the child's output is read by a daemon thread into a queue; the caller polls the queue under its own deadline, and the error path drains the queue instead of reading the pipe | `TestTheChildNeverHangsTheProbe` — 9 tests |
+
+### 14.2 The figures
+
+| Item | Value |
+|---|---|
+| Code SHA under test | the head of `feature/m13-browser-e2e` — the SHA this report names |
+| Date run | 2026-11-28 |
+| Command | `python -m pytest tests/test_pre_token_probe_hardening.py -q` |
+| Result on the OLD code (`9c7456f`, in a separate worktree) | **35 failed, 8 passed** |
+| Result on the NEW code | **43 passed**, 0 failed, 0 skipped |
+| Command | `python -m pytest tests/ -q` |
+| Result | **1586 passed**, 0 failed, 0 skipped |
+| Command | `python scripts/demo_pre_token_probe.py` (the `_ci_demo` stack) | **13 checks passed**, 0 failed |
+| Command | `bash scripts/e2e_run.sh --no-start` | **18 passed**, 0 skipped |
+| Command | `browser → probe → browser → probe`, twice, one stack, no reset | 18 + 18 browser scenarios and 13 + 13 probe checks, **0 flaky / 0 retry** |
+
+The suite that proves the contract mirrors the application's own
+constants is `TestTheContractMirrorAgreesWithTheApplication` — 7 tests
+that compare the probe's `DECISION_BY_RISK_LEVEL` and
+`EXPECTED_GATED_RISK_LEVELS` with `app.detection.DECISION_MATRIX` and
+`app.auth.GATED_RISK_LEVELS`, so the mirror cannot drift silently.
+
+### 14.3 What the evidence binding actually asserts
+
+The probe asserts the CONTRACT, not a single pinned value:
+
+  * the gated attempt's risk level is one the gate acts on — `high` or
+    `critical` — because an attempt at any other level could not have
+    held a token back;
+  * the decision is the one `app.detection.DECISION_MATRIX` gives for
+    that level — `high → challenge`, `critical → block`;
+  * the same holds for the ungated attempt;
+  * the two attempts have **different ids**.
+
+The risk level itself is deliberately **not** pinned to one value.  The
+combined score depends on whether the ML service answered, so a
+degraded ML run scores on the rules alone.  Pinning the level would
+have measured the ML service's availability rather than the gate.
+
+### 14.4 The order question — what the probe really leaves behind
+
+An earlier report claimed that `probe → browser` was noisy while
+`browser → probe` was green, and attributed the difference to the
+order alone.  That attribution was **not** a proven cause, so the
+question was re-investigated by measurement.
+
+The measurement is this: the probe's two logins are REAL traffic, and
+at the level the scoring reaches they are `critical`.  The
+`critical` level maps to `REVOKE_SESSIONS` in the application's own
+risk-action map, so the DETECTION service calls back into Core and
+marks every **active** session of `demo_user` as revoked.  That is a
+legitimate consequence of a risky login — it is the protective action
+the product is supposed to take, and the probe deliberately does NOT
+undo it.
+
+The **leak** was a different thing, and it was the F1 defect: on the
+old code the overwritten snapshot left `detection_mfa_once = TRUE` on
+`demo_user`, so the NEXT login was held for an MFA challenge that
+nothing had asked for.  With F1 fixed, the flag is restored exactly:
+
+```
+demo_user|f
+```
+
+A second candidate cause was investigated and **excluded**: the probe
+accumulates `open critical` alerts, and the alert queue is paginated at
+20 rows per page with a bounded search of 25 pages, so an accumulation
+could in principle push the E2E-03 fixture out of reach.  483
+synthetic alerts were inserted into the disposable detection database
+and E2E-03 was re-run: it still passed.  The reason is that the
+fixture is **re-armed** with `created_at = now()` immediately before
+the scenario, so it always sits on the first page.  The accumulation is
+therefore real but harmless for the browser suite.
+
+### 14.5 The repeat cycle that was verified
+
+On one disposable stack (the `_ci_demo` databases on port 55450, its
+own API on 58110, its own frontend on 55190, its own SMTP sink on
+51140), with **no database reset in between**:
+
+| Step | Result |
+|---|---|
+| browser suite | 18 passed, 0 skipped |
+| probe | 13 checks passed, 0 failed |
+| browser suite | 18 passed, 0 skipped |
+| probe | 13 checks passed, 0 failed |
+
+`results.json` reported **0 flaky and 0 retry** across all four
+browser runs.
+
+The order `probe → browser` was also run — the full browser suite
+immediately after a probe run: **18 passed, 0 skipped**, with
+`detection_mfa_once` restored to `false` and the probe's own cleanup
+completing without an error.
+
+### 14.6 The event-loop test
+
+`tests/test_postgres_security.py::TestRegistryQueryIsBounded::test_the_endpoint_does_not_block_the_event_loop_while_locked`
+was run **10 consecutive times** against `sentinel_legacy_test` (the
+database that carries all three schemas, because the test needs the
+`model_versions` table):
+
+```
+1 passed in 2.74s
+1 passed in 2.77s
+1 passed in 2.77s
+1 passed in 2.77s
+1 passed in 2.74s
+1 passed in 2.76s
+1 passed in 2.74s
+1 passed in 2.76s
+1 passed in 2.75s
+1 passed in 2.78s
+```
+
+10/10 passed, the worst gap well inside the 0.5 s budget.  No retry was
+added and the 0.5 s threshold was not changed.  This is a **local**
+observation on this machine at this time; it is not a claim that the
+test can never fail, and the earlier recorded failure-and-rerun is
+kept as history rather than explained away.  No root cause was
+confirmed for that earlier failure — see section 14.7.
+
+### 14.7 What this round did NOT prove
+
+  * The earlier intermittent failure of the event-loop test was **not**
+    reproduced in this round (10/10 green), so its root cause is
+    **still unconfirmed**.  It is recorded as an *intermittent failure,
+    root cause not confirmed* — not as "a load artefact" and not as
+    "harmless", because neither was demonstrated.
+  * Nothing here proves that the browser suite is **free** of flaky
+    tests.  The claim is only that the four runs of this cycle reported
+    zero retries and zero flaky results.
+  * The 13 probe checks are not a proof that the gate is *correct* in
+    general — they are a proof that the gate held the token on the
+    measured stack, with the recorded evidence bound to the attempt
+    that was made.
+  * The E2E-03 pagination investigation shows the fixture stays
+    reachable **with the fixture re-arm in place**.  It does not prove
+    the queue is unbounded in size.
+
+---
+
+## 15. Related documents
 
 * [M13-FULLSTACK-DEPLOYMENT.md](M13-FULLSTACK-DEPLOYMENT.md) — the demo stack
 * [M13-DEMO-FIXTURES.md](M13-DEMO-FIXTURES.md) — the reproducible fixtures

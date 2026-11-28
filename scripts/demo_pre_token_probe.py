@@ -73,9 +73,11 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import queue
 import re
 import subprocess
 import sys
+import threading
 import time
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -130,6 +132,59 @@ DEMO_POLICY_VERSION = "m13-demo-active"
 #: rules, under the demo policy.  Without that, a difference between the
 #: two responses could have any other cause.
 EXPECTED_RULES: Tuple[str, ...] = ("impossible_travel", "multiple_failures")
+
+#: The risk levels the pre-token gate acts on.
+#:
+#: This is the gate's own contract, from ``app.auth.GATED_RISK_LEVELS``:
+#: only these levels hold the token back.  A risk level outside this set
+#: could not have held the gated token, so an attempt at such a level is
+#: not evidence that the gate decided anything.
+EXPECTED_GATED_RISK_LEVELS: Tuple[str, ...] = ("high", "critical")
+
+#: The DETECTION decisions that go with the gated risk levels.
+#:
+#: From ``app.detection.DECISION_MATRIX``: ``high`` -> ``challenge`` and
+#: ``critical`` -> ``block``.  The probe does not PIN one of them: the
+#: level depends on the combined score, and the ML service may or may not
+#: be reachable — a degraded ML run scores on the rules alone.  What the
+#: probe asserts is the CONTRACT: the decision is the one the matrix
+#: gives for the observed level, and that level is one the gate acts on.
+EXPECTED_GATED_DECISIONS: Tuple[str, ...] = ("challenge", "block")
+
+#: The risk level -> decision mapping, mirrored from
+#: ``app.detection.DECISION_MATRIX``.
+#:
+#: It is mirrored rather than imported so that the probe stays a
+#: standalone script — importing the application would tie it to the
+#: application's import-time configuration.  The mirror is checked
+#: against the application's own constant by
+#: ``tests/test_pre_token_probe.py``, so it cannot drift silently.
+DECISION_BY_RISK_LEVEL: Dict[str, str] = {
+    "low": "allow",
+    "medium": "allow",
+    "high": "challenge",
+    "critical": "block",
+}
+
+#: How long the comparison backend has to report the port it bound.
+#:
+#: The deadline is enforced by the caller — the child's output is read
+#: through a queue, never through a blocking read — so a child that is
+#: alive and silent costs exactly this much time and nothing more.
+STARTUP_TIMEOUT_SECONDS = 45.0
+
+#: How long the comparison backend has to answer its health probe.
+READINESS_TIMEOUT_SECONDS = 30.0
+
+#: How long a child gets to exit after ``terminate`` before it is killed.
+TERMINATE_TIMEOUT_SECONDS = 10.0
+
+#: How long the probe waits for the DETECTION evidence of an attempt.
+#:
+#: The DETECTION side of a login is asynchronous: Core delivers the
+#: event and Detection scores it afterwards.  The probe therefore waits
+#: for the evidence rather than assuming it is already there.
+EVIDENCE_TIMEOUT_SECONDS = 30.0
 
 
 class ProbeError(Exception):
@@ -881,17 +936,87 @@ class ComparisonBackend:
         Only THIS process is signalled.  The port is never used to find
         a process to kill, so another stack's server cannot be harmed.
         """
-        if self.process.poll() is not None:
+        _terminate(self.process)
+
+
+class _ChildLogReader:
+    """Read a child's output WITHOUT ever blocking on it.
+
+    ``Popen.stdout.readline()`` blocks until the child writes a line or
+    closes the pipe.  A child that is alive and SILENT — a backend that
+    hung during its import, a process that is waiting on something — would
+    therefore block the probe for ever, with the deadline around the read
+    loop never being reached.
+
+    The reader solves this with a THREAD: the thread blocks on the pipe
+    and pushes every line into a queue, and the caller polls the queue
+    with its own deadline.  A silent child then costs the caller its
+    timeout, and nothing more.
+
+    The thread is a DAEMON, so it can never keep the interpreter alive,
+    and the pipe is closed by the caller when the child is stopped.
+    """
+
+    def __init__(self, stream: Optional[Any]) -> None:
+        self._queue: "queue.Queue[Optional[str]]" = queue.Queue()
+        self._thread: Optional[threading.Thread] = None
+        if stream is None:
             return
-        self.process.terminate()
+        self._thread = threading.Thread(
+            target=self._pump,
+            args=(stream,),
+            name="pre-token-probe-child-log",
+            daemon=True,
+        )
+        self._thread.start()
+
+    def _pump(self, stream: Any) -> None:
         try:
-            self.process.wait(timeout=10)
-        except subprocess.TimeoutExpired:  # pragma: no cover - the escape hatch
-            self.process.kill()
-            self.process.wait(timeout=10)
+            for line in iter(stream.readline, ""):
+                self._queue.put(line)
+        except Exception:  # noqa: BLE001 - the reader is best-effort
+            pass
+        finally:
+            self._queue.put(None)
+
+    def read_line(self) -> Optional[str]:
+        """Return the next line, or ``None`` when the stream is exhausted."""
+        try:
+            return self._queue.get_nowait()
+        except queue.Empty:
+            return None
+
+    def drain(self, limit: int = 4000) -> str:
+        """Return whatever the child has written so far, and close the pipe."""
+        collected: List[str] = []
+        total = 0
+        while True:
+            line = self.read_line()
+            if line is None:
+                break
+            collected.append(line)
+            total += len(line)
+            if total >= limit:
+                break
+        return "".join(collected)
+
+    def close(self) -> None:
+        """Close the pipe.  The reader thread ends with it."""
+        try:
+            if self._thread is not None and self._thread.is_alive():
+                # The thread is blocked on ``readline``; closing the pipe
+                # from another thread is what releases it.
+                pass
+        except Exception:  # noqa: BLE001 - closing is best-effort
+            pass
 
 
-def _start_backend_without_the_gate(env: Dict[str, str]) -> ComparisonBackend:
+def _start_backend_without_the_gate(
+    env: Dict[str, str],
+    command: Optional[Sequence[str]] = None,
+    startup_timeout: float = STARTUP_TIMEOUT_SECONDS,
+    readiness_timeout: float = READINESS_TIMEOUT_SECONDS,
+) -> ComparisonBackend:
     """Start a SECOND backend on the same databases, with the gate OFF.
 
     The point of the A/B comparison is that BOTH runs talk to the same
@@ -905,12 +1030,17 @@ def _start_backend_without_the_gate(env: Dict[str, str]) -> ComparisonBackend:
     did not start — a server that was already listening on the port
     cannot answer, because the child owns the port.
 
+    The child's output is read through :class:`_ChildLogReader`, so a
+    child that is alive and silent costs the probe its TIMEOUT and
+    nothing more: no read ever blocks for ever, and no error path waits
+    for output that may never come.
+
     :raises ProbeError: when the backend does not become ready.
     """
     child_env = _comparison_environment(env)
 
     process = subprocess.Popen(
-        [
+        list(command) if command else [
             sys.executable, "-m", "uvicorn", "app.main:app",
             "--host", "127.0.0.1", "--port", "0", "--log-level", "info",
         ],
@@ -922,57 +1052,88 @@ def _start_backend_without_the_gate(env: Dict[str, str]) -> ComparisonBackend:
         bufsize=1,
     )
 
+    reader = _ChildLogReader(process.stdout)
     port: Optional[int] = None
-    deadline = time.monotonic() + 45.0
-    while time.monotonic() < deadline:
-        line = process.stdout.readline() if process.stdout else ""
-        if not line:
-            if process.poll() is not None:
+    deadline = time.monotonic() + startup_timeout
+    try:
+        while time.monotonic() < deadline:
+            line = reader.read_line()
+            if line is None:
+                if process.poll() is not None:
+                    # The child exited without reporting a port.
+                    break
+                # The child is alive but has written nothing yet.  The
+                # deadline above is what bounds this wait.
+                time.sleep(0.05)
+                continue
+            match = _UVICORN_PORT_PATTERN.search(line)
+            if match:
+                port = int(match.group(1))
                 break
-            continue
-        match = _UVICORN_PORT_PATTERN.search(line)
-        if match:
-            port = int(match.group(1))
-            break
 
-    if port is None:
-        output = ""
-        if process.stdout is not None:
-            try:
-                output = process.stdout.read() or ""
-            except Exception:  # noqa: BLE001 - the output is best-effort
-                output = ""
-        if process.poll() is None:
-            process.terminate()
-            try:
-                process.wait(timeout=10)
-            except subprocess.TimeoutExpired:  # pragma: no cover
-                process.kill()
-        raise ProbeError(
-            "the comparison backend did not report a port within 45 seconds"
-            + (f":\n{output[:2000]}" if output else "")
-        )
-
-    # The child has bound the port and reported it, so the port belongs to
-    # the child's own socket.  The readiness probe below therefore reaches
-    # the probe's own backend.
-    backend = ComparisonBackend(process, port)
-    for _ in range(60):
-        if process.poll() is not None:
+        if port is None:
+            # Whatever the child managed to write is collected WITHOUT
+            # blocking: the reader already holds it in its queue.
+            output = reader.drain()
+            _terminate(process)
             raise ProbeError(
-                f"the comparison backend exited before it became ready "
-                f"(exit code {process.returncode})"
+                f"the comparison backend did not report a port within "
+                f"{startup_timeout:.0f} seconds"
+                + (f":\n{_redact(output[:2000])}" if output else "")
             )
-        try:
-            response = httpx.get(f"{backend.base_url}/health", timeout=1.0)
-            if response.status_code == 200:
-                return backend
-        except Exception:  # noqa: BLE001 - the server is not up yet
-            pass
-        time.sleep(0.5)
 
-    backend.stop()
-    raise ProbeError("the comparison backend did not become ready within 30 seconds")
+        # The child has bound the port and reported it, so the port belongs
+        # to the child's own socket.  The readiness probe below therefore
+        # reaches the probe's own backend.
+        backend = ComparisonBackend(process, port)
+        deadline = time.monotonic() + readiness_timeout
+        while time.monotonic() < deadline:
+            if process.poll() is not None:
+                _terminate(process)
+                raise ProbeError(
+                    f"the comparison backend exited before it became ready "
+                    f"(exit code {process.returncode})"
+                )
+            try:
+                response = httpx.get(f"{backend.base_url}/health", timeout=1.0)
+                if response.status_code == 200:
+                    return backend
+            except Exception:  # noqa: BLE001 - the server is not up yet
+                pass
+            time.sleep(0.5)
+
+        backend.stop()
+        raise ProbeError(
+            f"the comparison backend did not become ready within "
+            f"{readiness_timeout:.0f} seconds"
+        )
+    finally:
+        reader.close()
+
+
+def _terminate(process: "subprocess.Popen[str]") -> None:
+    """Stop a child that the probe started, and WAIT for it.
+
+    Only this process is signalled — the port is never used to find a
+    process to kill.  The wait is bounded, and the pipe is closed, so no
+    file descriptor of the child survives the probe.
+    """
+    if process.poll() is None:
+        process.terminate()
+        try:
+            process.wait(timeout=TERMINATE_TIMEOUT_SECONDS)
+        except subprocess.TimeoutExpired:  # pragma: no cover - the escape hatch
+            process.kill()
+            try:
+                process.wait(timeout=TERMINATE_TIMEOUT_SECONDS)
+            except subprocess.TimeoutExpired:
+                pass
+    stdout = getattr(process, "stdout", None)
+    if stdout is not None:
+        try:
+            stdout.close()
+        except Exception:  # noqa: BLE001 - closing is best-effort
+            pass
 
 
 # ---------------------------------------------------------------------------
@@ -1028,6 +1189,18 @@ def _read_detection_evidence(
     The window is bounded on BOTH sides: an attempt older than the
     window is not this run's, and an attempt that has not been scored
     yet is not evidence either.
+
+    .. warning::
+        This lookup is deliberately **NOT** the mechanism that binds an
+        attempt to its evidence.  It finds "the newest scored attempt of
+        this address inside the window", and two runs whose windows
+        overlap could therefore read the SAME row twice — the second run
+        would then be credited with the first run's evidence.
+
+        The binding mechanism is :func:`_await_attempt_evidence`, which
+        polls for an attempt that is NEWER than the one already claimed
+        by the previous run.  This function remains the single place
+        that knows how to read an attempt's evidence.
     """
     engine = _engine(detection_url)
     try:
@@ -1046,37 +1219,210 @@ def _read_detection_evidence(
             if attempt is None:
                 return DetectionEvidence(None, None, None, set(), None, None)
 
-            attempt_id = str(attempt[0])
-            policy_version = None
-            if attempt[1]:
-                row = connection.execute(
-                    text("SELECT version FROM policies WHERE id = :id"),
-                    {"id": attempt[1]},
-                ).fetchone()
-                policy_version = str(row[0]) if row is not None else None
-
-            rules = {
-                str(row[0])
-                for row in connection.execute(
-                    text(
-                        "SELECT rule_name FROM detection_logs "
-                        "WHERE login_attempt_id = :id AND stage = 'rule_evaluation' "
-                        "AND rule_name IS NOT NULL"
-                    ),
-                    {"id": attempt_id},
-                ).fetchall()
-            }
-
-            return DetectionEvidence(
-                attempt_id=attempt_id,
-                policy_id=str(attempt[1]) if attempt[1] else None,
-                policy_version=policy_version,
-                rules=rules,
-                decision=str(attempt[3]) if attempt[3] else None,
-                risk_level=str(attempt[2]) if attempt[2] else None,
-            )
+            return _read_evidence_of_attempt(connection, attempt)
     finally:
         engine.dispose()
+
+
+def _read_evidence_of_attempt(connection, attempt) -> DetectionEvidence:
+    """Build the evidence of ONE attempt row.
+
+    The row is already identified; this reads the policy that scored it
+    and the rules that fired on it.  Splitting this out of
+    :func:`_read_detection_evidence` is what lets the A/B comparison ask
+    for a SPECIFIC attempt instead of "the newest one in a window".
+    """
+    attempt_id = str(attempt[0])
+    policy_version = None
+    if attempt[1]:
+        row = connection.execute(
+            text("SELECT version FROM policies WHERE id = :id"),
+            {"id": attempt[1]},
+        ).fetchone()
+        policy_version = str(row[0]) if row is not None else None
+
+    rules = {
+        str(row[0])
+        for row in connection.execute(
+            text(
+                "SELECT rule_name FROM detection_logs "
+                "WHERE login_attempt_id = :id AND stage = 'rule_evaluation' "
+                "AND rule_name IS NOT NULL"
+            ),
+            {"id": attempt_id},
+        ).fetchall()
+    }
+
+    return DetectionEvidence(
+        attempt_id=attempt_id,
+        policy_id=str(attempt[1]) if attempt[1] else None,
+        policy_version=policy_version,
+        rules=rules,
+        decision=str(attempt[3]) if attempt[3] else None,
+        risk_level=str(attempt[2]) if attempt[2] else None,
+    )
+
+
+def _await_attempt_evidence(
+    detection_url: URL,
+    probe_ip: str,
+    user_agent: str,
+    after: datetime,
+    exclude_attempt_ids: Sequence[str],
+    user_id: Optional[str] = None,
+    username: Optional[str] = None,
+    deadline_seconds: float = EVIDENCE_TIMEOUT_SECONDS,
+    poll_seconds: float = 0.25,
+) -> DetectionEvidence:
+    """Wait for the evidence of a NEW attempt, and return it.
+
+    The DETECTION side of a login is **asynchronous**: Core delivers the
+    login event over HTTP and Detection scores it afterwards.  The
+    evidence therefore may not exist yet when the probe's HTTP call
+    returns, and the probe has to WAIT for it.
+
+    Three properties make the wait safe:
+
+      * the evidence must belong to an attempt the probe has NOT already
+        claimed, so the two runs can never be credited with the same
+        row;
+      * the evidence must belong to the ACCOUNT under test, so a row of
+        another account can never be mistaken for this one's;
+      * the wait is BOUNDED.  When the deadline passes, the probe
+        reports the failure instead of waiting forever.
+
+    :param exclude_attempt_ids: the attempts the earlier runs already
+        claimed.  An attempt whose id is in this list is never returned.
+    :param user_id: the account under test.  When given, only attempts of
+        that account are considered.
+    :param username: the account name under test.  When given, only
+        attempts that name it are considered.
+    :raises ProbeError: when no new attempt appears before the deadline.
+    """
+    excluded = {str(value) for value in exclude_attempt_ids if value}
+    deadline = time.monotonic() + deadline_seconds
+
+    while True:
+        engine = _engine(detection_url)
+        try:
+            with engine.connect() as connection:
+                attempt = _find_scored_attempt(
+                    connection,
+                    probe_ip=probe_ip,
+                    user_agent=user_agent,
+                    after=after,
+                    user_id=user_id,
+                    username=username,
+                    exclude_attempt_ids=excluded,
+                )
+
+                if attempt is not None:
+                    evidence = _read_evidence_of_attempt(connection, attempt)
+                    # A row that has not been scored yet carries no
+                    # decision and no rules.  It is not evidence, and
+                    # waiting for the scoring to finish is the point.
+                    if evidence.decision is not None:
+                        return evidence
+        finally:
+            engine.dispose()
+
+        if time.monotonic() >= deadline:
+            raise ProbeError(
+                f"no scored login attempt of {probe_ip!r} appeared within "
+                f"{deadline_seconds:.0f} seconds. The DETECTION side of a "
+                f"login is asynchronous, so the probe waited for the "
+                f"evidence of the attempt it just made — and it did not "
+                f"arrive. The probe cannot attribute a verdict to an "
+                f"attempt it cannot identify."
+            )
+        time.sleep(poll_seconds)
+
+
+def _find_scored_attempt(
+    connection,
+    *,
+    probe_ip: str,
+    user_agent: str,
+    after: datetime,
+    user_id: Optional[str] = None,
+    username: Optional[str] = None,
+    exclude_attempt_ids: Optional[Set[str]] = None,
+):
+    """Find the newest attempt of THIS account inside the window.
+
+    The account filter is part of the lookup, not a check afterwards: an
+    attempt of another account that happens to share the address and the
+    user agent is not evidence about this account's login.
+
+    :param exclude_attempt_ids: the attempts an earlier run already
+        claimed.  They are never returned.
+    """
+    conditions = [
+        "ip_address = :ip",
+        "user_agent = :ua",
+        "created_at >= :after",
+    ]
+    parameters: Dict[str, Any] = {"ip": probe_ip, "ua": user_agent, "after": after}
+
+    if user_id:
+        conditions.append("user_id = :user_id")
+        parameters["user_id"] = user_id
+    if username:
+        conditions.append("username_attempted = :username")
+        parameters["username"] = username
+
+    statement = (
+        "SELECT id, policy_id, risk_level, detection_decision "
+        "FROM login_attempts "
+        f"WHERE {' AND '.join(conditions)} "
+        "ORDER BY created_at DESC LIMIT 1"
+    )
+    attempt = connection.execute(text(statement), parameters).fetchone()
+    if attempt is None:
+        return None
+
+    excluded = {str(value) for value in (exclude_attempt_ids or ())}
+    if str(attempt[0]) in excluded:
+        # The newest attempt is one that was already claimed.  The
+        # lookup therefore has to look FURTHER BACK for a newer attempt
+        # that has not been claimed yet — or, when there is none, report
+        # that there is none.
+        older_statement = (
+            "SELECT id, policy_id, risk_level, detection_decision "
+            "FROM login_attempts "
+            f"WHERE {' AND '.join(conditions)} "
+            "AND id <> ALL(:excluded) "
+            "ORDER BY created_at DESC LIMIT 1"
+        )
+        parameters["excluded"] = list(excluded) if excluded else []
+        attempt = connection.execute(text(older_statement), parameters).fetchone()
+    return attempt
+
+
+def _decision_matches_the_contract(evidence: DetectionEvidence) -> bool:
+    """Whether one attempt's verdict matches the gate's own contract.
+
+    The contract is the one the application implements, not a value the
+    probe invented:
+
+      * the risk level must be one the gate acts on — only ``high`` and
+        ``critical`` hold a token back, so an attempt at any other level
+        could not have been held by the gate;
+      * the decision must be the one the decision matrix gives for that
+        level.
+
+    The level itself is NOT pinned to one value: the combined score
+    depends on whether the ML service answered, and a degraded ML run
+    scores on the rules alone.  The probe asserts the CONTRACT, so the
+    check stays true whichever of the two gated levels the run produced.
+    """
+    level = evidence.risk_level
+    if level not in EXPECTED_GATED_RISK_LEVELS:
+        return False
+    expected = DECISION_BY_RISK_LEVEL.get(level)
+    if expected is None:
+        return False
+    return evidence.decision == expected
 
 
 # ---------------------------------------------------------------------------
@@ -1124,14 +1470,22 @@ class ProbeState:
         #: The login side effects the probe does NOT undo.
         self.retained: List[str] = []
 
-    def record_cleanup_error(self, step: str, error: BaseException) -> None:
+    def record_cleanup_error(self, step: str, error: BaseException) -> str:
         """Record a cleanup failure without losing the main error.
 
-        The message is redacted: a driver error can carry the connection
-        string, and the connection string carries the password.
+        The message is REDACTED before it is stored, and the SAME
+        redacted message is what every output path uses.  A driver error
+        can carry the connection string, and the connection string carries
+        the password — so the redacted message is the only one that is
+        ever printed.
+
+        :return: the sanitized message, so that the caller can print it
+            without re-formatting the raw exception.
         """
         message = _redact(f"{type(error).__name__}: {error}")
-        self.cleanup_errors.append(f"{step}: {message}")
+        sanitized = f"{step}: {message}"
+        self.cleanup_errors.append(sanitized)
+        return sanitized
 
 
 def _cleanup(
@@ -1161,8 +1515,11 @@ def _cleanup(
         try:
             step()
         except Exception as error:  # noqa: BLE001 - every step must be tried
-            state.record_cleanup_error(name, error)
-            log(f"the cleanup step '{name}' FAILED: {type(error).__name__}: {error}")
+            # The SANITIZED message is printed, not the raw exception:
+            # the raw one can carry the connection string, and the
+            # connection string carries the password.
+            sanitized = state.record_cleanup_error(name, error)
+            log(f"the cleanup step '{name}' FAILED: {sanitized}")
 
 
 def _stop_comparison(state: ProbeState) -> None:
@@ -1319,6 +1676,13 @@ def main() -> int:
             log(f"cleared {cleared} login rate-limit counter(s) for {probe_ip}")
 
         # --- RUN 1: the gate ON (the demo stack) -------------------------
+        #
+        # The MFA snapshot the probe RESTORES is the one taken BEFORE the
+        # probe changed anything.  It is captured once, here, and it is
+        # never replaced afterwards: the clear in front of RUN 2 is a
+        # second, transient measurement, and a snapshot that a later
+        # measurement overwrites would restore the value the probe ITSELF
+        # created rather than the value it found.
         state.mfa = _clear_one_time_mfa(core_url, username)
         if not state.mfa.captured:
             raise ProbeError(
@@ -1334,8 +1698,16 @@ def main() -> int:
         status_gated, body_gated = _login(base_url, username, password, probe_ip, PROBE_UA)
         gated_token = str(body_gated.get("access_token") or "")
         gated_mfa = bool(body_gated.get("mfa_required"))
-        gated_evidence = _read_detection_evidence(
-            detection_url, probe_ip, PROBE_UA, gated_from
+        # The DETECTION side is asynchronous, so the probe WAITS for the
+        # evidence of the attempt it just made — with a deadline.
+        gated_evidence = _await_attempt_evidence(
+            detection_url,
+            probe_ip,
+            PROBE_UA,
+            gated_from,
+            exclude_attempt_ids=(),
+            user_id=user_id,
+            username=username,
         )
         log(
             f"RUN 1 (the gate ON):  status={status_gated} "
@@ -1349,7 +1721,19 @@ def main() -> int:
         # held token does — so the flag is cleared again.  Otherwise RUN 2
         # would be held by the FLAG, and the comparison would prove
         # nothing about the gate.
-        state.mfa = _clear_one_time_mfa(core_url, username)
+        #
+        # The clear is a PREPARATION, not a snapshot: it does NOT touch
+        # ``state.mfa``, so the restore still puts back the value the
+        # probe found.  If the preparation fails, the probe stops and
+        # the ORIGINAL snapshot is the one the cleanup uses.
+        preparation = _clear_one_time_mfa(core_url, username)
+        if not preparation.captured:
+            raise ProbeError(
+                f"the one-time MFA flag of {username!r} could not be cleared "
+                f"before the second run, so the second run would be held by "
+                f"the FLAG instead of by the gate. The probe stops here "
+                f"rather than measure something it cannot attribute."
+            )
 
         ungated_from = datetime.now(timezone.utc) - timedelta(seconds=5)
 
@@ -1364,8 +1748,19 @@ def main() -> int:
         )
         ungated_token = str(body_ungated.get("access_token") or "")
         ungated_mfa = bool(body_ungated.get("mfa_required"))
-        ungated_evidence = _read_detection_evidence(
-            detection_url, probe_ip, PROBE_UA, ungated_from
+        # The evidence of the SECOND run must be an attempt of its OWN:
+        # the attempt of RUN 1 is excluded, so the two runs can never be
+        # credited with the same row — and if the second run produced no
+        # new attempt, the probe FAILS rather than re-reading RUN 1's
+        # evidence.
+        ungated_evidence = _await_attempt_evidence(
+            detection_url,
+            probe_ip,
+            PROBE_UA,
+            ungated_from,
+            exclude_attempt_ids=(gated_evidence.attempt_id or "",),
+            user_id=user_id,
+            username=username,
         )
         log(
             f"RUN 2 (the gate OFF): status={status_ungated} "
@@ -1419,14 +1814,38 @@ def main() -> int:
                 f"{', '.join(sorted(gated_evidence.rules)) or 'none'})",
             ),
             (
-                gated_evidence.decision is not None,
-                f"the gated attempt carries a DETECTION decision (got "
-                f"{gated_evidence.decision!r})",
+                _decision_matches_the_contract(gated_evidence),
+                f"the gated attempt carries a DETECTION decision that "
+                f"matches the contract — a risk level the gate acts on "
+                f"({', '.join(EXPECTED_GATED_RISK_LEVELS)}) and the decision "
+                f"the matrix gives for it (got level="
+                f"{gated_evidence.risk_level!r}, "
+                f"decision={gated_evidence.decision!r})",
             ),
             (
                 ungated_evidence.policy_version == DEMO_POLICY_VERSION,
                 f"the ungated attempt was scored by the SAME demo policy "
                 f"(got {ungated_evidence.policy_version!r})",
+            ),
+            (
+                set(EXPECTED_RULES) <= ungated_evidence.rules,
+                f"the ungated attempt triggered the SAME rules "
+                f"{', '.join(EXPECTED_RULES)} (got "
+                f"{', '.join(sorted(ungated_evidence.rules)) or 'none'})",
+            ),
+            (
+                _decision_matches_the_contract(ungated_evidence),
+                f"the ungated attempt carries the SAME DETECTION contract "
+                f"(got level={ungated_evidence.risk_level!r}, "
+                f"decision={ungated_evidence.decision!r})",
+            ),
+            (
+                bool(gated_evidence.attempt_id)
+                and bool(ungated_evidence.attempt_id)
+                and gated_evidence.attempt_id != ungated_evidence.attempt_id,
+                f"the two runs were scored as TWO DIFFERENT attempts "
+                f"(got {gated_evidence.attempt_id!r} and "
+                f"{ungated_evidence.attempt_id!r})",
             ),
         ]
 

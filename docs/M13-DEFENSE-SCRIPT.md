@@ -173,7 +173,7 @@ RUN 1 (the gate ON):  status=200 token=HELD   mfa_required=True
 RUN 2 (the gate OFF): status=200 token=ISSUED mfa_required=False
 ```
 
-**Bảng kết quả — 10 check, in ra sau hai dòng RUN:**
+**Bảng kết quả — 13 check, in ra sau hai dòng RUN:**
 
 ```
   PASS  the gated login is answered with 200 (got 200)
@@ -184,9 +184,20 @@ RUN 2 (the gate OFF): status=200 token=ISSUED mfa_required=False
   PASS  the ungated login does not demand an MFA challenge
   PASS  the gated attempt was scored by the demo policy 'm13-demo-active'
   PASS  the gated attempt triggered the rules impossible_travel, multiple_failures
-  PASS  the gated attempt carries a DETECTION decision (got 'block')
+  PASS  the gated attempt carries a DETECTION decision that matches the contract
   PASS  the ungated attempt was scored by the SAME demo policy
+  PASS  the ungated attempt triggered the SAME rules impossible_travel, multiple_failures
+  PASS  the ungated attempt carries the SAME DETECTION contract
+  PASS  the two runs were scored as TWO DIFFERENT attempts
 ```
+
+Ba check cuối là phần cốt lõi của vòng hardening cuối: chúng bảo đảm
+**hai lượt là hai attempt khác nhau**, và **verdict của mỗi attempt khớp
+với contract của ứng dụng** (risk level `high`/`critical` + quyết định
+theo `app.detection.DECISION_MATRIX`). Trước đó, lượt thứ hai có thể
+đọc lại evidence của lượt thứ nhất — nên "hai lượt giống nhau" không
+chứng minh được gì. Bằng chứng đi kèm nằm trong
+`docs/M13-ACCEPTANCE-MATRIX.md`, mục 14.
 
 Dưới bảng còn có mục **"the side effects the probe does NOT undo"** — liệt
 kê `sessions`, `mfa_transactions`, `login_attempts` mà lượt đăng nhập thật
@@ -238,10 +249,31 @@ mới chứng minh được chính gate đã giữ token.
 "token gated khác token ungated" — một sự bất đẳng thức, không chứng minh
 nguyên nhân. Bản mới kiểm tra **bằng chứng Detection** đọc thẳng từ
 database: attempt cả hai lần đều được policy `m13-demo-active` chấm điểm,
-đều kích hoạt rules `impossible_travel` + `multiple_failures`, đều mang
-quyết định `block`. Tức là hai lần chạy **được chấm giống nhau** — nên
-sự khác biệt về token **chắc chắn** do gate, chứ không phải do rule khác
-nhau. Đây là câu trả lời sẵn sàng cho câu hỏi khó nhất của giảng viên.
+đều kích hoạt rules `impossible_travel` + `multiple_failures`, và mỗi
+attempt mang quyết định **khớp với contract** (`high` → `challenge`,
+`critical` → `block`). Quan trọng hơn: hai lượt là **hai attempt id
+khác nhau** — đây là điều kiện mà bản cũ không kiểm tra, và là lý do
+lượt thứ hai có thể đọc lại evidence của lượt thứ nhất. Tức là hai lần
+chạy **được chấm giống nhau** — nên sự khác biệt về token **chắc chắn**
+do gate, chứ không phải do rule khác nhau. Đây là câu trả lời sẵn sàng
+cho câu hỏi khó nhất của giảng viên.
+
+**Lưu ý — giới hạn của bằng chứng (nói thẳng, không né):**
+
+  * lịch sử rủi ro là **SEEDED** (probe tự gieo), còn request đăng nhập
+    và xử lý Detection là **REAL**;
+  * probe **không** chứng minh browser scenario làm điều tương tự —
+    browser suite không tạo đăng nhập rủi ro, nó kiểm tra UI và session;
+  * probe **không** khôi phục mọi thay đổi: hai lượt đăng nhập là traffic
+    thật, nên session / MFA transaction / `login_attempts` / alert của
+    `demo_user` **vẫn còn lại** (probe in ra danh sách này). Đặc biệt,
+    risk level `critical` kích hoạt hành động `REVOKE_SESSIONS` — đó là
+    hành động bảo vệ **hợp lệ**, không phải rò rỉ;
+  * điều probe **khôi phục** là cờ MFA một lần (đúng giá trị tìm thấy)
+    và slot ACTIVE của policy. Bản cũ **ghi đè** snapshot nên để lại
+    `detection_mfa_once = true` — đó mới là thứ làm lượt đăng nhập kế
+    tiếp bị bắt MFA ngoài ý muốn. Bản mới trả đúng `false`, đã đo
+    lại trên DB.
 
 **Lưu ý về môi trường sạch của backend so sánh:** lần chạy thứ hai không
 dùng lại tiến trình của lần thứ nhất — probe tự khởi động một backend
@@ -464,12 +496,13 @@ làm được.
 
 | Con số | Nguồn |
 |---|---|
-| 1543 test backend, 0 skip | CI run 46149270445 |
+| 1586 test backend, 0 skip | CI run 46149270445 (1543) + vòng hardening cuối (43) — xem `docs/M13-ACCEPTANCE-MATRIX.md` mục 14 |
 | 18 kịch bản Chromium, 0 mock | CI run 46149270445 |
 | 111 test an toàn đích database | CI run 46149270445 |
 | 56 test guard / khôi phục trạng thái / vòng đời tiến trình của probe | CI run 46149270445 |
+| 43 test hardening cuối của probe (snapshot, redaction, evidence, child) | local — 35 fail / 8 pass trên code cũ, 43 pass trên code mới |
 | 55 check demo scenario | chạy local |
-| 10 check probe pre-token | local + CI |
+| 13 check probe pre-token | local + CI |
 
 ### Phần chưa làm được, nói thẳng
 
@@ -495,6 +528,7 @@ làm được.
 | Test có mock không? | Browser suite không mock gì. OTP đọc từ log SMTP thật, 502 đến từ subject Core không biết, degraded đến từ việc đổi tên bảng ML. |
 | Demo có dùng dữ liệu giả không? | Có, và tôi nói rõ: alert mẫu để minh họa giao diện. Mọi quyết định và mọi hành động bảo vệ là thật. |
 | An toàn database thế nào? | 5 lớp gia cố, 111 test. Không có biến môi trường nào nới được allowlist. |
+| Chạy probe có làm hỏng browser suite không? | Không, nếu chạy đúng thứ tự và trên cùng một stack. Đã kiểm chứng chu kỳ `browser → probe → browser → probe` trên stack disposable, không reset DB: 18 + 18 kịch bản và 13 + 13 check probe đều xanh, 0 flaky / 0 retry. Còn `probe → browser` cũng xanh (18/18). Phần bị ảnh hưởng trước đây là cờ MFA một lần bị snapshot ghi đè — đã sửa, và đo lại được `detection_mfa_once = false`. Chi tiết: `docs/M13-ACCEPTANCE-MATRIX.md` mục 14.4. |
 
 ---
 
@@ -507,6 +541,7 @@ và `reset` hỏi trước.
 |---|---|
 | cờ MFA một lần bị kích hoạt ngoài ý muốn | `python scripts/demo_seed_demo.py --seed` |
 | probe để lại dữ liệu rủi ro (không thể xảy ra — probe tự dọn) | `python scripts/demo_seed_demo.py --seed` |
+| probe để lại session bị thu hồi (do `REVOKE_SESSIONS` — hành động bảo vệ hợp lệ, không phải rò rỉ) | `python scripts/demo_seed_demo.py --seed` |
 | stack chạy lỗi sau khi sửa cấu hình | `bash scripts/demo_stack.sh restart` |
 | frontend không khởi động lại | `bash scripts/demo_stack.sh restart` |
 | muốn trạng thái sạch hoàn toàn | `bash scripts/demo_stack.sh reset` — hỏi xác nhận, mất dữ liệu |
