@@ -158,7 +158,12 @@ TRƯỚC khi token được cấp — không phải sau khi.
 **Thao tác — chạy probe (nhanh nhất và chắc chắn nhất):**
 
 ```bash
+# Probe GHI vào database demo (seed lịch sử rủi ro, bật policy demo,
+# đăng nhập thật 2 lần).  Guard bắt buộc lượt chạy phải KHAI BÁO
+# đích ghi, gọi tên database cụ thể — "true" chung không được chấp nhận.
+export E2E_ALLOW_WRITE_TO="sentinel_core_demo sentinel_detection_demo"
 python scripts/demo_pre_token_probe.py
+unset E2E_ALLOW_WRITE_TO
 ```
 
 **Kết quả mong đợi — dòng quan trọng nhất của buổi trình bày:**
@@ -167,6 +172,27 @@ python scripts/demo_pre_token_probe.py
 RUN 1 (the gate ON):  status=200 token=HELD   mfa_required=True
 RUN 2 (the gate OFF): status=200 token=ISSUED mfa_required=False
 ```
+
+**Bảng kết quả — 10 check, in ra sau hai dòng RUN:**
+
+```
+  PASS  the gated login is answered with 200 (got 200)
+  PASS  the gated login is HELD: the response carries no access token
+  PASS  the gated login demands an MFA challenge
+  PASS  the ungated login is answered with 200 (got 200)
+  PASS  the ungated login ISSUES an access token
+  PASS  the ungated login does not demand an MFA challenge
+  PASS  the gated attempt was scored by the demo policy 'm13-demo-active'
+  PASS  the gated attempt triggered the rules impossible_travel, multiple_failures
+  PASS  the gated attempt carries a DETECTION decision (got 'block')
+  PASS  the ungated attempt was scored by the SAME demo policy
+```
+
+Dưới bảng còn có mục **"the side effects the probe does NOT undo"** — liệt
+kê `sessions`, `mfa_transactions`, `login_attempts` mà lượt đăng nhập thật
+để lại. Đây là phần cần nói ra trước giảng viên: probe dọn sạch dữ liệu
+RỦI RO và trả lại policy, nhưng **không** xóa lịch sử đăng nhập thật — vì
+xóa nó là giấu bằng chứng.
 
 **Lưu ý về policy:** probe tự đảm bảo policy của demo (`m13-demo-active`)
 đang là policy đang áp dụng trước khi chấm điểm, và trả lại policy cũ
@@ -177,6 +203,20 @@ hơn ngưỡng `high`, và gate **đúng** là cấp token. Đó là sự thật
 policy, nhưng vô dụng về gate. Nếu bạn thấy dòng log báo policy demo
 "không có trong dịch vụ", đó là thông báo bình thường — probe đã xử lý
 việc đó.
+
+**Lưu ý về việc khôi phục policy (bản mới):** probe ghi lại **chính xác**
+trạng thái nó tìm thấy, theo cả ba khả năng:
+
+1. policy demo **đã** active → giữ nguyên;
+2. **một** policy khác đang active → trả policy đó lại sau khi đo;
+3. **không có** policy nào active → sau khi đo, probe để trống slot
+   active, đúng như lúc bắt đầu.
+
+Trường hợp 3 là trường hợp mà bản cũ **rò rỉ**: nó trả `None` về nghĩa là
+"không có gì để khôi phục", nên policy demo bị bỏ lại active vĩnh viễn —
+làm thay đổi trạng thái của stack demo mà không ai nhận ra. Nếu giảng
+viên hỏi "probe có thay đổi gì không", câu trả lời là: **không** — nó
+đọc trạng thái trước, và trả về đúng trạng thái đó.
 
 **Lưu ý về địa chỉ IP:** probe đăng nhập từ một địa chỉ mà tài khoản
 **chưa từng dùng**, và tự chọn địa chỉ đó từ lịch sử của chính tài
@@ -193,6 +233,24 @@ cùng policy đang active, cùng lịch sử rủi ro đã gieo, cùng tài kho�
 Biến duy nhất là `RUN_PRE_TOKEN_CHECK`. Nếu gate không quyết định, hai
 lần chạy sẽ cho kết quả giống nhau. Chỉ khi chúng **khác nhau** thì
 mới chứng minh được chính gate đã giữ token.
+
+**Vì sao đây là bằng chứng MẠNH HƠN bản cũ:** bản cũ chỉ so sánh
+"token gated khác token ungated" — một sự bất đẳng thức, không chứng minh
+nguyên nhân. Bản mới kiểm tra **bằng chứng Detection** đọc thẳng từ
+database: attempt cả hai lần đều được policy `m13-demo-active` chấm điểm,
+đều kích hoạt rules `impossible_travel` + `multiple_failures`, đều mang
+quyết định `block`. Tức là hai lần chạy **được chấm giống nhau** — nên
+sự khác biệt về token **chắc chắn** do gate, chứ không phải do rule khác
+nhau. Đây là câu trả lời sẵn sàng cho câu hỏi khó nhất của giảng viên.
+
+**Lưu ý về môi trường sạch của backend so sánh:** lần chạy thứ hai không
+dùng lại tiến trình của lần thứ nhất — probe tự khởi động một backend
+riêng với `RUN_PRE_TOKEN_CHECK=0`, trên **port tạm thời do hệ điều hành
+cấp** (`--port 0`), và với môi trường **được dựng lại từ đầu** (chỉ giữ
+biến trong allowlist, loại bỏ toàn bộ biến `PG*` và biến shell bẩn). Nhờ
+vậy lần chạy thứ hai không bị ảnh hưởng bởi `RUN_PRE_TOKEN_CHECK=0` mà
+người vận hành lỡ tay export trong shell, và không đụng vào port của
+tiến trình khác.
 
 **Đi theo sau khi chạy probe — xem quyết định của Detection:**
 
@@ -406,11 +464,12 @@ làm được.
 
 | Con số | Nguồn |
 |---|---|
-| 1487 test backend, 0 skip | CI run 46143555230 |
-| 18 kịch bản Chromium, 0 mock | CI run 46143555230 |
-| 111 test an toàn đích database | CI run 46143555230 |
+| 1543 test backend, 0 skip | CI run mới nhất |
+| 18 kịch bản Chromium, 0 mock | CI run mới nhất |
+| 111 test an toàn đích database | CI run mới nhất |
+| 56 test guard / khôi phục trạng thái / vòng đời tiến trình của probe | CI run mới nhất |
 | 55 check demo scenario | chạy local |
-| 7 check probe pre-token | local + CI |
+| 10 check probe pre-token | local + CI |
 
 ### Phần chưa làm được, nói thẳng
 

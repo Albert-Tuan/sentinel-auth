@@ -23,8 +23,8 @@ on 2026-11-28 against commit `7ec6409`; their evidence is in section 13.
 | D | The safety | 24 | 24 | `tests/test_demo_fixtures.py`, `tests/test_ci_demo_database_safety.py`, `tests/test_e2e_fixture_guards.py` |
 | E | The regression | 15 | 15 | `pytest tests/` |
 | F | The browser E2E | 12 | 12 | `scripts/e2e_run.sh` |
-| G | The destination guard | 12 | 12 | `tests/test_e2e_fixture_target_guard.py`, `scripts/demo_pre_token_probe.py` |
-| | **Total** | **91** | **91** | |
+| G | The destination guard | 20 | 20 | `tests/test_e2e_fixture_target_guard.py`, `tests/test_pre_token_probe.py`, `scripts/demo_pre_token_probe.py` |
+| | **Total** | **99** | **99** | |
 
 The six demo scenarios contribute **55 individual checks**, all passing,
 twice in a row — the second run proves they are re-runnable.
@@ -34,7 +34,8 @@ skipped, zero mocked. See
 [M13-BROWSER-E2E-REPORT.md](M13-BROWSER-E2E-REPORT.md).
 
 The destination guard contributes **111 tests** and the pre-token probe
-contributes **7 checks**; both are accounted for in section 13.
+contributes **56 guard, restoration and lifecycle tests** plus its **10
+runtime checks**; both are accounted for in section 13.
 
 ---
 
@@ -307,7 +308,7 @@ The only change to `.gitignore` is one line:
 
 | # | Criterion | Result |
 |---|---|---|
-| E1 | The full test suite passes | `1487 passed`, 0 failed, **0 skipped** |
+| E1 | The full test suite passes | `1543 passed`, 0 failed, **0 skipped** |
 | E2 | The M13 fixture tests pass | 26 passed |
 | E3 | `git diff --check` reports nothing | clean |
 | E4 | The new scripts compile | `python3 -m py_compile` clean, `bash -n` clean |
@@ -363,7 +364,7 @@ backend and the other half to another.
 
 | Suite | Baseline required | Result | Delta |
 |---|---|---|---|
-| Backend regression | ≥ 1199 passed | **1487 passed**, 0 failed, 0 skipped | +288 (26 fixture + 51 safety + 47 guard + 15 parity + 111 destination guard + 38 the other M13 work) |
+| Backend regression | ≥ 1199 passed | **1543 passed**, 0 failed, 0 skipped | +344 (26 fixture + 51 safety + 47 guard + 15 parity + 111 destination guard + 56 probe guard/restore/lifecycle + 38 the other M13 work) |
 | HTTP smoke | ≥ 79 passed | **79 passed**, 0 failed | — |
 | Frontend unit/component | ≥ 265 passed | **265 passed**, 0 failed | — |
 | Frontend integration | ≥ 50 passed | **50 passed**, 0 failed | — |
@@ -376,7 +377,8 @@ backend and the other half to another.
 | Browser E2E typecheck | pass | pass (`tsc -p tsconfig.e2e.json`) | new |
 | E2E database guard | — | **47 passed**, 0 skipped | new |
 | E2E destination guard | — | **111 passed**, 0 skipped | new |
-| Pre-token detection probe | — | **7 checks passed**, 0 failed | new |
+| Pre-token probe guard, restoration and lifecycle | — | **56 passed**, 0 skipped | new |
+| Pre-token detection probe | — | **10 checks passed**, 0 failed | new |
 | INET driver parity | — | **15 passed**, 0 skipped | new |
 | CI database safety | — | **51 passed** | new |
 | `git diff --check` | clean | clean | — |
@@ -385,7 +387,7 @@ backend and the other half to another.
 ### E1 in detail
 
 ```
-collected=1487 passed=1487 failed=0 skipped=0 error=0 xfailed=0
+collected=1543 passed=1543 failed=0 skipped=0 error=0 xfailed=0
 ```
 
 (The suite needs its own disposable databases. `scripts/ci_bootstrap_postgres.sh`
@@ -722,15 +724,15 @@ What each job reported, read out of the job log:
 
 | Job | Command | Result |
 |---|---|---|
-| Test & Smoke (py3.11) | `pytest tests/` | `collected=1487 passed=1487 failed=0 skipped=0 error=0 xfailed=0` |
-| Test & Smoke (py3.12) | `pytest tests/` | `collected=1487 passed=1487 failed=0 skipped=0 error=0 xfailed=0` |
+| Test & Smoke (py3.11) | `pytest tests/` | `collected=1543 passed=1543 failed=0 skipped=0 error=0 xfailed=0` |
+| Test & Smoke (py3.12) | `pytest tests/` | `collected=1543 passed=1543 failed=0 skipped=0 error=0 xfailed=0` |
 | Test & Smoke (py3.11 / py3.12) | `scripts/m10_http_smoke.py` | `HTTP SMOKE: 79 passed, 0 failed` |
 | Frontend (unit & build) | `npm run test` | `Test Files 18 passed (18)` · `Tests 265 passed (265)` |
 | Frontend (real HTTP integration) | `npm run test:integration` | `Test Files 3 passed (3)` · `Tests 50 passed (50)` |
 | Browser E2E (real Chromium) | `bash scripts/e2e_run.sh --no-start` | `18 passed (43.8s)` |
 
 The zero-skip figure is the point of the whole exercise: the safety
-suite contributed 51 of those 1487 tests, and every one of them ran on
+suite contributed 51 of those 1543 tests, and every one of them ran on
 the runner — none of them skipped itself to make the build green.
 
 **What CI does NOT run.** Two of the numbers in this matrix are not CI
@@ -740,7 +742,7 @@ numbers, and they are labelled as such everywhere they appear:
 |---|---|---|
 | `scripts/demo_scenarios.py` (55 checks) | locally, against the demo stack | it is a DEMONSTRATION script; it drives the demo stack's own ports and its own database names, which the CI jobs do not provide |
 | `scripts/deploy_verify.py` (67 checks) | locally, against a disposable stack | it verifies the DEPLOYMENT scripts (`docker compose`, the volume lifecycle), which the CI runner does not execute |
-| `scripts/demo_pre_token_probe.py` (7 checks) | **both** — locally and in the `browser-e2e` job | it was added to CI in the M13.2 hardening round; see section 13 |
+| `scripts/demo_pre_token_probe.py` (10 checks) | **both** — locally and in the `browser-e2e` job | it was added to CI in the M13.2 hardening round; see section 13 |
 
 The `browser-e2e` job added the pre-token probe after the browser suite,
 so a regression in the gate fails the build even though no browser
@@ -810,15 +812,28 @@ tokens and OTP codes.
 | G10 | The engine is built from the validated URL OBJECT | the same | `test_the_url_function_returns_the_parsed_url_object`, `test_the_engine_is_built_from_the_validated_url_object` |
 | G11 | The driver agrees with the guard about the destination | `scripts/e2e_fixtures_guard.py` | `test_the_agreement_check_catches_a_moved_database`, `..._a_moved_host`, `..._a_host_address`, `..._a_service` |
 | G12 | The pre-token gate really decides the login, on the real stack | `scripts/demo_pre_token_probe.py` | the A/B comparison: the same risky login, the same databases, the same policy, the gate on and the gate off |
+| G13 | The probe refuses a target the hardened guard refuses | the same | `tests/test_pre_token_probe.py` — the query-move, the context, the host, the name and the write-declaration cases |
+| G14 | A refused target never reaches an engine, a backend or a row | the same | `test_a_refused_target_never_reaches_create_engine`, `test_a_refused_target_never_spawns_the_comparison_backend` |
+| G15 | The probe restores the ACTIVE SLOT it found — including "no policy" | the same | `test_the_other_policy_goes_back_into_service`, `test_no_policy_is_left_in_service_when_there_was_none`, `test_the_restore_does_not_touch_every_active_policy` |
+| G16 | A value the probe never read is never written | the same | `test_a_value_that_was_never_read_is_not_a_value`, `test_the_mfa_flag_is_not_written_without_a_snapshot` |
+| G17 | Every cleanup step is tried, and a cleanup failure fails the run | the same | `test_every_step_is_tried_even_when_the_first_one_fails`, `test_the_probe_returns_a_failure_when_the_cleanup_failed` |
+| G18 | The comparison backend's environment is assembled, not inherited | the same | `test_a_stray_variable_of_the_shell_is_not_inherited`, `test_only_the_allowlisted_variables_are_present` |
+| G19 | The comparison backend owns its port and its process | the same | `test_the_backend_is_started_on_an_ephemeral_port`, `test_the_backend_stops_only_its_own_process`, `test_the_probe_never_looks_a_process_up_by_port` |
+| G20 | The gated attempt really was scored by the demo policy | the same | the probe's own runtime checks: the policy version, the rules `impossible_travel` and `multiple_failures`, and the recorded decision |
 
 The suite that proves G1 to G11 is
 `tests/test_e2e_fixture_target_guard.py` — **111 tests**. It is
 independent of the five original layers in Area D: it proves that the
 layers agree with the DRIVER, not with each other.
 
-G12 is proved by `scripts/demo_pre_token_probe.py`. It is the only
-check that answers the question the demo actually needs answered —
-see section 13.2.
+The suite that proves G13 to G19 is
+`tests/test_pre_token_probe.py` — **56 tests**. It calls the REAL probe
+module and the REAL guard; it never mocks either, and it never opens a
+connection to a database it is not allowed to touch.
+
+G12 and G20 are proved by `scripts/demo_pre_token_probe.py` itself. G12
+is the only check that answers the question the demo actually needs
+answered — see section 13.2.
 
 ---
 
@@ -885,7 +900,7 @@ commit **`7ec6409`** (branch
 | Command | `python -m pytest tests/test_e2e_fixture_target_guard.py -q` |
 | Profile | the fixture-guard unit suite; no database of its own, except the positive control |
 | Result | **111 passed**, 0 failed, 0 skipped |
-| Evidence | CI run `46143555230`, job `Test & Smoke (py3.11)` and `(py3.12)` — the suite is part of `pytest tests/`, which reported `collected=1487 passed=1487 skipped=0` |
+| Evidence | CI run `46143555230`, job `Test & Smoke (py3.11)` and `(py3.12)` — the suite is part of `pytest tests/`, which reported `collected=1543 passed=1543 skipped=0` |
 
 The five mutations of the guard were each checked to be caught:
 
@@ -908,12 +923,12 @@ account. The ONLY variable is `RUN_PRE_TOKEN_CHECK`.
 
 | Item | Value |
 |---|---|
-| Source SHA | `7ec6409` (the head of the branch at the time of the run) |
+| Source SHA | the head of `feature/m13-browser-e2e` — see the delivery report |
 | Date run | 2026-11-28 |
 | Command | `python scripts/demo_pre_token_probe.py` |
 | Profile | the **local demo stack** (`.env.demo`, the `_demo` databases), the monolith with `DETECTION_URL` pointing at itself and `RUN_PRE_TOKEN_CHECK=1` |
-| Result | **7 checks passed**, 0 failed |
-| Evidence | the CI `browser-e2e` job runs the same probe against the `_ci_demo` databases, on the same stack the browser suite drives — run **`46143555230`**, 5 of 5 jobs green |
+| Result | **10 checks passed**, 0 failed |
+| Evidence | the CI `browser-e2e` job runs the same probe against the `_ci_demo` databases, on the same stack the browser suite drives |
 
 What the two runs showed:
 
@@ -930,10 +945,89 @@ protective_action:REVOKE_SESSIONS | system
    reason: detection risk_level=RiskLevel.CRITICAL decision=block
 ```
 
-The probe refuses to run against anything but a `_demo` database, and
-it restores everything it changed: the risky attempts it wrote are
-removed, the one-time MFA flag is put back the way it found it, and the
-policy in service is put back too.
+#### How the probe is guarded
+
+The probe uses **the same hardened guard** as the browser suite —
+`scripts/e2e_fixtures_guard.py` — and it does not write a guard of its
+own. Every database URL is validated **before** a connection is opened
+and **before** anything is mutated, and every engine is built from the
+URL *object* the guard returned, so the destination the guard approves
+is the destination the driver reaches.
+
+The five layers apply unchanged:
+
+| Layer | What the probe inherits |
+|---|---|
+| 1 — context | the URL must come from the context's OWN variable |
+| 2 — name allowlist | an EXACT match against `sentinel_*_demo` and `sentinel_*_ci_demo` — not a `_demo` suffix check |
+| 3 — no overlap | the `*_test` and the production names are refused outright |
+| 4 — loopback host | the server must be on `127.0.0.1`/`localhost`/`::1` |
+| 5 — explicit opt-in | the run must declare `E2E_ALLOW_WRITE_TO=<the exact database>` |
+
+A refusal is fatal and happens before anything else: **no engine is
+built, no backend is spawned and no row is written.** The refusal
+message never carries the password.
+
+The comparison backend receives the **validated** database URLs, and its
+environment is **assembled, not inherited**: it starts from a clean
+slate and takes only the variables on an explicit allowlist, from the
+demo environment file. A stray `RUN_PRE_TOKEN_CHECK`, `PGHOST`,
+`PGHOSTADDR`, `PGSERVICE` or `MFA_SMTP_PORT` in the operator's shell
+therefore cannot change what the comparison measures.
+
+#### What the probe owns, and what it restores
+
+| The probe owns | The probe restores it to |
+|---|---|
+| the seeded risky `login_attempts` rows | the rows it wrote are deleted, by `event_id` |
+| the one-time MFA flag of `demo_user` | the value it found — and **only** when it actually read it |
+| the ACTIVE SLOT of the policy table | the policy that was in service — **or** "no policy in service", when there was none |
+
+Two details matter:
+
+  * the ACTIVE SLOT is restored by moving **one** row, never by a
+    blanket `UPDATE policies SET is_active = FALSE WHERE is_active IS TRUE`;
+  * a value the probe never read is never written. The MFA flag
+    snapshot distinguishes "the flag was `False`" from "the flag was
+    never read", and the policy snapshot distinguishes "the demo policy
+    was in service" from "another policy was" from "**no** policy was".
+
+Every cleanup step runs in its own `try`, so a step that fails does not
+skip the steps that follow it. A cleanup failure is reported — with the
+credential redacted — and it makes the **overall run fail**.
+
+#### What the probe does NOT restore
+
+The probe does not claim to leave the stack untouched. The two logins
+are **real traffic**, and they leave real rows behind: the demo
+account's sessions, its MFA transactions, the `login_attempts` rows and
+the DETECTION alerts the two attempts raised all **remain**. The probe
+reports what it leaves behind, so the claim is never wider than the
+evidence.
+
+#### The scope of the A/B evidence
+
+The probe proves that the **pre-token gate** — the synchronous
+`POST /api/v1/internal/pre-token-check` call that happens BEFORE a
+token is issued — withholds the token on the real stack, with the real
+policy and the real HTTP boundary.
+
+It proves this by **reading the DETECTION evidence of both attempts**,
+not by the difference of the two responses alone: the probe checks that
+the gated attempt was scored by the demo policy, that the rules
+`impossible_travel` and `multiple_failures` fired, that a decision was
+recorded — and that the ungated attempt was scored by the **same**
+policy.
+
+Two limits are stated precisely:
+
+  * the risky history is **seeded** by the probe. The probe proves that
+    the gate holds a token back for an attempt whose history looks like
+    that. It does **not** claim that the history was produced by real
+    failed logins;
+  * the probe does **not** prove that a browser scenario does the same.
+    The browser suite never creates a risky login, so it exercises the
+    UI and the session mechanics, not the gate.
 
 #### What the CI run found — the probe was measuring the wrong thing
 
@@ -995,13 +1089,27 @@ browser suite drives.**
 [pre-token-probe] the login under test comes from 203.0.113.19 (never used before)
 [pre-token-probe] RUN 1 (the gate ON):  status=200 token=HELD   mfa_required=True
 [pre-token-probe] RUN 2 (the gate OFF): status=200 token=ISSUED mfa_required=False
-PRE-TOKEN PROBE: 7 passed, 0 failed
+PRE-TOKEN PROBE: 10 passed, 0 failed
 ```
 
 The probe also clears the login rate-limit counter of its own address.
 The browser suite logs in from the same loopback address and leaves the
 counter past its limit; a rate-limited probe would measure the limiter
 instead of the gate.
+
+#### The conditions that CI hit and a local run did not
+
+The two CI failures above were **not** reproducible on a local run as it
+stood, because the local stack did not carry the state CI carries: the
+browser suite had already activated a policy of its own, and the
+account's login history already held the loopback traffic. Those
+conditions **can** be reproduced locally — by activating another policy
+before the probe runs, and by letting the browser suite run first.
+
+The probe now covers both explicitly: the policy snapshot restores
+"another policy was in service" **and** "no policy was in service", and
+the address is picked from the account's real history, so a history that
+already knows the address does not fool the `impossible_travel` rule.
 
 #### What this does and does not prove
 
@@ -1014,12 +1122,55 @@ It does **not** prove that a browser scenario does the same: the
 browser suite never creates a risky login, so it exercises the UI and
 the session mechanics, not the gate.
 
-### 13.3 The other suites, and where they run
+### 13.3 The probe's guard, restoration and lifecycle
+
+The probe is the one script in the repository that writes to a demo
+database **and** starts a process. Both of those are now covered by a
+suite of their own.
+
+| Item | Value |
+|---|---|
+| Source SHA | the head of `feature/m13-browser-e2e` — see the delivery report |
+| Date run | 2026-11-28 |
+| Command | `python -m pytest tests/test_pre_token_probe.py -q` |
+| Profile | the fixture-guard unit suite; the REAL probe module and the REAL guard, never a mock of either |
+| Result | **56 passed**, 0 failed, 0 skipped |
+
+The four aspects it covers:
+
+| Aspect | What it proves |
+|---|---|
+| the guard integration | a target the hardened guard refuses — a query string that moves the database, a foreign host, a foreign context, a non-demo name, a missing write declaration — is refused **before** an engine is built, **before** a backend is spawned and **before** a row is touched |
+| the state restoration | the ACTIVE SLOT is restored in all three of its states, a value the probe never read is never written, and the restore moves **one** row instead of a blanket `UPDATE` |
+| the cleanup independence | every cleanup step is tried even when an earlier one fails, a cleanup failure fails the **overall** run, and the credential in the error is redacted |
+| the comparison backend's isolation | the environment is assembled from an allowlist rather than inherited, the backend owns an ephemeral port, and only the probe's **own** PID is ever stopped |
+
+The last one deserves a word, because it was the sharpest of the four.
+The old probe compared the gate against a second backend started on a
+**hard-coded port**, with `dict(os.environ)` as its environment. Two
+defects follow from that, and both are now closed:
+
+  * the hard-coded port could already be taken by something else, and
+    the probe could then have measured **that** server's `/health` as if
+    it were its own. The comparison backend is now started with
+    `--port 0`, so the operating system assigns an ephemeral port, and
+    the probe reads the **actual** port back from the Uvicorn startup
+    log. There is no window in which the port can change hands.
+  * the inherited environment carried whatever the operator's shell
+    happened to hold — a `RUN_PRE_TOKEN_CHECK=0` from a previous
+    experiment, a `MFA_SMTP_PORT` from another stack, a `PG*` variable
+    that moved the destination. The comparison environment is now
+    assembled explicitly: the allowlisted variables, the values from the
+    authorised configuration file, `RUN_PRE_TOKEN_CHECK=0` and
+    `RUN_LOGIN_EVENT_DELIVERY=1` forced, and **every** `PG*` variable
+    removed.
+
+### 13.4 The other suites, and where they run
 
 | Suite | Command | Result | Where it ran | Evidence |
 |---|---|---|---|---|
-| Backend regression | `pytest tests/` | 1487 passed, 0 skipped | CI + local | CI `46143555230` |
-| Destination guard | `pytest tests/test_e2e_fixture_target_guard.py -q` | 111 passed | CI + local | CI `46143555230` |
+| Backend regression | `pytest tests/` | 1543 passed, 0 skipped | CI + local | CI run mới nhất |
+| Destination guard | `pytest tests/test_e2e_fixture_target_guard.py -q` | 111 passed | CI + local | CI run mới nhất |
 | Full-system E2E (pre-token ON) | `pytest tests/test_full_system_e2e.py -q` | 6 passed | local (needs the `*_test` databases) | part of `pytest tests/` in CI |
 | Risk gate unit tests | `pytest tests/test_risk_gate.py -q` | 22 passed | local | part of `pytest tests/` in CI |
 | Frontend unit | `npm run test` | 265 passed | CI | CI `46143555230` |
@@ -1028,7 +1179,7 @@ the session mechanics, not the gate.
 | HTTP smoke | `scripts/m10_http_smoke.py` | 79 passed | CI | CI `46143555230` |
 | Demo scenarios | `python scripts/demo_scenarios.py --all` | 55 checks | **local only** | the script drives the demo stack's own ports and database names |
 | Deployment verification | `python scripts/deploy_verify.py` | 67 passed | **local only** | it verifies the `docker compose` deployment scripts, which CI does not execute |
-| Pre-token probe | `python scripts/demo_pre_token_probe.py` | 7 checks | local + CI (`browser-e2e`) | see 13.2 |
+| Pre-token probe | `python scripts/demo_pre_token_probe.py` | 10 checks | local + CI (`browser-e2e`) | see 13.2 |
 
 ---
 

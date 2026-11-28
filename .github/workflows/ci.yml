@@ -1492,9 +1492,17 @@ jobs:
       # The two runs share the databases, the policy and the seeded
       # history, so the gate is the only variable.
       #
-      # The probe refuses to run against anything but a `_demo` database.
+      # The probe uses the SAME hardened guard as the browser suite
+      # (`scripts/e2e_fixtures_guard.py`): it validates every database
+      # URL before it opens a connection, and it refuses a target whose
+      # query string, host or context could move the destination.  The
+      # write declaration is the one the browser suite already made —
+      # the two suites touch the same two disposable demo databases, and
+      # the declaration names them BY NAME.
       # -------------------------------------------------------------------
       - name: Prove the pre-token detection gate decides the login
+        env:
+          E2E_ALLOW_WRITE_TO: ${{ env.DEMO_CORE_DB }} ${{ env.DEMO_DETECTION_DB }}
         run: |
           set -euo pipefail
           set -a

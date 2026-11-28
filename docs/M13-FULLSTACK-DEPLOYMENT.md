@@ -236,6 +236,7 @@ The full template is `.env.demo.example`. The settings that matter most:
 | `APP_HOST`, `APP_PORT` | where the monolith listens |
 | `RUN_PRE_TOKEN_CHECK` | the pre-token risk gate; `1` is safe in the demo |
 | `RUN_LOGIN_EVENT_DELIVERY` | Core → Detection login-event delivery |
+| `E2E_ALLOW_WRITE_TO` | the write DECLARATION for the E2E fixtures and the probe. Its value is a space-separated list of database NAMES. It is not part of the stack's own configuration — it belongs to the RUN, and it is what the hardened guard (`scripts/e2e_fixtures_guard.py`) checks before it opens a connection |
 | `ML_MODEL_PATH` | stays **empty**; see below |
 
 ### The frontend
@@ -376,7 +377,18 @@ python scripts/demo_seed_demo.py --seed --manifest-out .ci/demo/fixture-manifest
 python scripts/demo_scenarios.py --all
 
 # 4. the pre-token detection gate, on the real stack
+#
+# The probe WRITES: it seeds a risky history, it activates the demo
+# policy and it makes two real logins.  The hardened guard therefore
+# refuses to run unless the run DECLARES the exact databases it may
+# write to.  The declaration names them BY NAME — a generic "true"
+# authorises nothing.
+#
+#   E2E_ALLOW_WRITE_TO="sentinel_core_demo sentinel_detection_demo"
+#
+export E2E_ALLOW_WRITE_TO="sentinel_core_demo sentinel_detection_demo"
 python scripts/demo_pre_token_probe.py
+unset E2E_ALLOW_WRITE_TO
 
 # 5. the browser acceptance suite
 bash scripts/e2e_run.sh
@@ -431,6 +443,8 @@ protection.
 | a test answers `401` right after a successful login | the shell is talking to a DIFFERENT backend than the one that issued the token | check the port: the demo API is `58000`, and `M12_API_ORIGIN` / `M12_API_ROOT` must AGREE with each other and with the backend that is actually running |
 | `psycopg2.errors.OperationalError: ... connection refused` | the shell's `CORE_DATABASE_URL` points at another stack's PostgreSQL | the demo's PostgreSQL is on `55432`; the canonical deployment uses a different port |
 | the run is green but the demo shows old data | the fixtures were seeded before the scenario that changed them | `python scripts/demo_seed_demo.py --seed` is idempotent and re-arms the one-time MFA flag |
+| the pre-token probe exits with "the probe refuses to run against this target — [permission]" | the run has not declared that it may write. The guard reads the declaration from `E2E_ALLOW_WRITE_TO`, and the value must NAME the exact databases | `export E2E_ALLOW_WRITE_TO="sentinel_core_demo sentinel_detection_demo"`. A generic `"true"` authorises nothing — see section 10.4 |
+| the pre-token probe exits with "the probe refuses to run against this target — [libpq]" | a libpq variable in the shell (`PGHOSTADDR`, `PGSERVICE`, `PGDATABASE`, ...) could move the destination of a connection the guard approved | `unset PGHOSTADDR PGSERVICE PGSERVICEFILE PGHOST PGPORT PGDATABASE PGUSER` before the run. The probe shows the guard the REAL libpq environment on purpose — hiding it would hide it from the driver too |
 | the pre-token probe reports `token=ISSUED` for the gated run, while a manual risky login is held | the policy in service is not the demo's own. Only ONE policy may be active, and the browser scenario E2E-05 activates one of its own, which deactivates the demo's | the probe puts the demo policy back in service by itself and restores the previous one afterwards. If you run the scoring by hand, check `SELECT version FROM policies WHERE is_active IS TRUE` |
 | the pre-token probe reports `token=ISSUED` for the gated run, and the policy is the demo's own | the login address is not NEW. `impossible_travel` measures the NOVELTY of the address — `1 - (attempts from this IP) / (attempts in the last 7 days)` — so an address the account has used before scores below the threshold | the probe picks a fresh address out of the account's own history and prints it: `the login under test comes from 203.0.113.19 (never used before)`. A different address on every run is the correct behaviour, not a defect |
 
