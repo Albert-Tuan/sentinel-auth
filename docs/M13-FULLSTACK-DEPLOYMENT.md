@@ -67,6 +67,27 @@ three-database topology".
 | Node.js 18+ | the frontend |
 | `psql` | optional; the stack reports the database state without it |
 
+Install the dependencies **before** the first start. The stack starts the
+Vite dev server from `frontend/node_modules/.bin/vite`; without the
+frontend dependencies the start fails with
+
+```
+setsid: failed to execute ./node_modules/.bin/vite: No such file or directory
+```
+
+```bash
+python3 -m venv .venv && . .venv/bin/activate
+pip install -r requirements.txt
+
+cd frontend && npm ci && cd ..
+```
+
+The browser suite needs Chromium as well:
+
+```bash
+cd frontend && npx playwright install chromium && cd ..
+```
+
 ### 2.2 Create the environment file
 
 ```bash
@@ -82,6 +103,16 @@ python3 -c "import secrets; print(secrets.token_urlsafe(16))"   # POSTGRES_PASSW
 ```
 
 `.env.demo` is gitignored. `.env.demo.example` holds placeholders only.
+
+> **The environment FILE is the authority.** `scripts/demo_seed_demo.py`,
+> `scripts/demo_scenarios.py` and `scripts/demo_pre_token_probe.py` read
+> `.env.demo` themselves, and the file **wins** over the shell. A shell
+> that still carries another stack's `CORE_DATABASE_URL`,
+> `DETECTION_DATABASE_URL`, `ML_DATABASE_URL`, `INTERNAL_SECRET` or
+> `CORE_APP_URL` therefore cannot redirect the fixtures, the scenarios or
+> the probe into a different stack — and it cannot send the scenarios to
+> a hard-coded port either. The scripts fall back to the shell only for
+> a variable the file does not answer.
 
 ### 2.3 Start the stack
 
@@ -110,6 +141,14 @@ scripts/demo_seed_demo.py --seed
 
 See [M13-DEMO-FIXTURES.md](M13-DEMO-FIXTURES.md) for the details.
 
+The seed reads `.env.demo` by itself, so **no `export` and no `source`
+is needed**. The line it prints names the three databases it is about to
+write to — read it before you go on:
+
+```
+[demo-seed] the targets are 'sentinel_core_demo', 'sentinel_detection_demo', 'sentinel_ml_demo'
+```
+
 ### 2.5 Run the scenarios
 
 ```bash
@@ -117,6 +156,20 @@ scripts/demo_scenarios.py --all
 ```
 
 See [M13-DEMO-SCENARIOS.md](M13-DEMO-SCENARIOS.md) for the details.
+
+The scenario script reads the API address from `.env.demo`
+(`CORE_APP_URL`) by itself, so it talks to the stack that `.env.demo`
+describes — never to a hard-coded port.
+
+### 2.6 Run the acceptance checks
+
+```bash
+scripts/demo_stack.sh verify
+```
+
+`verify` runs the demo scenarios against the running stack and reports
+the same 55 checks. It reads the environment file, so it needs no
+`export` either.
 
 ---
 
@@ -128,7 +181,7 @@ See [M13-DEMO-SCENARIOS.md](M13-DEMO-SCENARIOS.md) for the details.
 | `stop` | stop everything — **the demo volumes are kept** |
 | `restart` | stop and start again; the data must survive |
 | `status` | show what is running and the real state of Core, Detection and ML |
-| `verify` | run the demo acceptance checks |
+| `verify` | run the demo acceptance checks (the 55 demo scenarios) |
 | `logs` | tail the API log |
 | `logs-all` | show the tail of every component log |
 | `reset` | stop and **destroy** the demo volumes — it asks for a typed confirmation first |
@@ -236,6 +289,7 @@ The full template is `.env.demo.example`. The settings that matter most:
 | `APP_HOST`, `APP_PORT` | where the monolith listens |
 | `RUN_PRE_TOKEN_CHECK` | the pre-token risk gate; `1` is safe in the demo |
 | `RUN_LOGIN_EVENT_DELIVERY` | Core → Detection login-event delivery |
+| `E2E_ALLOW_WRITE_TO` | the write DECLARATION for the E2E fixtures and the probe. Its value is a space-separated list of database NAMES. It is not part of the stack's own configuration — it belongs to the RUN, and it is what the hardened guard (`scripts/e2e_fixtures_guard.py`) checks before it opens a connection |
 | `ML_MODEL_PATH` | stays **empty**; see below |
 
 ### The frontend
@@ -284,7 +338,230 @@ frontend must show "no data" for the ML score there, never a zero.
 
 ---
 
-## 10. Troubleshooting
+## 10. Running the demo from a CLEAN CLONE
+
+This section is the whole handover: everything a second team member has
+to do, in order, on a machine that has never seen the project.
+
+### 10.1 Which branch or commit to take
+
+While PR #21 and PR #22 are both open, the two branches have to be
+taken **in order** — PR #22 is stacked on PR #21, so it does not contain
+the demo foundation.
+
+| What you want | What you take |
+|---|---|
+| the **demo foundation only** | `feature/m13-demo-foundation` (PR #21, head `dd352791807bcd1b9586220269d6b369b24840a3`) |
+| the **complete M13**, which is what the demo and the browser E2E need | `feature/m13-browser-e2e` (PR #22, head `2e3280dbf89472bb8c655a79ab758d9ee4802677`) |
+| the exact state the acceptance matrix reports | commit `2e3280dbf89472bb8c655a79ab758d9ee4802677` |
+
+`feature/m13-browser-e2e` already contains everything
+`feature/m13-demo-foundation` has — its merge-base with that branch IS
+its head — so **taking PR #22's branch alone is enough** for a demo.
+
+```bash
+git clone https://github.com/Albert-Tuan/sentinel-auth.git
+cd sentinel-auth
+git checkout feature/m13-browser-e2e
+git log --oneline -1          # expect 2e3280d
+```
+
+To reproduce the figures of the acceptance matrix exactly, check the
+commit out rather than the branch tip:
+
+```bash
+git checkout 2e3280dbf89472bb8c655a79ab758d9ee4802677
+```
+
+### 10.2 The dependencies that were verified
+
+| Dependency | Verified version | Notes |
+|---|---|---|
+| Python | 3.11 and 3.12 | CI runs the backend suite on BOTH |
+| Node.js | 20 and 24 | CI runs the frontend on 24; the repository's `engines` allows 18+ |
+| PostgreSQL | 16 | the compose overlay; `postgres:16-alpine` is the CI image |
+| Redis | 7 | the compose overlay |
+| SQLAlchemy | `>=2.0.0,<2.1.0` | **pinned on purpose** — see defect 20 in the matrix |
+| psycopg2 | from `requirements.txt` | the driver the CI URLs spell explicitly |
+| Docker or Podman | any recent | rootless is supported |
+
+```bash
+python3 -m venv .venv && . .venv/bin/activate
+pip install -r requirements.txt
+
+cd frontend && npm ci && cd ..
+```
+
+The browser suite needs Chromium as well:
+
+```bash
+cd frontend && npx playwright install chromium && cd ..
+```
+
+### 10.3 The environment file
+
+```bash
+cp .env.demo.example .env.demo
+```
+
+Then generate **your own** secrets — never reuse a value from another
+machine, and never commit the file:
+
+```bash
+python3 -c "import secrets; print(secrets.token_urlsafe(32))"   # INTERNAL_SECRET
+python3 -c "import secrets; print(secrets.token_urlsafe(16))"   # POSTGRES_PASSWORD
+```
+
+`.env.demo` is gitignored; `.env.demo.example` holds placeholders only.
+The stack refuses to start if `INTERNAL_SECRET` is shorter than 32
+characters or still holds the placeholder.
+
+### 10.4 The whole sequence
+
+```bash
+# 1. bring the stack up (PostgreSQL, Redis, the SMTP sink, the API, Vite)
+bash scripts/demo_stack.sh start
+bash scripts/demo_stack.sh status
+
+# 2. seed the fixtures into the demo databases
+python scripts/demo_seed_demo.py --seed --manifest-out .ci/demo/fixture-manifest.json
+
+# 3. the six demonstration scenarios
+python scripts/demo_scenarios.py --all
+
+# 4. the pre-token detection gate, on the real stack
+#
+# The probe WRITES: it seeds a risky history, it activates the demo
+# policy and it makes two real logins.  The hardened guard therefore
+# refuses to run unless the run DECLARES the exact databases it may
+# write to.  The declaration names them BY NAME — a generic "true"
+# authorises nothing.
+#
+#   E2E_ALLOW_WRITE_TO="sentinel_core_demo sentinel_detection_demo"
+#
+export E2E_ALLOW_WRITE_TO="sentinel_core_demo sentinel_detection_demo"
+python scripts/demo_pre_token_probe.py
+unset E2E_ALLOW_WRITE_TO
+
+# 5. the browser acceptance suite
+bash scripts/e2e_run.sh
+
+# 6. the deployment verification (needs Docker)
+python scripts/deploy_verify.py
+```
+
+The scripts are invoked through `bash` and `python` because the
+repository does not track the executable bit on every file.
+
+#### The order the probe and the browser suite run in
+
+The order above is **browser suite first, probe second**, and the order
+is not cosmetic: the browser suite activates a policy of its own in
+E2E-05, which — by the partial unique index — deactivates the demo's
+policy.  The probe puts the demo policy back in service by itself, so
+either order measures the gate correctly.  What the order does change
+is the state each step inherits:
+
+| Order | What the next step inherits |
+|---|---|
+| browser → probe | the browser suite's loopback traffic in the account's login history, and a policy of the browser suite's own in the active slot |
+| probe → browser | the probe's two real logins, and the demo policy back in the active slot (the probe restores it) |
+
+Both orders have been **run and verified**, on one disposable stack
+with no database reset in between:
+
+| Sequence | Result |
+|---|---|
+| browser → probe → browser → probe | 18 passed · 13 checks · 18 passed · 13 checks, **0 flaky / 0 retry** |
+| probe → full browser suite | 18 passed, 0 skipped |
+
+Two properties make the repeat cycle stable, and both are properties of
+the **probe**, not of the operator's habits:
+
+  * the probe picks a login address the account has **never used** —
+    `impossible_travel` measures the NOVELTY of the address, so a
+    fixed address would fail on the second run because the first run's
+    own attempt had made it known;
+  * the probe restores the one-time MFA flag to the value it FOUND, so
+    the next login is not held for an MFA challenge that nothing asked
+    for.  The measurement on the disposable stack after the fix:
+    `demo_user|f`.
+
+The probe does **not** undo everything — that is deliberate and it is
+reported in the run's own output.  The two logins are real traffic, so
+the account's sessions, its MFA transactions, its `login_attempts` rows
+and the DETECTION alerts remain.  At `critical`, the application's own
+risk-action map sends `REVOKE_SESSIONS`, so the demo account's active
+sessions are revoked — a **legitimate protective action**, not a leak.
+
+If you want the two suites to share NOTHING, point them at different
+databases instead of resetting: the `_demo` stack for the browser suite
+and the `_ci_demo` stack for the probe.  Do **not** reset the database
+between the runs — a reset would hide exactly the state leak the repeat
+cycle is there to catch.
+
+### 10.5 Stopping, restarting, and the destructive reset
+
+| Command | Effect | Data |
+|---|---|---|
+| `bash scripts/demo_stack.sh stop` | stops every process | **kept** |
+| `bash scripts/demo_stack.sh restart` | stops and starts again | **kept** — the row counts must be identical before and after |
+| `bash scripts/demo_stack.sh status` | shows what runs and the real database state | — |
+| `bash scripts/demo_stack.sh reset` | **destroys the demo volumes** | **lost** |
+
+`reset` is the ONLY destructive command, and it asks for a typed
+confirmation first:
+
+```
+This script DROPS and RECREATES the following databases:
+  - sentinel_core_demo
+  - sentinel_detection_demo
+  - sentinel_ml_demo
+
+Type the three names above, separated by spaces, to proceed:
+```
+
+Use it only when the demo's state has drifted and a fresh start is
+wanted. It never touches the canonical deployment's `.env`, its ports
+or its databases — the demo has its own.
+
+### 10.6 The failure modes that were actually hit
+
+These are the failures that cost time during the M13.2 work. Each one
+has a symptom you can recognise and a fix that does not weaken the
+protection.
+
+| Symptom | Cause | Fix |
+|---|---|---|
+| `setsid: failed to execute ./node_modules/.bin/vite: No such file or directory` | the frontend dependencies were never installed in this checkout | `cd frontend && npm ci && cd ..` — see section 2.1 |
+| `python3: can't open file '.../scripts/demo_verify.py': No such file or directory` | **fixed in M13.3** — the command pointed at a script that never existed | `scripts/demo_stack.sh verify` now runs the demo scenarios, which are the demo's acceptance checks |
+| the shell's `INTERNAL_SECRET` differs from the one in `.env.demo`, and the internal boundary answers `401` | an exported variable shadows the file | **fixed in M13.3**: the scenario script reads the secret from `.env.demo` itself, and the file wins. Nothing to export |
+| "No captured OTP found for … in …" | the SMTP sink is not on the port the API sends to, or writes to another file | the port and the log path must agree with `MFA_SMTP_PORT` / `MFA_SMTP_LOG`. `scripts/demo_stack.sh` writes the absolute path into `.ci/demo/otp-log.path`; the API and the reader must both use it |
+| the scenario reports "the one-time MFA gate could not be changed" | `CORE_DATABASE_URL` is not set in `.env.demo` | **fixed in M13.3**: the scenario script reads the URL from `.env.demo` itself. Check that the file names the demo databases |
+| the scenario finds no alerts | the fixtures were not seeded into the DETECTION database | `python scripts/demo_seed_demo.py --seed` — the seed writes to all three databases |
+| the login answers `429 Too many requests` | the login rate limit is 5 per minute and per IP; the accumulated login attempts of earlier runs fill the window | wait for the window to reopen. `scripts/demo_scenarios.py` retries by itself; a hand-written script has to |
+| the login answers `mfa_required: true` for an account that is NOT `demo_admin` | the DETECTION engine scored the login as risky and the pre-token gate held the token — this is the CORRECT behaviour, not a misconfiguration | see section 9. To get a clean run, re-seed the fixtures: `python scripts/demo_seed_demo.py --seed` resets the one-time MFA flag |
+| the alerts are seeded but the pipeline does not run | the seeded alerts are for the INTERFACE. A pipeline claim needs a REAL login event | run `python scripts/demo_pre_token_probe.py` — it makes a real risky login and shows the Detection verdict |
+| a test answers `401` right after a successful login | the shell is talking to a DIFFERENT backend than the one that issued the token | check the port: the demo API is `58000`, and `M12_API_ORIGIN` / `M12_API_ROOT` must AGREE with each other and with the backend that is actually running |
+| `psycopg2.errors.OperationalError: ... connection refused` | the shell's `CORE_DATABASE_URL` points at another stack's PostgreSQL | the demo's PostgreSQL is on `55432`; the canonical deployment uses a different port |
+| the run is green but the demo shows old data | the fixtures were seeded before the scenario that changed them | `python scripts/demo_seed_demo.py --seed` is idempotent and re-arms the one-time MFA flag |
+| the pre-token probe exits with "the probe refuses to run against this target — [permission]" | the run has not declared that it may write. The guard reads the declaration from `E2E_ALLOW_WRITE_TO`, and the value must NAME the exact databases | `export E2E_ALLOW_WRITE_TO="sentinel_core_demo sentinel_detection_demo"`. A generic `"true"` authorises nothing — see section 10.4 |
+| the pre-token probe exits with "the probe refuses to run against this target — [libpq]" | a libpq variable in the shell (`PGHOSTADDR`, `PGSERVICE`, `PGDATABASE`, ...) could move the destination of a connection the guard approved | `unset PGHOSTADDR PGSERVICE PGSERVICEFILE PGHOST PGPORT PGDATABASE PGUSER` before the run. The probe shows the guard the REAL libpq environment on purpose — hiding it would hide it from the driver too |
+| the pre-token probe reports `token=ISSUED` for the gated run, while a manual risky login is held | the policy in service is not the demo's own. Only ONE policy may be active, and the browser scenario E2E-05 activates one of its own, which deactivates the demo's | the probe puts the demo policy back in service by itself and restores the previous one afterwards. If you run the scoring by hand, check `SELECT version FROM policies WHERE is_active IS TRUE` |
+| the pre-token probe reports `token=ISSUED` for the gated run, and the policy is the demo's own | the login address is not NEW. `impossible_travel` measures the NOVELTY of the address — `1 - (attempts from this IP) / (attempts in the last 7 days)` — so an address the account has used before scores below the threshold | the probe picks a fresh address out of the account's own history and prints it: `the login under test comes from 203.0.113.19 (never used before)`. A different address on every run is the correct behaviour, not a defect |
+| the pre-token probe exits with "no scored login attempt of … appeared within 30 seconds" | the DETECTION side of a login is ASYNCHRONOUS, and the attempt was never scored — the login event was not delivered, or the scoring failed | the probe now WAITS for the evidence with a deadline instead of reading whatever row happens to be newest. Check that the API's `DETECTION_URL` points at a running Detection service and that `/api/v1/internal/login-events` returns `202`. Do NOT raise the deadline to hide it — the deadline is what makes the failure legible |
+| the pre-token probe exits with "the one-time MFA flag of … could not be cleared before the second run" | the flag could not be read or written before RUN 2, so the second run would have been held by the FLAG rather than by the gate | the probe stops there on purpose: it refuses to measure something it cannot attribute. The cleanup restores the ORIGINAL snapshot. Re-seed the fixtures (`python scripts/demo_seed_demo.py --seed`) and run again |
+| the browser suite asks for an MFA challenge right after a probe run | the probe left the one-time MFA flag set. On the FIXED code this cannot happen — the snapshot is restored to the value the probe found | on the OLD code (`9c7456f`) it did happen: the snapshot was overwritten. If you see it, check `SELECT detection_mfa_once FROM users WHERE username='demo_user'` — the fixed probe leaves it `false`. See `docs/M13-ACCEPTANCE-MATRIX.md` section 14.4 |
+
+**Do not work around a failure by disabling the detection.** Turning
+`RUN_PRE_TOKEN_CHECK=0` makes the login succeed, and the demo then
+shows a system that does not do what it claims to do. The scenarios
+that need a quiet login can use an account the policy does not score as
+risky.
+
+---
+
+## 11. Troubleshooting
 
 | Symptom | Cause | Fix |
 |---|---|---|
@@ -293,11 +570,12 @@ frontend must show "no data" for the ML score there, never a zero.
 | `port 58000 is already in use` | another process holds the port | stop it, or change `APP_PORT` |
 | `the SMTP sink did not start` | the sink could not bind | check `smtp.log` and `MFA_SMTP_PORT` |
 | `the API did not become ready` | the monolith failed to boot | check `api.log` |
+| `setsid: failed to execute ./node_modules/.bin/vite: No such file or directory` | the frontend dependencies were never installed in this checkout | `cd frontend && npm ci && cd ..` — see section 2.1 |
 | `Permission denied` during the PostgreSQL init | a SELinux labelling problem | see section 5; the staging handles it |
 
 ---
 
-## 11. Related documents
+## 12. Related documents
 
 * [M13-DEMO-FIXTURES.md](M13-DEMO-FIXTURES.md) — the reproducible fixtures
 * [M13-DEMO-SCENARIOS.md](M13-DEMO-SCENARIOS.md) — the six demo scenarios

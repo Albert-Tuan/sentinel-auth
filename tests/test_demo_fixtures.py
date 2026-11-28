@@ -193,11 +193,30 @@ requires_demo_databases = pytest.mark.skipif(
 
 
 def _run_seed(*args: str) -> subprocess.CompletedProcess:
-    """Run the seed script against the demo databases."""
+    """Run the seed script against the demo databases.
+
+    The seed reads the demo environment FILE, and the file wins over the
+    shell — that is the rule that keeps a stale exported variable from
+    sending the fixtures into another stack's databases.  The harness
+    therefore writes the three URLs into a throw-away environment file
+    and points the seed at it, rather than relying on exported
+    variables alone.
+    """
     env = dict(os.environ)
     env["CORE_DATABASE_URL"] = DEMO_URLS["core"]
     env["DETECTION_DATABASE_URL"] = DEMO_URLS["detection"]
     env["ML_DATABASE_URL"] = DEMO_URLS["ml"]
+
+    env_file = REPO_ROOT / ".ci" / "test-demo-fixtures.env"
+    env_file.parent.mkdir(parents=True, exist_ok=True)
+    env_file.write_text(
+        f"CORE_DATABASE_URL={DEMO_URLS['core']}\n"
+        f"DETECTION_DATABASE_URL={DEMO_URLS['detection']}\n"
+        f"ML_DATABASE_URL={DEMO_URLS['ml']}\n",
+        encoding="utf-8",
+    )
+    env["DEMO_ENV_FILE"] = str(env_file)
+
     return subprocess.run(
         [sys.executable, str(SCRIPTS_DIR / "demo_seed_demo.py"), *args],
         cwd=REPO_ROOT,

@@ -88,6 +88,74 @@ def _default_otp_log() -> str:
 DEFAULT_BASE_URL = "http://127.0.0.1:58000"
 DEFAULT_OTP_LOG = REPO_ROOT / ".ci" / "demo" / "demo-otp.log"
 DEFAULT_MANIFEST = REPO_ROOT / ".ci" / "demo" / "fixture-manifest.json"
+
+
+def _demo_env_file() -> Path:
+    """The demo environment file the demo stack reads."""
+    return Path(
+        os.environ.get("DEMO_ENV_FILE", str(REPO_ROOT / ".env.demo"))
+    ).expanduser()
+
+
+def _demo_env_values() -> Dict[str, str]:
+    """Read the demo environment file, the way the demo stack reads it.
+
+    The scenario script must talk to the SAME stack the demo does.  A
+    shell that still carries another stack's variables MUST NOT decide
+    the address, so the FILE is the authority and the shell only fills
+    the gaps.
+    """
+    path = _demo_env_file()
+    if not path.is_file():
+        return {}
+    values: Dict[str, str] = {}
+    try:
+        raw = path.read_text(encoding="utf-8")
+    except OSError:
+        return {}
+    for line in raw.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        values[key.strip()] = value.strip()
+    return values
+
+
+def _default_base_url() -> str:
+    """The base URL of the demo stack that is actually running.
+
+    The demo stack's address lives in ``CORE_APP_URL`` (and the
+    ``APP_HOST``/``APP_PORT`` pair it is built from) inside the demo
+    environment file.  A hard-coded port would send the scenarios to a
+    DIFFERENT stack whenever the demo runs on non-default ports — which
+    is exactly what a disposable rehearsal does.
+    """
+    env = _demo_env_values()
+    explicit = (env.get("CORE_APP_URL") or "").strip()
+    if explicit:
+        return explicit.rstrip("/")
+    host = (env.get("APP_HOST") or "").strip()
+    port = (env.get("APP_PORT") or "").strip()
+    if host and port:
+        return f"http://{host}:{port}"
+    return DEFAULT_BASE_URL
+
+
+def _demo_database_url(name: str) -> str:
+    """Return one demo connection URL.
+
+    The demo environment FILE is the authority; the shell only fills a
+    gap the file does not answer.  The file always wins, so a stale
+    exported variable can never make the scenarios write into another
+    stack's databases.
+    """
+    value = (_demo_env_values().get(name) or "").strip()
+    if not value:
+        value = os.environ.get(name, "").strip()
+    return value
+
+
 DEMO_PASSWORD_ENV = {
     "user": "DEMO_USER_PASSWORD",
     "analyst": "DEMO_ANALYST_PASSWORD",
@@ -432,7 +500,7 @@ class Context:
         except ImportError:  # pragma: no cover - SQLAlchemy is a hard dependency
             return False
 
-        url = os.environ.get("DETECTION_DATABASE_URL", "").strip()
+        url = _demo_database_url("DETECTION_DATABASE_URL")
         if not url:
             self.report.info(
                 "DETECTION_DATABASE_URL is not set; the 502 case cannot be prepared"
@@ -495,7 +563,7 @@ class Context:
         Only the STATUS of ONE row of the detection context is written.
         The alert keeps its evidence, its timeline and its assignment.
         """
-        url = os.environ.get("DETECTION_DATABASE_URL", "").strip()
+        url = _demo_database_url("DETECTION_DATABASE_URL")
         if not url:
             self.report.info(
                 "DETECTION_DATABASE_URL is not set; the alert status cannot be reset"
@@ -563,7 +631,7 @@ class Context:
 
     def _write_detection_mfa(self, user_id: str, armed: bool) -> None:
         """Set or clear the one-time MFA gate of an account."""
-        url = os.environ.get("CORE_DATABASE_URL", "").strip()
+        url = _demo_database_url("CORE_DATABASE_URL")
         if not url:
             self.report.info(
                 "CORE_DATABASE_URL is not set; the one-time MFA gate cannot be changed"
@@ -597,8 +665,15 @@ class Context:
         The internal endpoints are guarded by the shared secret rather
         than by a bearer token: they are the boundary BETWEEN the bounded
         contexts, and a user token must not be able to cross it.
+
+        The demo environment FILE is the authority for the secret: the
+        shell only fills a gap the file does not answer.  A stale
+        exported secret would otherwise make the boundary answer 401 for
+        a stack whose secret is different.
         """
-        secret = os.environ.get("INTERNAL_SECRET", "").strip()
+        secret = _demo_env_values().get("INTERNAL_SECRET", "").strip()
+        if not secret:
+            secret = os.environ.get("INTERNAL_SECRET", "").strip()
         if not secret:
             return {}
         return {"X-Internal-Secret": secret}
@@ -1637,7 +1712,7 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--base-url",
-        default=os.environ.get("DEMO_API_BASE_URL", DEFAULT_BASE_URL),
+        default=os.environ.get("DEMO_API_BASE_URL") or _default_base_url(),
         help="the base URL of the demo API (default: %(default)s)",
     )
     parser.add_argument(

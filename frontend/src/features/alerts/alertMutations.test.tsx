@@ -218,9 +218,20 @@ describe('S-21 Alert mutations', () => {
     )
 
     const dialog = await screen.findByRole('dialog')
-    await userEvent.click(
-      within(dialog).getByRole('button', { name: /chạy hành động/i }),
+
+    // The backend REQUIRES a reason (`AlertActionRequest.reason` is
+    // `Field(..., min_length=1)`), so the dialog refuses to send the
+    // action without one.
+    const confirm = within(dialog).getByRole('button', { name: /chạy hành động/i })
+    expect(confirm).toBeDisabled()
+
+    await userEvent.type(
+      within(dialog).getByLabelText(/lý do/i),
+      'Hành động bảo vệ tự động',
     )
+    expect(confirm).toBeEnabled()
+
+    await userEvent.click(confirm)
 
     // A 502 means the action was NOT applied. The UI must say so
     // explicitly — it must never look like a success.

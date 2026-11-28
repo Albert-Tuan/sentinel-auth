@@ -106,6 +106,50 @@ def fixture_id(kind: str, key: str) -> str:
     return str(uuid.uuid5(FIXTURE_NAMESPACE, f"{kind}:{key}"))
 
 
+def _demo_env_values() -> Dict[str, str]:
+    """Read the demo environment file, the way the demo stack reads it.
+
+    ``.env.demo`` is the single authority for the demo configuration.  A
+    shell that still carries another stack's variables MUST NOT win here:
+    the seed has to write into the SAME databases the demo stack serves,
+    or the fixtures land in a stack nobody is looking at.
+    """
+    env_file = os.environ.get("DEMO_ENV_FILE", str(REPO_ROOT / ".env.demo"))
+    path = Path(env_file).expanduser()
+    if not path.is_file():
+        return {}
+    values: Dict[str, str] = {}
+    try:
+        raw = path.read_text(encoding="utf-8")
+    except OSError:
+        return {}
+    for line in raw.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        values[key.strip()] = value.strip()
+    return values
+
+
+def demo_database_urls() -> Tuple[str, str, str]:
+    """Return the three demo connection URLs.
+
+    The demo environment FILE is the authority; the shell only fills a
+    gap the file does not answer.  The file always wins, so a stale
+    exported variable can never redirect the fixtures into another
+    stack's databases.
+    """
+    file_values = _demo_env_values()
+    resolved = []
+    for name in ("CORE_DATABASE_URL", "DETECTION_DATABASE_URL", "ML_DATABASE_URL"):
+        value = (file_values.get(name) or "").strip()
+        if not value:
+            value = os.environ.get(name, "").strip()
+        resolved.append(value)
+    return resolved[0], resolved[1], resolved[2]
+
+
 def assert_demo_database(database_url: str) -> str:
     """Refuse to run against a database that is not a demo database.
 
@@ -1156,9 +1200,7 @@ def main() -> int:
     from sqlalchemy import create_engine
     from sqlalchemy.orm import sessionmaker
 
-    core_url = os.environ.get("CORE_DATABASE_URL", "")
-    detection_url = os.environ.get("DETECTION_DATABASE_URL", "")
-    ml_url = os.environ.get("ML_DATABASE_URL", "")
+    core_url, detection_url, ml_url = demo_database_urls()
 
     # The guards run BEFORE the engines are created: nothing connects, and
     # nothing can be written or deleted, until every target is proven to be

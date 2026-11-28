@@ -205,8 +205,24 @@ async def list_trusted_devices(
         UserTrustedDevice.user_id == ctx.user.id
     ).order_by(UserTrustedDevice.last_used_at.desc()).all()
 
+    # The `last_ip` is normalised to text HERE as well, not only by the
+    # column type.  The value reaches the model through `vars(d)`, which
+    # copies whatever the driver produced, and the item declares
+    # `last_ip: Optional[str]` - so a driver that hands back an
+    # `ipaddress.IPv4Address` would otherwise fail validation and turn
+    # this list into a 500.  The endpoint must be able to show the
+    # devices of a user, whatever the driver does.
     return TrustedDeviceList(
-        devices=[TrustedDeviceItem.model_validate({**vars(d), "id": str(d.id)}) for d in devices],
+        devices=[
+            TrustedDeviceItem.model_validate(
+                {
+                    **vars(d),
+                    "id": str(d.id),
+                    "last_ip": str(d.last_ip) if d.last_ip is not None else None,
+                }
+            )
+            for d in devices
+        ],
         total=len(devices),
     )
 

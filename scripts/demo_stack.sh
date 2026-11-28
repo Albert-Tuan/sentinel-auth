@@ -45,6 +45,10 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "${REPO_ROOT}"
 
+# The CORS origin rule — ONE definition, shared with the canonical
+# deployment, so the two can never drift apart.
+source "${REPO_ROOT}/scripts/cors_origins.sh"
+
 # -----------------------------------------------------------------------------
 # Configuration
 # -----------------------------------------------------------------------------
@@ -184,27 +188,12 @@ validate_config() {
     fi
 
     # --- the CORS allow-list ----------------------------------------------
+    # The rule lives in ONE place — scripts/cors_origins.sh — so the demo
+    # stack and the canonical deployment can never drift apart.
     if [ -n "${CORS_ALLOWED_ORIGINS:-}" ]; then
-        local entry
-        for entry in $(printf '%s' "${CORS_ALLOWED_ORIGINS}" | tr ',' ' '); do
-            entry="$(printf '%s' "${entry}" | tr -d '[:space:]')"
-            [ -n "${entry}" ] || continue
-            if [ "${entry}" = "*" ]; then
-                fail "CORS_ALLOWED_ORIGINS must not contain '*': a wildcard origin lets any website read authenticated responses."
-            fi
-            case "${entry}" in
-                http://*|https://*) ;;
-                *) fail "CORS_ALLOWED_ORIGINS entry '${entry}' is not a full origin. Use scheme://host[:port]." ;;
-            esac
-            # An origin must not carry a path.  The scheme separator is
-            # "://", so any further "/" is a path separator.  The pattern
-            # "*//*" matches a "/" that comes AFTER the "://" — a bare
-            # "*/*/*" would also match "http://host", because a glob
-            # segment may be empty.
-            case "${entry}" in
-                *///*) fail "CORS_ALLOWED_ORIGINS entry '${entry}' must be an origin without a path." ;;
-            esac
-        done
+        if ! check_cors_allow_list "${CORS_ALLOWED_ORIGINS}"; then
+            fail "${CORS_ERROR_MESSAGE}"
+        fi
     fi
 
     # --- the ML artifact --------------------------------------------------
@@ -309,27 +298,39 @@ container_names_of_project() {
     if command -v podman >/dev/null 2>&1; then
         found="$(podman ps \
             --filter "label=com.docker.compose.project=${COMPOSE_PROJECT_NAME}" \
-            --format '{{.Names}}' 2>/dev/null)"
+            --format '{{.Names}}' 2>/dev/null || true)"
         if [ -z "${found}" ]; then
             found="$(podman ps \
                 --filter "label=io.podman.compose.project=${COMPOSE_PROJECT_NAME}" \
-                --format '{{.Names}}' 2>/dev/null)"
+                --format '{{.Names}}' 2>/dev/null || true)"
         fi
         [ -n "${found}" ] && { printf '%s\n' "${found}"; return 0; }
     fi
 
     found="$(docker ps \
         --filter "label=com.docker.compose.project=${COMPOSE_PROJECT_NAME}" \
-        --format '{{.Names}}' 2>/dev/null)"
+        --format '{{.Names}}' 2>/dev/null || true)"
     [ -n "${found}" ] && { printf '%s\n' "${found}"; return 0; }
 
     return 0
 }
 
 # The published ports of one container.
+#
+# The Podman branch must NOT short-circuit on the exit status alone: on a
+# host where BOTH runtimes are installed but the containers belong to
+# Docker, ``podman port`` exits 0 and prints NOTHING.  A bare
+# ``podman port "$1" && return 0`` would therefore return an EMPTY result
+# and never reach the Docker fallback — and every port of this project's
+# own container would be reported as a conflict.
 container_ports_of() {
     if command -v podman >/dev/null 2>&1; then
-        podman port "$1" 2>/dev/null && return 0
+        local podman_ports
+        podman_ports="$(podman port "$1" 2>/dev/null || true)"
+        if [ -n "${podman_ports}" ]; then
+            printf '%s\n' "${podman_ports}"
+            return 0
+        fi
     fi
     docker port "$1" 2>/dev/null || true
 }
@@ -892,7 +893,21 @@ cmd_verify() {
     load_env
     validate_config
     log "running the demo acceptance checks"
-    python3 scripts/demo_verify.py
+
+    # The acceptance checks are the demo SCENARIOS: they drive the demo
+    # stack's own API over HTTP and read the demo stack's own databases.
+    #
+    # They are exported into the environment here, because the scenario
+    # script reads the shell — and a shell that still carries another
+    # stack's variables would otherwise send the checks to the WRONG
+    # stack.  `CORE_APP_URL` is the authority for the API address, so the
+    # checks can never drift onto a hard-coded port.
+    CORE_APP_URL="${CORE_APP_URL:-http://${APP_HOST}:${APP_PORT}}"
+    export CORE_APP_URL
+    export CORE_DATABASE_URL DETECTION_DATABASE_URL ML_DATABASE_URL
+    export DEMO_API_BASE_URL="${CORE_APP_URL}"
+
+    python3 scripts/demo_scenarios.py --all
 }
 
 usage() {
@@ -903,7 +918,7 @@ usage: scripts/demo_stack.sh <command>
   stop      stop everything (the demo volumes are KEPT)
   restart   stop and start again (the data must survive)
   status    show what is running and the real state of Core, Detection and ML
-  verify    run the demo acceptance checks
+  verify    run the demo acceptance checks (the demo scenarios)
   logs      tail the API log
   logs-all  show the tail of every component log
   reset     stop and DESTROY the demo volumes (deletes all demo data - asks first)

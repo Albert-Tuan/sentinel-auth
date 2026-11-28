@@ -30,6 +30,28 @@ export default tseslint.config(
     },
   },
   {
+    // The Playwright suite is NOT React code.
+    //
+    // Two of the rules above misfire on it:
+    //
+    //   - `react-hooks/rules-of-hooks` complains about a fixture that
+    //     is named `manifest` or `api` and calls `use()` — but `use`
+    //     here is PLAYWRIGHT's use, not React's;
+    //   - `no-empty-pattern` complains about Playwright's fixture
+    //     signature `async ({}, use) => …`, which is the documented
+    //     way to declare a fixture that depends on no other fixture.
+    //
+    // Turning the rules off for this directory is more honest than
+    // renaming the fixtures to satisfy a React rule that does not
+    // apply to them.
+    files: ['e2e/**/*.{ts,tsx}'],
+    rules: {
+      'react-hooks/rules-of-hooks': 'off',
+      'react-hooks/exhaustive-deps': 'off',
+      'no-empty-pattern': 'off',
+    },
+  },
+  {
     // Test files may use `any` and console freely.
     files: ['**/*.test.{ts,tsx}', 'src/test/**/*.{ts,tsx}'],
     languageOptions: {
