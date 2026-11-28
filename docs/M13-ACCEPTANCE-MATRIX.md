@@ -1257,6 +1257,7 @@ against the OLD code first.
 | Command | `bash scripts/e2e_run.sh --no-start` | **18 passed**, 0 skipped |
 | Command | `browser → probe → browser → probe`, twice, one stack, no reset | 18 + 18 browser scenarios and 13 + 13 probe checks, **0 flaky / 0 retry** |
 | CI run | [`46154841968`](https://github.com/Albert-Tuan/sentinel-auth/actions/runs/46154841968) | **5 of 5 jobs green**, head `0e4147d` — `collected=1586 passed=1586 failed=0 skipped=0`, HTTP smoke **79 passed**, frontend **265 + 50 passed**, browser E2E **18 passed**, pre-token probe **13 checks passed, 0 failed** |
+| CI run (the rehearsal fix) | [`46159379858`](https://github.com/Albert-Tuan/sentinel-auth/actions/runs/46159379858) | **5 of 5 jobs green**, head `b53c197` — the three operating-instruction defects of section 15.3, the corrected documentation and the handoff document |
 
 The suite that proves the contract mirrors the application's own
 constants is `TestTheContractMirrorAgreesWithTheApplication` — 7 tests

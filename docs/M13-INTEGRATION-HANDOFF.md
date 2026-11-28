@@ -17,11 +17,17 @@ been changed, and neither `dev` nor `main` has been touched.
 |---|---|---|
 | `origin/dev` | `377e8c88a2b68f619c5ddc7512bdb398c66ee6f1` | `Merge PR #20: Stitch-first M12 frontend integration` |
 | PR #21 head | `dd352791807bcd1b9586220269d6b369b24840a3` | `feature/m13-demo-foundation` → `dev` |
-| PR #22 head | `a0976f90f00cb9b62119d111ea8f85ca50380060` | `feature/m13-browser-e2e` → `feature/m13-demo-foundation` |
+| PR #22 head | `b53c1976e601167d00a2d37c7fc488f73b2358af` | `feature/m13-browser-e2e` → `feature/m13-demo-foundation` |
 | code SHA (F1–F4 closed) | `0e4147d` | inside PR #22 |
 | docs SHA | `a0976f9` | inside PR #22, acceptance matrix only |
+| rehearsal fix SHA | `b53c197` | inside PR #22 — the three operating-instruction defects the rehearsal found, plus the handoff document |
 
-**Reference CI run:** `46155280710` — 5/5 jobs green on `a0976f9`.
+**Reference CI runs:**
+
+| Run | Head | Result |
+|---|---|---|
+| `46155280710` | `a0976f9` | 5/5 jobs green — the F1–F4 baseline |
+| `46159379858` | `b53c197` | 5/5 jobs green — the current PR #22 head |
 
 ### 1.1 The ancestry
 
@@ -30,7 +36,7 @@ been changed, and neither `dev` nor `main` has been touched.
    │
    └─ dd35279  PR #21 head  (13 commits on top of dev)
          │
-         └─ a0976f9  PR #22 head  (23 commits on top of PR #21)
+         └─ b53c197  PR #22 head  (24 commits on top of PR #21)
 ```
 
 * `git merge-base --is-ancestor origin/dev origin/feature/m13-demo-foundation` → **yes**.
@@ -93,33 +99,33 @@ was changed, no PR was merged, and the branch was never pushed.
 git worktree add /tmp/m13-integration-sim -b sim/m13-integration origin/dev
 cd /tmp/m13-integration-sim
 git merge --no-ff --no-edit dd352791807bcd1b9586220269d6b369b24840a3   # PR #21
-git merge --no-ff --no-edit a0976f90f00cb9b62119d111ea8f85ca50380060   # PR #22
+git merge --no-ff --no-edit b53c1976e601167d00a2d37c7fc488f73b2358af   # PR #22
 ```
 
 **Result: no conflict in either merge.**
 
 | Tree | SHA |
 |---|---|
-| integration candidate (`sim/m13-integration`) | `b6223d4fcbcd83c62bb2a4bb6d8d01ba6c87bab7` |
-| PR #22 head (`a0976f9`) | `b6223d4fcbcd83c62bb2a4bb6d8d01ba6c87bab7` |
+| integration candidate (`sim/final`) | `5d1192f018ffe37e3c43f93b1906b02ff22d8cbd` |
+| PR #22 head (`b53c197`) | `5d1192f018ffe37e3c43f93b1906b02ff22d8cbd` |
 
 ```
-git diff --stat a0976f90f00cb9b62119d111ea8f85ca50380060 HEAD
+git diff --stat b53c1976e601167d00a2d37c7fc488f73b2358af HEAD
 # (no output — the trees are identical)
 ```
 
-**The candidate tree is byte-for-byte the tree that CI run `46155280710`
+**The candidate tree is byte-for-byte the tree that CI run `46159379858`
 verified.** The integration introduces no change of its own, so there is
 nothing new to regress and no reason to re-run the full regression suite.
 The regression evidence already on record applies unchanged:
 
 | Suite | Result | Provenance |
 |---|---|---|
-| Backend (pytest) | 1586 passed, 0 skipped | CI run `46155280710` |
-| Frontend unit / integration | 265 / 50 | CI run `46155280710` |
-| Browser E2E (Chromium) | 18 passed | CI run `46155280710` |
-| Pre-token probe | 13 checks passed | CI run `46155280710` |
-| HTTP smoke | 79 checks | CI run `46155280710` |
+| Backend (pytest) | 1586 passed, 0 skipped | CI run `46159379858` |
+| Frontend unit / integration | 265 / 50 | CI run `46159379858` |
+| Browser E2E (Chromium) | 18 passed | CI run `46159379858` |
+| Pre-token probe | 13 checks passed | CI run `46159379858` |
+| HTTP smoke | 79 checks | CI run `46159379858` |
 
 ### 2.3 The alternatives, and why they are worse
 
@@ -128,7 +134,7 @@ throw-away branch:
 
 ```
 git merge --squash dd352791807bcd1b9586220269d6b369b24840a3 && git commit
-git merge --no-ff --no-edit a0976f90f00cb9b62119d111ea8f85ca50380060
+git merge --no-ff --no-edit b53c1976e601167d00a2d37c7fc488f73b2358af
 ```
 
 Result: **three `add/add` conflicts** — `docs/M13-ACCEPTANCE-MATRIX.md`,
@@ -146,14 +152,14 @@ mechanical merge.
 files.
 
 **Rebase PR #22 onto PR #21.** Simulated; it **succeeded cleanly** and
-produced the **same tree** `b6223d4f`. It rewrites all 23 commits
+produced the **same tree** `5d1192f0`. It rewrites all 24 commits
 though, so every commit gets a new SHA and the comparison against the
 already-verified CI run becomes a diff between two histories rather than
 a comparison between two trees. The merge-commit method reaches the same
 tree with no rewrite and no ambiguity.
 
 **Merge PR #22 directly onto `dev` without merging PR #21 first.**
-Simulated; it also produced the same tree `b6223d4f`. It is *not*
+Simulated; it also produced the same tree `5d1192f0`. It is *not*
 recommended: it would put PR #22's changes on `dev` while leaving PR #21
 unmerged, so `dev` would carry the browser suite and the probe without
 the demo foundation they are written against. It also leaves PR #21
@@ -170,7 +176,8 @@ re-based onto the new `dev`.**
 
 A **separate worktree** was created from the integration candidate, at
 `/tmp/m13-rehearsal-clean`, checked out detached at the candidate commit
-`2e56ecb`. Nothing was copied into it from the working environment: no
+`9bce86d` (the integration candidate at the time of the rehearsal).
+Nothing was copied into it from the working environment: no
 `.env`, no virtualenv, no `node_modules`, no configuration file.
 
 The environment was created from the **template**, as the documentation
