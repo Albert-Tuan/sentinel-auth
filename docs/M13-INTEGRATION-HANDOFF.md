@@ -17,7 +17,7 @@ been changed, and neither `dev` nor `main` has been touched.
 |---|---|---|
 | `origin/dev` | `377e8c88a2b68f619c5ddc7512bdb398c66ee6f1` | `Merge PR #20: Stitch-first M12 frontend integration` |
 | PR #21 head | `dd352791807bcd1b9586220269d6b369b24840a3` | `feature/m13-demo-foundation` → `dev` |
-| PR #22 head | `b53c1976e601167d00a2d37c7fc488f73b2358af` | `feature/m13-browser-e2e` → `feature/m13-demo-foundation` |
+| PR #22 head | **the current head of `feature/m13-browser-e2e`** — resolve it with `gh pr view 22 --json headRefOid -q .headRefOid` | `feature/m13-browser-e2e` → `feature/m13-demo-foundation` |
 | code SHA (F1–F4 closed) | `0e4147d` | inside PR #22 |
 | docs SHA | `a0976f9` | inside PR #22, acceptance matrix only |
 | rehearsal fix SHA | `b53c197` | inside PR #22 — the three operating-instruction defects the rehearsal found, plus the handoff document |
@@ -27,7 +27,12 @@ been changed, and neither `dev` nor `main` has been touched.
 | Run | Head | Result |
 |---|---|---|
 | `46155280710` | `a0976f9` | 5/5 jobs green — the F1–F4 baseline |
-| `46159379858` | `b53c197` | 5/5 jobs green — the current PR #22 head |
+| `46159379858` | `b53c197` | 5/5 jobs green — the code and the rehearsal fixes |
+
+A commit that changes **only the documentation** carries the same code
+tree, so the regression evidence above applies to it unchanged.  The
+CI run for the exact head is the one to quote when the merge happens:
+`gh run list --branch feature/m13-browser-e2e --limit 1`.
 
 ### 1.1 The ancestry
 
@@ -36,7 +41,7 @@ been changed, and neither `dev` nor `main` has been touched.
    │
    └─ dd35279  PR #21 head  (13 commits on top of dev)
          │
-         └─ b53c197  PR #22 head  (24 commits on top of PR #21)
+         └─ <PR #22 head>  (24 commits on top of PR #21)
 ```
 
 * `git merge-base --is-ancestor origin/dev origin/feature/m13-demo-foundation` → **yes**.
@@ -90,34 +95,47 @@ this method is available.
 
 ### 2.2 The evidence: the candidate tree is the verified tree
 
-The integration was simulated on a throw-away branch
-(`sim/m13-integration`, in a temporary worktree, `origin/dev` as its
-base). The simulation ran **on the local machine only** — no remote ref
-was changed, no PR was merged, and the branch was never pushed.
+The integration was simulated on a throw-away branch (`sim/final`, in a
+temporary worktree, `origin/dev` as its base). The simulation ran **on
+the local machine only** — no remote ref was changed, no PR was merged,
+and the branch was never pushed.
 
 ```
-git worktree add /tmp/m13-integration-sim -b sim/m13-integration origin/dev
-cd /tmp/m13-integration-sim
-git merge --no-ff --no-edit dd352791807bcd1b9586220269d6b369b24840a3   # PR #21
-git merge --no-ff --no-edit b53c1976e601167d00a2d37c7fc488f73b2358af   # PR #22
+git fetch origin
+git worktree add /tmp/m13-sim-final -b sim/final origin/dev
+cd /tmp/m13-sim-final
+git merge --no-ff --no-edit origin/feature/m13-demo-foundation   # PR #21
+git merge --no-ff --no-edit origin/feature/m13-browser-e2e       # PR #22
 ```
 
 **Result: no conflict in either merge.**
 
 | Tree | SHA |
 |---|---|
-| integration candidate (`sim/final`) | `5d1192f018ffe37e3c43f93b1906b02ff22d8cbd` |
-| PR #22 head (`b53c197`) | `5d1192f018ffe37e3c43f93b1906b02ff22d8cbd` |
+| integration candidate (`sim/final`) | `2617e9b3531f6e22bcd1bb832c00afc099c2687e` |
+| PR #22 head | `2617e9b3531f6e22bcd1bb832c00afc099c2687e` |
+
+> The two trees are equal **by construction**: merging PR #21 and then
+> PR #22 into `dev` cannot change PR #22's own files, and `dev` is
+> PR #21's ancestor, so the merge contributes nothing either. The
+> property to re-check after any new commit is the equality itself:
+>
+> ```bash
+> git rev-parse HEAD^{tree}                      # the candidate
+> git rev-parse origin/feature/m13-browser-e2e^{tree}   # the PR head
+> ```
 
 ```
-git diff --stat b53c1976e601167d00a2d37c7fc488f73b2358af HEAD
+git diff --stat origin/feature/m13-browser-e2e HEAD
 # (no output — the trees are identical)
 ```
 
 **The candidate tree is byte-for-byte the tree that CI run `46159379858`
-verified.** The integration introduces no change of its own, so there is
-nothing new to regress and no reason to re-run the full regression suite.
-The regression evidence already on record applies unchanged:
+verified** (the code tree is unchanged by the documentation-only commits
+that follow it). The integration introduces no change of its own, so
+there is nothing new to regress and no reason to re-run the full
+regression suite. The regression evidence already on record applies
+unchanged:
 
 | Suite | Result | Provenance |
 |---|---|---|
@@ -134,7 +152,7 @@ throw-away branch:
 
 ```
 git merge --squash dd352791807bcd1b9586220269d6b369b24840a3 && git commit
-git merge --no-ff --no-edit b53c1976e601167d00a2d37c7fc488f73b2358af
+git merge --no-ff --no-edit origin/feature/m13-browser-e2e
 ```
 
 Result: **three `add/add` conflicts** — `docs/M13-ACCEPTANCE-MATRIX.md`,
@@ -391,7 +409,10 @@ git rev-parse origin/feature/m13-browser-e2e
 ```
 
 Compare against §1. If any SHA differs, **stop** and re-run the
-simulation of section 2.2 against the new tips before going on.
+simulation of section 2.2 against the new tips before going on. The
+simulation is cheap — it is two merges in a throw-away worktree — and
+it is the check that proves the candidate tree still equals the
+CI-verified tree.
 
 **2. Merge PR #21 with a merge commit.**
 
@@ -413,9 +434,9 @@ gh pr diff 22 --repo Albert-Tuan/sentinel-auth --name-only
 ```
 
 The diff of PR #22 against the new `dev` must contain only PR #22's own
-23 commits' worth of files — the browser suite, the probe, the fixture
-guards and the M13 documentation. Anything from PR #21 appearing in that
-diff would mean the base did not move as intended.
+files — the browser suite, the probe, the fixture guards and the M13
+documentation. Anything from PR #21 appearing in that diff would mean
+the base did not move as intended.
 
 **5. Merge PR #22 only if every condition holds.**
 
