@@ -406,9 +406,9 @@ làm được.
 
 | Con số | Nguồn |
 |---|---|
-| 1487 test backend, 0 skip | CI run 46099392584 |
-| 18 kịch bản Chromium, 0 mock | CI run 46099392584 |
-| 111 test an toàn đích database | CI run 46099392584 |
+| 1487 test backend, 0 skip | CI run 46142827844 |
+| 18 kịch bản Chromium, 0 mock | CI run 46142827844 |
+| 111 test an toàn đích database | CI run 46142827844 |
 | 55 check demo scenario | chạy local |
 | 7 check probe pre-token | local + CI |
 

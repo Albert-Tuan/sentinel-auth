@@ -10,6 +10,14 @@ it.
 Every figure in this document was produced by running the suite against
 the live demo stack on **2026-11-26** with **Playwright 1.65.1**.
 
+> **The figures below are the ones of that run.** The regression numbers
+> have moved since — the backend suite is 1487 tests now, not 1337 —
+> because the M13.2 hardening round added the destination guard and the
+> pre-token probe. The CURRENT state is reported in
+> [M13-ACCEPTANCE-MATRIX.md](M13-ACCEPTANCE-MATRIX.md), which is the
+> document the acceptance decision rests on. This one is the report of
+> the suite itself.
+
 ---
 
 ## 1. The summary
